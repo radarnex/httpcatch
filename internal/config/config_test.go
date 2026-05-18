@@ -21,6 +21,12 @@ func TestLoad_DefaultsWhenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	if cfg.Sinks.SQLite {
+		t.Errorf("sqlite sink should be off by default")
+	}
+	if cfg.Sinks.SQLitePath != DefaultSQLitePath {
+		t.Errorf("sqlite_path: got %q want %q", cfg.Sinks.SQLitePath, DefaultSQLitePath)
+	}
 	if cfg.CapturePort != DefaultCapturePort {
 		t.Errorf("capture_port: got %d want %d", cfg.CapturePort, DefaultCapturePort)
 	}
@@ -222,6 +228,49 @@ func TestLoad_RejectsZeroMemoryCapacity(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "memory_capacity") {
 		t.Errorf("error %q does not mention memory_capacity", err)
+	}
+}
+
+func TestLoad_SQLiteFromYAMLAndEnv(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `
+sinks:
+  sqlite: true
+  sqlite_path: /tmp/yaml.db
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, noEnv)
+	if err != nil {
+		t.Fatalf("Load yaml: %v", err)
+	}
+	if !cfg.Sinks.SQLite {
+		t.Errorf("sqlite sink should be enabled from yaml")
+	}
+	if cfg.Sinks.SQLitePath != "/tmp/yaml.db" {
+		t.Errorf("sqlite_path: got %q want /tmp/yaml.db", cfg.Sinks.SQLitePath)
+	}
+
+	env := mapEnv(map[string]string{
+		"HTTPCATCH_SINKS":       "sqlite",
+		"HTTPCATCH_SQLITE_PATH": "/tmp/env.db",
+	})
+	cfg, err = Load(path, env)
+	if err != nil {
+		t.Fatalf("Load env: %v", err)
+	}
+	if !cfg.Sinks.SQLite {
+		t.Errorf("sqlite sink should be enabled via HTTPCATCH_SINKS")
+	}
+	if cfg.Sinks.SQLitePath != "/tmp/env.db" {
+		t.Errorf("sqlite_path: got %q want /tmp/env.db", cfg.Sinks.SQLitePath)
+	}
+	if cfg.Sinks.Stdout || cfg.Sinks.Memory {
+		t.Errorf("HTTPCATCH_SINKS=sqlite should disable stdout/memory")
 	}
 }
 

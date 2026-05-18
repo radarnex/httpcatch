@@ -34,9 +34,10 @@ type App struct {
 	Handler  http.Handler
 	Sinks    []sinks.Sink
 	Memory   *sinks.MemorySink
+	SQLite   *sinks.SQLiteSink
 }
 
-func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extraSinks ...sinks.Sink) *App {
+func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extraSinks ...sinks.Sink) (*App, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -51,6 +52,15 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 	if cfg.Sinks.Memory {
 		memSink = sinks.NewMemorySink(cfg.Sinks.MemoryCapacity)
 		ss = append(ss, memSink)
+	}
+	var sqliteSink *sinks.SQLiteSink
+	if cfg.Sinks.SQLite {
+		s, err := sinks.NewSQLiteSink(cfg.Sinks.SQLitePath)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite sink: %w", err)
+		}
+		sqliteSink = s
+		ss = append(ss, sqliteSink)
 	}
 	ss = append(ss, extraSinks...)
 
@@ -74,7 +84,8 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		Handler:  handler,
 		Sinks:    ss,
 		Memory:   memSink,
-	}
+		SQLite:   sqliteSink,
+	}, nil
 }
 
 func (a *App) EmitStartupWarnings() {
@@ -126,5 +137,10 @@ func (a *App) shutdown() {
 	case <-time.After(shutdownDrainTimeout):
 		a.Logger.Warn("workers did not drain within timeout; exiting with possible record loss",
 			"timeout", shutdownDrainTimeout)
+	}
+	if a.SQLite != nil {
+		if err := a.SQLite.Close(); err != nil {
+			a.Logger.Warn("sqlite close failed", "err", err)
+		}
 	}
 }

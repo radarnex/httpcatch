@@ -17,12 +17,15 @@ const (
 	DefaultBodyCap        = 1 << 20
 	DefaultServiceHeader  = "X-Httpcatch-Service"
 	DefaultMemoryCapacity = 1000
+	DefaultSQLitePath     = "./httpcatch.db"
 )
 
 type SinksConfig struct {
-	Stdout         bool `yaml:"stdout"`
-	Memory         bool `yaml:"memory"`
-	MemoryCapacity int  `yaml:"memory_capacity"`
+	Stdout         bool   `yaml:"stdout"`
+	Memory         bool   `yaml:"memory"`
+	MemoryCapacity int    `yaml:"memory_capacity"`
+	SQLite         bool   `yaml:"sqlite"`
+	SQLitePath     string `yaml:"sqlite_path"`
 }
 
 type Config struct {
@@ -43,14 +46,17 @@ func Defaults() Config {
 		ServiceHeader: DefaultServiceHeader,
 		Sinks: SinksConfig{
 			MemoryCapacity: DefaultMemoryCapacity,
+			SQLitePath:     DefaultSQLitePath,
 		},
 	}
 }
 
 type rawSinks struct {
-	Stdout         *bool `yaml:"stdout"`
-	Memory         *bool `yaml:"memory"`
-	MemoryCapacity *int  `yaml:"memory_capacity"`
+	Stdout         *bool   `yaml:"stdout"`
+	Memory         *bool   `yaml:"memory"`
+	MemoryCapacity *int    `yaml:"memory_capacity"`
+	SQLite         *bool   `yaml:"sqlite"`
+	SQLitePath     *string `yaml:"sqlite_path"`
 }
 
 // Pointer fields distinguish "absent" from "set to zero" so the YAML cannot
@@ -114,6 +120,12 @@ func applyRaw(cfg *Config, raw rawConfig) {
 	if raw.Sinks.MemoryCapacity != nil {
 		cfg.Sinks.MemoryCapacity = *raw.Sinks.MemoryCapacity
 	}
+	if raw.Sinks.SQLite != nil {
+		cfg.Sinks.SQLite = *raw.Sinks.SQLite
+	}
+	if raw.Sinks.SQLitePath != nil {
+		cfg.Sinks.SQLitePath = *raw.Sinks.SQLitePath
+	}
 }
 
 func applyEnv(cfg *Config, env func(string) string) error {
@@ -140,15 +152,21 @@ func applyEnv(cfg *Config, env func(string) string) error {
 	if v := env("HTTPCATCH_SERVICE_HEADER"); v != "" {
 		cfg.ServiceHeader = v
 	}
+	if v := env("HTTPCATCH_SQLITE_PATH"); v != "" {
+		cfg.Sinks.SQLitePath = v
+	}
 	if v := env("HTTPCATCH_SINKS"); v != "" {
 		cfg.Sinks.Stdout = false
 		cfg.Sinks.Memory = false
+		cfg.Sinks.SQLite = false
 		for _, name := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' }) {
 			switch strings.ToLower(strings.TrimSpace(name)) {
 			case "stdout":
 				cfg.Sinks.Stdout = true
 			case "memory":
 				cfg.Sinks.Memory = true
+			case "sqlite":
+				cfg.Sinks.SQLite = true
 			default:
 				return fmt.Errorf("HTTPCATCH_SINKS: unknown sink %q", name)
 			}
@@ -173,6 +191,9 @@ func (c Config) Validate() error {
 	}
 	if c.Sinks.MemoryCapacity < 1 {
 		errs = append(errs, fmt.Errorf("sinks.memory_capacity: must be >= 1, got %d", c.Sinks.MemoryCapacity))
+	}
+	if c.Sinks.SQLite && c.Sinks.SQLitePath == "" {
+		errs = append(errs, fmt.Errorf("sinks.sqlite_path: must be set when sinks.sqlite is true"))
 	}
 	return errors.Join(errs...)
 }

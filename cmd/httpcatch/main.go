@@ -31,7 +31,10 @@ func run() error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	a := app.Build(cfg, logger, os.Stdout)
+	a, err := app.Build(cfg, logger, os.Stdout)
+	if err != nil {
+		return err
+	}
 	a.EmitStartupWarnings()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

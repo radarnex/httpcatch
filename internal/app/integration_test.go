@@ -3,6 +3,7 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,7 +56,10 @@ func testLogger(buf io.Writer) *slog.Logger {
 
 func runPipeline(t *testing.T, cfg config.Config, stdoutBuf io.Writer, logBuf io.Writer, extras ...sinks.Sink) (*app.App, *httptest.Server, func()) {
 	t.Helper()
-	a := app.Build(cfg, testLogger(logBuf), stdoutBuf, extras...)
+	a, err := app.Build(cfg, testLogger(logBuf), stdoutBuf, extras...)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
 	a.EmitStartupWarnings()
 
 	ts := httptest.NewServer(a.Handler)
@@ -63,6 +70,9 @@ func runPipeline(t *testing.T, cfg config.Config, stdoutBuf io.Writer, logBuf io
 		ts.Close()
 		a.Queue.Close()
 		a.Workers.Wait()
+		if a.SQLite != nil {
+			_ = a.SQLite.Close()
+		}
 		cancel()
 	}
 	return a, ts, teardown
@@ -445,7 +455,10 @@ func TestIntegration_StartupWarnings_ZeroSinks(t *testing.T) {
 	// No sinks enabled.
 
 	var logBuf bytes.Buffer
-	a := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
 	a.EmitStartupWarnings()
 
 	out := logBuf.String()
@@ -852,7 +865,10 @@ func TestIntegration_StartupWarnings_UnredactedAlwaysFires(t *testing.T) {
 	cfg.Sinks.Stdout = true
 
 	var logBuf bytes.Buffer
-	a := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
 	a.EmitStartupWarnings()
 
 	if !strings.Contains(logBuf.String(), "unredacted") {
@@ -860,5 +876,264 @@ func TestIntegration_StartupWarnings_UnredactedAlwaysFires(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(logBuf.String()), "zero sinks") {
 		t.Errorf("zero-sinks warning should not fire when stdout is enabled")
+	}
+}
+
+type sqliteRow struct {
+	id                                               string
+	timestamp                                        int64
+	service, serviceSource, host, corrID, corrSource string
+	method, path, sourceIP, contentType              string
+	queryJSON, headersJSON, cookiesJSON              string
+	body                                             []byte
+	truncated, origSize                              int
+}
+
+func sqliteCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM captured_requests").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	return n
+}
+
+func readAllSQLite(t *testing.T, db *sql.DB) []sqliteRow {
+	t.Helper()
+	rows, err := db.Query(`SELECT id, timestamp, service, service_source, host,
+        correlation_id, correlation_source, method, path, source_ip,
+        content_type, query, headers, cookies, body, body_truncated,
+        body_original_size FROM captured_requests`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var out []sqliteRow
+	for rows.Next() {
+		var r sqliteRow
+		if err := rows.Scan(&r.id, &r.timestamp, &r.service, &r.serviceSource,
+			&r.host, &r.corrID, &r.corrSource, &r.method, &r.path,
+			&r.sourceIP, &r.contentType, &r.queryJSON, &r.headersJSON,
+			&r.cookiesJSON, &r.body, &r.truncated, &r.origSize); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func TestIntegration_AllThreeSinks_Consistent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "fan-out.db")
+
+	cfg := config.Defaults()
+	cfg.Workers = 2
+	cfg.QueueSize = 256
+	cfg.BodyCap = 256
+	cfg.Sinks.Stdout = true
+	cfg.Sinks.Memory = true
+	cfg.Sinks.MemoryCapacity = 100
+	cfg.Sinks.SQLite = true
+	cfg.Sinks.SQLitePath = dbPath
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	if a.SQLite == nil {
+		t.Fatal("expected app.SQLite to be set when sinks.sqlite is enabled")
+	}
+
+	type fired struct {
+		marker    string
+		method    string
+		path      string
+		bodyLen   int
+		wantTrunc bool
+		hdr       http.Header
+	}
+	cases := []fired{
+		{
+			marker: "full-headers", method: "POST", path: "/api/orders", bodyLen: 50,
+			hdr: http.Header{
+				capture.DefaultServiceHeader: []string{"orders"},
+				capture.RequestIDHeader:      []string{"req-1"},
+			},
+		},
+		{
+			marker: "trace-only", method: "PUT", path: "/widgets/42", bodyLen: 80,
+			hdr: http.Header{
+				capture.TraceparentHeader: []string{"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+			},
+		},
+		{
+			marker: "no-corr", method: "DELETE", path: "/cleanup", bodyLen: 10,
+			hdr: http.Header{},
+		},
+		{
+			marker: "body-over-cap", method: "POST", path: "/upload", bodyLen: 512, wantTrunc: true,
+			hdr: http.Header{},
+		},
+		{
+			marker: "x-correlation-ignored", method: "PATCH", path: "/p", bodyLen: 5,
+			hdr: http.Header{"X-Correlation-ID": []string{"ignored"}},
+		},
+	}
+	for _, c := range cases {
+		hdr := c.hdr.Clone()
+		hdr.Set("X-Test-Marker", c.marker)
+		body := bytes.Repeat([]byte("x"), c.bodyLen)
+		resp := fire(t, ts.URL+c.path, c.method, body, hdr)
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("%s: status %d want 202", c.marker, resp.StatusCode)
+		}
+	}
+
+	sqliteDB := a.SQLite.DB()
+	if !waitFor(func() bool {
+		return stdoutBuf.CountLines() >= len(cases) &&
+			a.Memory.Len() >= len(cases) &&
+			sqliteCount(t, sqliteDB) >= len(cases)
+	}, 10*time.Second) {
+		t.Fatalf("timed out: stdout=%d memory=%d sqlite=%d (want >= %d)",
+			stdoutBuf.CountLines(), a.Memory.Len(), sqliteCount(t, sqliteDB), len(cases))
+	}
+	sqliteRows := readAllSQLite(t, sqliteDB)
+
+	stdoutRecs, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode stdout: %v", err)
+	}
+	memRecs := a.Memory.Recent(len(cases))
+
+	stdoutByMarker := map[string]capture.CapturedRecord{}
+	for _, r := range stdoutRecs {
+		m := r.Headers["X-Test-Marker"]
+		if len(m) == 1 {
+			stdoutByMarker[m[0]] = r
+		}
+	}
+	memByMarker := map[string]capture.CapturedRecord{}
+	for _, r := range memRecs {
+		m := r.Headers["X-Test-Marker"]
+		if len(m) == 1 {
+			memByMarker[m[0]] = *r
+		}
+	}
+	sqliteByID := map[string]sqliteRow{}
+	for _, r := range sqliteRows {
+		sqliteByID[r.id] = r
+	}
+
+	for _, c := range cases {
+		std, ok := stdoutByMarker[c.marker]
+		if !ok {
+			t.Fatalf("%s: missing from stdout", c.marker)
+		}
+		mem, ok := memByMarker[c.marker]
+		if !ok {
+			t.Fatalf("%s: missing from memory", c.marker)
+		}
+		sq, ok := sqliteByID[std.ID]
+		if !ok {
+			t.Fatalf("%s: id %q missing from sqlite", c.marker, std.ID)
+		}
+
+		if std.ID != mem.ID {
+			t.Errorf("%s: id stdout=%q memory=%q", c.marker, std.ID, mem.ID)
+		}
+		if std.Method != mem.Method || std.Method != sq.method {
+			t.Errorf("%s: method stdout=%q memory=%q sqlite=%q",
+				c.marker, std.Method, mem.Method, sq.method)
+		}
+		if std.Path != mem.Path || std.Path != sq.path {
+			t.Errorf("%s: path stdout=%q memory=%q sqlite=%q",
+				c.marker, std.Path, mem.Path, sq.path)
+		}
+		if std.Service != sq.service {
+			t.Errorf("%s: service stdout=%q sqlite=%q", c.marker, std.Service, sq.service)
+		}
+		if std.ServiceSource != sq.serviceSource {
+			t.Errorf("%s: service_source stdout=%q sqlite=%q",
+				c.marker, std.ServiceSource, sq.serviceSource)
+		}
+		if std.CorrelationID != sq.corrID {
+			t.Errorf("%s: correlation_id stdout=%q sqlite=%q",
+				c.marker, std.CorrelationID, sq.corrID)
+		}
+		if std.CorrelationSource != sq.corrSource {
+			t.Errorf("%s: correlation_source stdout=%q sqlite=%q",
+				c.marker, std.CorrelationSource, sq.corrSource)
+		}
+		if std.BodyOriginalSize != sq.origSize {
+			t.Errorf("%s: body_original_size stdout=%d sqlite=%d",
+				c.marker, std.BodyOriginalSize, sq.origSize)
+		}
+		if (sq.truncated == 1) != std.BodyTruncated {
+			t.Errorf("%s: body_truncated stdout=%v sqlite=%d",
+				c.marker, std.BodyTruncated, sq.truncated)
+		}
+		if string(sq.body) != string(std.Body) {
+			t.Errorf("%s: body bytes diverge between stdout and sqlite", c.marker)
+		}
+		if std.Timestamp.UnixNano() != sq.timestamp {
+			t.Errorf("%s: timestamp stdout=%d sqlite=%d",
+				c.marker, std.Timestamp.UnixNano(), sq.timestamp)
+		}
+		host := http.Header(std.Headers).Get(capture.HostHeader)
+		if host != sq.host {
+			t.Errorf("%s: host stdout=%q sqlite=%q", c.marker, host, sq.host)
+		}
+		if c.wantTrunc && sq.truncated != 1 {
+			t.Errorf("%s: expected body_truncated=1 in sqlite", c.marker)
+		}
+	}
+}
+
+func TestIntegration_SQLite_UnwritableDirectoryFailsStartup(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("posix-mode directory permission test")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+
+	dir := t.TempDir()
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	cfg := config.Defaults()
+	cfg.Sinks.SQLite = true
+	cfg.Sinks.SQLitePath = filepath.Join(locked, "x.db")
+
+	var logBuf bytes.Buffer
+	_, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err == nil {
+		t.Fatal("expected app.Build to fail when sqlite directory is unwritable")
+	}
+	if !strings.Contains(err.Error(), "sqlite") {
+		t.Errorf("error %q does not mention sqlite", err)
+	}
+}
+
+func TestIntegration_SQLite_MissingDirectoryFailsStartup(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Sinks.SQLite = true
+	cfg.Sinks.SQLitePath = filepath.Join(t.TempDir(), "nope", "x.db")
+
+	var logBuf bytes.Buffer
+	_, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err == nil {
+		t.Fatal("expected app.Build to fail when sqlite directory does not exist")
 	}
 }
