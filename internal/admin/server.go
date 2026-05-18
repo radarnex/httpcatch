@@ -50,19 +50,15 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources) (*S
 
 	r := chi.NewRouter()
 	r.Get("/healthz", healthzHandler)
-	r.Get("/metrics", metricsHandler(toInternal(sources)))
+	internal := toInternal(sources)
+	r.Get("/metrics", metricsHandler(internal))
 	r.Get("/login", auth.loginPageHandler)
 	r.Post("/auth/login", auth.loginPostHandler)
 	r.Post("/auth/logout", auth.logoutHandler)
 
-	// Placeholder protected route so middleware can be exercised end-to-end.
-	// Issue 04 removes this once the real /status endpoint replaces it.
 	r.Group(func(r chi.Router) {
 		r.Use(Middleware(cfg.Token, store))
-		r.Get("/admin/ping", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = w.Write([]byte("pong"))
-		})
+		r.Get("/status", statusHandler(internal, internal.unredacted))
 	})
 
 	return &Server{

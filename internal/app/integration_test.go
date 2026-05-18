@@ -1858,3 +1858,106 @@ func TestIntegration_Metrics(t *testing.T) {
 		t.Error("httpcatch_captured_without_service_total did not reach 1 within timeout")
 	}
 }
+
+func TestIntegration_Status(t *testing.T) {
+	t.Parallel()
+
+	const token = "integration-test-token-status"
+
+	// A single header rule so IsUnredacted() returns false.
+	cfg := config.Defaults()
+	cfg.Workers = 1
+	cfg.QueueSize = 64
+	cfg.Admin.Token = token
+	cfg.Redaction = config.RedactionConfig{
+		Headers: []string{"x-secret"},
+	}
+
+	a, err := app.Build(cfg, testLogger(io.Discard), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	captureSrv := httptest.NewServer(a.Handler)
+	a.Workers.Start(ctx)
+	adminSrv := httptest.NewServer(a.Admin.Router())
+	defer func() {
+		captureSrv.Close()
+		adminSrv.Close()
+		a.Queue.Close()
+		a.Workers.Wait()
+		cancel()
+	}()
+
+	bearer := func(req *http.Request) *http.Request {
+		req.Header.Set("Authorization", "Bearer "+token)
+		return req
+	}
+	getStatus := func() map[string]any {
+		req, _ := http.NewRequest(http.MethodGet, adminSrv.URL+"/status", nil)
+		resp, err := http.DefaultClient.Do(bearer(req))
+		if err != nil {
+			t.Fatalf("GET /status: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /status: got %d want 200", resp.StatusCode)
+		}
+		var m map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+			t.Fatalf("decode /status: %v", err)
+		}
+		return m
+	}
+
+	// Initial fetch: unredacted false (one header rule configured), all counters 0.
+	m := getStatus()
+	if m["unredacted"] != false {
+		t.Errorf("initial unredacted: got %v want false", m["unredacted"])
+	}
+	counters := m["counters"].(map[string]any)
+	if counters["captured_without_service_total"].(float64) != 0 {
+		t.Errorf("initial without_service_total: got %v want 0", counters["captured_without_service_total"])
+	}
+
+	// Confirm version and build_time are present.
+	if _, ok := m["version"]; !ok {
+		t.Error("status: missing version field")
+	}
+	if _, ok := m["build_time"]; !ok {
+		t.Error("status: missing build_time field")
+	}
+
+	// Fire a raw TCP request with no Host header to bump captured_without_service_total.
+	addr := strings.TrimPrefix(captureSrv.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial capture port: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("POST /u HTTP/1.0\r\nContent-Length: 2\r\n\r\nhi")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, 512)
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, _ := conn.Read(buf)
+	if !strings.Contains(string(buf[:n]), "202 Accepted") {
+		t.Fatalf("expected 202, got: %q", string(buf[:n]))
+	}
+
+	// Wait for the worker to process the record.
+	if !waitFor(func() bool {
+		m2 := getStatus()
+		c2 := m2["counters"].(map[string]any)
+		return c2["captured_without_service_total"].(float64) == 1
+	}, 5*time.Second) {
+		t.Error("captured_without_service_total did not reach 1 within timeout")
+	}
+}
+
+// Ensure the redact package is used via the ruleset wiring in Build; this
+// compile-time reference keeps the import alive if test helpers above change.
+var _ = (*redact.Ruleset)(nil)

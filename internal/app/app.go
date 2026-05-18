@@ -88,6 +88,7 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		CapturedWithoutCorrelationTotal: counters.CapturedWithoutCorrelationTotal,
 		CapturedWithoutServiceTotal:     counters.CapturedWithoutServiceTotal,
 		RedactionErrorsTotal:            ruleset.RedactionErrorsTotal,
+		Unredacted:                      ruleset.IsUnredacted,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("admin server: %w", err)

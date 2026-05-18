@@ -8,14 +8,17 @@ import (
 	"github.com/radarnex/httpcatch/internal/buildinfo"
 )
 
-// MetricSources holds the counter accessors wired in at construction time.
-// Each field is a zero-argument function so the handler reads the live value
-// on every request without caching.
+// MetricSources holds the counter accessors and the unredacted signal wired in
+// at construction time. Each field is a zero-argument function so handlers
+// read the live value on every request without caching.
 type MetricSources struct {
 	DroppedTotal                    func() uint64
 	CapturedWithoutCorrelationTotal func() uint64
 	CapturedWithoutServiceTotal     func() uint64
 	RedactionErrorsTotal            func() uint64
+	// Unredacted reports whether the redaction ruleset has no rules configured.
+	// When true, the UI shows a prominent banner warning the operator.
+	Unredacted func() bool
 }
 
 // metricSources is the package-internal form; identical shape, kept separate
@@ -25,14 +28,39 @@ type metricSources struct {
 	capturedWithoutCorrelationTotal func() uint64
 	capturedWithoutServiceTotal     func() uint64
 	redactionErrorsTotal            func() uint64
+	unredacted                      func() bool
 }
 
+func zeroUint64() uint64 { return 0 }
+func falseBool() bool   { return false }
+
 func toInternal(s MetricSources) metricSources {
+	droppedTotal := s.DroppedTotal
+	if droppedTotal == nil {
+		droppedTotal = zeroUint64
+	}
+	capturedWithoutCorrelationTotal := s.CapturedWithoutCorrelationTotal
+	if capturedWithoutCorrelationTotal == nil {
+		capturedWithoutCorrelationTotal = zeroUint64
+	}
+	capturedWithoutServiceTotal := s.CapturedWithoutServiceTotal
+	if capturedWithoutServiceTotal == nil {
+		capturedWithoutServiceTotal = zeroUint64
+	}
+	redactionErrorsTotal := s.RedactionErrorsTotal
+	if redactionErrorsTotal == nil {
+		redactionErrorsTotal = zeroUint64
+	}
+	unredacted := s.Unredacted
+	if unredacted == nil {
+		unredacted = falseBool
+	}
 	return metricSources{
-		droppedTotal:                    s.DroppedTotal,
-		capturedWithoutCorrelationTotal: s.CapturedWithoutCorrelationTotal,
-		capturedWithoutServiceTotal:     s.CapturedWithoutServiceTotal,
-		redactionErrorsTotal:            s.RedactionErrorsTotal,
+		droppedTotal:                    droppedTotal,
+		capturedWithoutCorrelationTotal: capturedWithoutCorrelationTotal,
+		capturedWithoutServiceTotal:     capturedWithoutServiceTotal,
+		redactionErrorsTotal:            redactionErrorsTotal,
+		unredacted:                      unredacted,
 	}
 }
 

@@ -68,11 +68,11 @@ func TestE2E_CookieAuthFlow(t *testing.T) {
 	client := noFollowClient()
 
 	// Step 1: unauthenticated request with Accept: text/html → 303 to login.
-	req1, _ := http.NewRequest(http.MethodGet, base+"/admin/ping", nil)
+	req1, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
 	req1.Header.Set("Accept", "text/html")
 	resp1, err := client.Do(req1)
 	if err != nil {
-		t.Fatalf("step1 GET /admin/ping: %v", err)
+		t.Fatalf("step1 GET /status: %v", err)
 	}
 	resp1.Body.Close()
 	if resp1.StatusCode != http.StatusSeeOther {
@@ -82,8 +82,8 @@ func TestE2E_CookieAuthFlow(t *testing.T) {
 	if !strings.Contains(loc1, "/login?next=") {
 		t.Errorf("step1: Location %q does not contain /login?next=", loc1)
 	}
-	if !strings.Contains(loc1, url.QueryEscape("/admin/ping")) {
-		t.Errorf("step1: Location %q does not contain URL-encoded /admin/ping", loc1)
+	if !strings.Contains(loc1, url.QueryEscape("/status")) {
+		t.Errorf("step1: Location %q does not contain URL-encoded /status", loc1)
 	}
 
 	// Step 2: login with correct token → 303 + Set-Cookie.
@@ -107,20 +107,17 @@ func TestE2E_CookieAuthFlow(t *testing.T) {
 		t.Fatal("step2: no session cookie in response")
 	}
 
-	// Step 3: GET /admin/ping with cookie → 200 pong.
-	req3, _ := http.NewRequest(http.MethodGet, base+"/admin/ping", nil)
+	// Step 3: GET /status with cookie → 200 JSON.
+	req3, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
 	req3.AddCookie(sessionCookie)
 	resp3, err := client.Do(req3)
 	if err != nil {
-		t.Fatalf("step3 GET /admin/ping: %v", err)
+		t.Fatalf("step3 GET /status: %v", err)
 	}
-	body3, _ := io.ReadAll(resp3.Body)
+	io.Copy(io.Discard, resp3.Body)
 	resp3.Body.Close()
 	if resp3.StatusCode != http.StatusOK {
 		t.Errorf("step3: got %d want 200", resp3.StatusCode)
-	}
-	if string(body3) != "pong" {
-		t.Errorf("step3: body = %q want pong", string(body3))
 	}
 
 	// Step 4: logout with cookie → 303 + clearing cookie.
@@ -145,13 +142,13 @@ func TestE2E_CookieAuthFlow(t *testing.T) {
 		t.Errorf("step4: expected clearing cookie with MaxAge=-1")
 	}
 
-	// Step 5: GET /admin/ping with revoked cookie → 303 to login (html accept).
-	req5, _ := http.NewRequest(http.MethodGet, base+"/admin/ping", nil)
+	// Step 5: GET /status with revoked cookie → 303 to login (html accept).
+	req5, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
 	req5.Header.Set("Accept", "text/html")
 	req5.AddCookie(sessionCookie)
 	resp5, err := client.Do(req5)
 	if err != nil {
-		t.Fatalf("step5 GET /admin/ping revoked cookie: %v", err)
+		t.Fatalf("step5 GET /status revoked cookie: %v", err)
 	}
 	resp5.Body.Close()
 	if resp5.StatusCode != http.StatusSeeOther {
@@ -166,27 +163,24 @@ func TestE2E_BearerAuthFlow(t *testing.T) {
 	client := noFollowClient()
 
 	// Valid bearer → 200.
-	req1, _ := http.NewRequest(http.MethodGet, base+"/admin/ping", nil)
+	req1, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
 	req1.Header.Set("Authorization", "Bearer "+testAdminToken)
 	resp1, err := client.Do(req1)
 	if err != nil {
-		t.Fatalf("GET /admin/ping valid bearer: %v", err)
+		t.Fatalf("GET /status valid bearer: %v", err)
 	}
-	body1, _ := io.ReadAll(resp1.Body)
+	io.Copy(io.Discard, resp1.Body)
 	resp1.Body.Close()
 	if resp1.StatusCode != http.StatusOK {
 		t.Errorf("valid bearer: got %d want 200", resp1.StatusCode)
 	}
-	if string(body1) != "pong" {
-		t.Errorf("valid bearer: body = %q want pong", string(body1))
-	}
 
 	// Wrong bearer → 401.
-	req2, _ := http.NewRequest(http.MethodGet, base+"/admin/ping", nil)
+	req2, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
 	req2.Header.Set("Authorization", "Bearer wrong")
 	resp2, err := client.Do(req2)
 	if err != nil {
-		t.Fatalf("GET /admin/ping wrong bearer: %v", err)
+		t.Fatalf("GET /status wrong bearer: %v", err)
 	}
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusUnauthorized {

@@ -167,7 +167,7 @@ func TestLoginPost_CorrectToken_WithNext_RedirectsToNext(t *testing.T) {
 		},
 	}
 
-	form := url.Values{"token": {testAdminToken}, "next": {"/admin/ping"}}
+	form := url.Values{"token": {testAdminToken}, "next": {"/status"}}
 	resp, err := client.PostForm(ts.URL+"/auth/login", form)
 	if err != nil {
 		t.Fatalf("POST /auth/login with next: %v", err)
@@ -175,8 +175,8 @@ func TestLoginPost_CorrectToken_WithNext_RedirectsToNext(t *testing.T) {
 	defer resp.Body.Close()
 
 	loc := resp.Header.Get("Location")
-	if loc != "/admin/ping" {
-		t.Errorf("Location: got %q want /admin/ping", loc)
+	if loc != "/status" {
+		t.Errorf("Location: got %q want /status", loc)
 	}
 }
 
@@ -301,16 +301,16 @@ func TestLogout_ValidCookie_RevokesAndRedirects(t *testing.T) {
 	}
 
 	// After logout the old cookie must no longer grant access.
-	pingReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/admin/ping", nil)
-	pingReq.Header.Set("Accept", "application/json")
-	pingReq.AddCookie(sessionCookie)
-	pingResp, err := client.Do(pingReq)
+	statusReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/status", nil)
+	statusReq.Header.Set("Accept", "application/json")
+	statusReq.AddCookie(sessionCookie)
+	statusResp, err := client.Do(statusReq)
 	if err != nil {
-		t.Fatalf("GET /admin/ping after logout: %v", err)
+		t.Fatalf("GET /status after logout: %v", err)
 	}
-	pingResp.Body.Close()
-	if pingResp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("ping after logout: got %d want 401", pingResp.StatusCode)
+	statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status after logout: got %d want 401", statusResp.StatusCode)
 	}
 }
 
