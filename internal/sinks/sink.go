@@ -6,8 +6,7 @@ import (
 	"github.com/radarnex/httpcatch/internal/capture"
 )
 
-// Sink is a storage destination for captured records.
-// Implementations must be safe for concurrent calls from a worker pool.
+// Sink implementations must be safe for concurrent Write from the worker pool.
 type Sink interface {
 	Name() string
 	Write(ctx context.Context, r *capture.CapturedRecord) error

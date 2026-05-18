@@ -1,7 +1,7 @@
 package capture
 
 import (
-	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -10,32 +10,32 @@ import (
 	"github.com/google/uuid"
 )
 
-// NewCaptureHandler builds the capture port's HTTP handler.
-// Every request to any path is captured and acked with 202 Accepted.
-func NewCaptureHandler(q *Queue, bodyCap int) http.Handler {
+// NewCaptureHandler routes every path through the capture pipeline; per
+// ADR-0002 the response is always 202, even on drop or body-read failure.
+func NewCaptureHandler(q *Queue, bodyCap int, logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	r := chi.NewRouter()
-	r.HandleFunc("/*", captureHandler(q, bodyCap))
+	r.HandleFunc("/*", captureHandler(q, bodyCap, logger))
 	return r
 }
 
-func captureHandler(q *Queue, bodyCap int) http.HandlerFunc {
+func captureHandler(q *Queue, bodyCap int, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
-		rec, err := buildRecord(r, bodyCap)
-		if err == nil && rec != nil {
-			q.Enqueue(rec)
+		body, originalSize, truncated, err := CapBody(r.Body, bodyCap)
+		if err != nil {
+			logger.Warn("body read failed; record dropped", "path", r.URL.Path, "err", err)
+			w.WriteHeader(http.StatusAccepted)
+			return
 		}
+		q.Enqueue(buildRecord(r, body, originalSize, truncated))
 		w.WriteHeader(http.StatusAccepted)
 	}
 }
 
-func buildRecord(r *http.Request, bodyCap int) (*CapturedRecord, error) {
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, err
-	}
-	body, originalSize, truncated := CapBody(bodyBytes, bodyCap)
-
+func buildRecord(r *http.Request, body []byte, originalSize int, truncated bool) *CapturedRecord {
 	reqCookies := r.Cookies()
 	cookies := make([]Cookie, 0, len(reqCookies))
 	for _, c := range reqCookies {
@@ -64,5 +64,5 @@ func buildRecord(r *http.Request, bodyCap int) (*CapturedRecord, error) {
 		ServiceSource:     PlaceholderServiceSource,
 		CorrelationID:     PlaceholderCorrelationID,
 		CorrelationSource: PlaceholderCorrelationSource,
-	}, nil
+	}
 }

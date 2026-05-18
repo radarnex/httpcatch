@@ -43,6 +43,8 @@ type rawSinks struct {
 	Stdout *bool `yaml:"stdout"`
 }
 
+// Pointer fields distinguish "absent" from "set to zero" so the YAML cannot
+// silently overwrite a default with the zero value.
 type rawConfig struct {
 	CapturePort *int     `yaml:"capture_port"`
 	QueueSize   *int     `yaml:"queue_size"`
@@ -51,8 +53,6 @@ type rawConfig struct {
 	Sinks       rawSinks `yaml:"sinks"`
 }
 
-// Load reads config from path (may be ""), applies env overrides, validates.
-// Returns the validated config or a field-specific error.
 func Load(path string, env func(string) string) (Config, error) {
 	cfg := Defaults()
 	if path != "" {
@@ -97,18 +97,6 @@ func applyRaw(cfg *Config, raw rawConfig) {
 }
 
 func applyEnv(cfg *Config, env func(string) string) error {
-	intEnv := func(name string, dest *int) error {
-		v := env(name)
-		if v == "" {
-			return nil
-		}
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("%s: invalid integer %q: %w", name, v, err)
-		}
-		*dest = n
-		return nil
-	}
 	for _, step := range []struct {
 		name string
 		dest *int
@@ -118,32 +106,28 @@ func applyEnv(cfg *Config, env func(string) string) error {
 		{"HTTPCATCH_BODY_CAP", &cfg.BodyCap},
 		{"HTTPCATCH_WORKER_COUNT", &cfg.Workers},
 	} {
-		if err := intEnv(step.name, step.dest); err != nil {
-			return err
+		v := env(step.name)
+		if v == "" {
+			continue
 		}
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s: invalid integer %q: %w", step.name, v, err)
+		}
+		*step.dest = n
 	}
 	if v := env("HTTPCATCH_SINKS"); v != "" {
 		cfg.Sinks = SinksConfig{}
-		for _, name := range splitList(v) {
-			switch strings.ToLower(name) {
+		for _, name := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' }) {
+			switch strings.ToLower(strings.TrimSpace(name)) {
 			case "stdout":
 				cfg.Sinks.Stdout = true
-			case "":
 			default:
 				return fmt.Errorf("HTTPCATCH_SINKS: unknown sink %q", name)
 			}
 		}
 	}
 	return nil
-}
-
-func splitList(s string) []string {
-	parts := strings.Split(s, ",")
-	out := parts[:0]
-	for _, p := range parts {
-		out = append(out, strings.TrimSpace(p))
-	}
-	return out
 }
 
 func (c Config) Validate() error {
@@ -161,9 +145,4 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf("body_cap: must be >= 0, got %d", c.BodyCap))
 	}
 	return errors.Join(errs...)
-}
-
-// AnySinkEnabled reports whether any sink is currently enabled.
-func (c Config) AnySinkEnabled() bool {
-	return c.Sinks.Stdout
 }

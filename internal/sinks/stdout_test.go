@@ -78,11 +78,10 @@ func TestStdoutSink_ConcurrentWritesNotInterleaved(t *testing.T) {
 
 	const n = 200
 	done := make(chan struct{}, n)
-	for i := range n {
+	for range n {
 		go func() {
 			_ = sink.Write(context.Background(), &capture.CapturedRecord{ID: "x", Method: "GET"})
 			done <- struct{}{}
-			_ = i
 		}()
 	}
 	for range n {

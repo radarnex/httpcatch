@@ -33,7 +33,15 @@ func TestCapBody(t *testing.T) {
 			wantTrunc:    false,
 		},
 		{
-			name:         "over cap",
+			name:         "one byte over cap",
+			body:         []byte("hello!"),
+			capBytes:     5,
+			wantBody:     []byte("hello"),
+			wantOriginal: 6,
+			wantTrunc:    true,
+		},
+		{
+			name:         "many bytes over cap",
 			body:         []byte("hello world"),
 			capBytes:     5,
 			wantBody:     []byte("hello"),
@@ -77,7 +85,10 @@ func TestCapBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, gotOriginal, gotTrunc := CapBody(tt.body, tt.capBytes)
+			got, gotOriginal, gotTrunc, err := CapBody(bytes.NewReader(tt.body), tt.capBytes)
+			if err != nil {
+				t.Fatalf("CapBody: %v", err)
+			}
 			if !bytes.Equal(got, tt.wantBody) {
 				t.Errorf("body: got %q want %q", got, tt.wantBody)
 			}
@@ -88,5 +99,27 @@ func TestCapBody(t *testing.T) {
 				t.Errorf("truncated: got %v want %v", gotTrunc, tt.wantTrunc)
 			}
 		})
+	}
+}
+
+// TestCapBody_StreamsRemainderWithoutBuffering proves that bytes past the cap
+// do not enter the returned slice — load-bearing for memory bounds.
+func TestCapBody_StreamsRemainderWithoutBuffering(t *testing.T) {
+	t.Parallel()
+
+	const cap = 16
+	big := bytes.Repeat([]byte("Z"), 1<<20) // 1 MiB
+	body, original, truncated, err := CapBody(bytes.NewReader(big), cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("truncated should be true")
+	}
+	if len(body) != cap {
+		t.Errorf("buffered len: got %d want %d", len(body), cap)
+	}
+	if original != len(big) {
+		t.Errorf("original_size: got %d want %d", original, len(big))
 	}
 }

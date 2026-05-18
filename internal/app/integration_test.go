@@ -21,17 +21,20 @@ import (
 	"github.com/radarnex/httpcatch/internal/sinks"
 )
 
-// syncBuffer wraps bytes.Buffer with a mutex so the worker can write while
-// the test goroutine polls via String/Count.
+// syncBuffer lets the worker write while the test polls. Lines is updated on
+// Write so poll loops do not have to scan the buffer each iteration.
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	lines atomic.Int64
 }
 
 func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	n, err := b.buf.Write(p)
+	b.mu.Unlock()
+	b.lines.Add(int64(bytes.Count(p, []byte{'\n'})))
+	return n, err
 }
 
 func (b *syncBuffer) String() string {
@@ -40,24 +43,12 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func (b *syncBuffer) Len() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Len()
-}
-
-func (b *syncBuffer) CountLines() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return strings.Count(b.buf.String(), "\n")
-}
+func (b *syncBuffer) CountLines() int { return int(b.lines.Load()) }
 
 func testLogger(buf io.Writer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-// runPipeline boots the app's components against an httptest server and returns
-// a teardown that closes the queue and waits for the worker pool to drain.
 func runPipeline(t *testing.T, cfg config.Config, stdoutBuf io.Writer, logBuf io.Writer, extras ...sinks.Sink) (*app.App, *httptest.Server, func()) {
 	t.Helper()
 	a := app.Build(cfg, testLogger(logBuf), stdoutBuf, extras...)
@@ -111,7 +102,6 @@ func decodeLines(s string) ([]capture.CapturedRecord, error) {
 	return out, nil
 }
 
-// waitFor polls until cond returns true or the deadline expires.
 func waitFor(cond func() bool, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -139,11 +129,11 @@ func TestIntegration_EndToEnd_BodyCapShape(t *testing.T) {
 	defer teardown()
 
 	type fired struct {
-		marker      string
-		bodyLen     int
-		wantOrig    int
-		wantTrunc   bool
-		wantCapped  int
+		marker     string
+		bodyLen    int
+		wantOrig   int
+		wantTrunc  bool
+		wantCapped int
 	}
 	cases := make([]fired, 0, 100)
 	for i := range 30 {
@@ -181,10 +171,10 @@ func TestIntegration_EndToEnd_BodyCapShape(t *testing.T) {
 	}
 
 	if !waitFor(func() bool {
-		return strings.Count(stdoutBuf.String(), "\n") >= len(cases)
+		return stdoutBuf.CountLines() >= len(cases)
 	}, 5*time.Second) {
 		t.Fatalf("timed out waiting for %d records; got %d lines",
-			len(cases), strings.Count(stdoutBuf.String(), "\n"))
+			len(cases), stdoutBuf.CountLines())
 	}
 
 	records, err := decodeLines(stdoutBuf.String())
@@ -292,7 +282,6 @@ func TestIntegration_BodyCapDisabled(t *testing.T) {
 	}
 }
 
-// slowSink wraps another sink and sleeps before delegating.
 type slowSink struct {
 	inner sinks.Sink
 	delay time.Duration
@@ -315,7 +304,7 @@ func TestIntegration_DropSemantics(t *testing.T) {
 	cfg.QueueSize = 1
 	cfg.Workers = 1
 	cfg.BodyCap = 1 << 20
-	cfg.Sinks.Stdout = false // no built-in stdout; we'll attach a slow one as extra
+	cfg.Sinks.Stdout = false
 
 	var stdoutBuf syncBuffer
 	var logBuf bytes.Buffer
@@ -361,7 +350,6 @@ func TestIntegration_DropSemantics(t *testing.T) {
 	}
 }
 
-// failingSink errors on every write.
 type failingSink struct{}
 
 func (failingSink) Name() string { return "failing" }

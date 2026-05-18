@@ -89,11 +89,11 @@ workers: 1
 		t.Fatal(err)
 	}
 	env := mapEnv(map[string]string{
-		"HTTPCATCH_CAPTURE_PORT":  "12345",
-		"HTTPCATCH_QUEUE_SIZE":    "16",
-		"HTTPCATCH_BODY_CAP":      "2048",
-		"HTTPCATCH_WORKER_COUNT":  "4",
-		"HTTPCATCH_SINKS":         "stdout",
+		"HTTPCATCH_CAPTURE_PORT": "12345",
+		"HTTPCATCH_QUEUE_SIZE":   "16",
+		"HTTPCATCH_BODY_CAP":     "2048",
+		"HTTPCATCH_WORKER_COUNT": "4",
+		"HTTPCATCH_SINKS":        "stdout",
 	})
 	cfg, err := Load(path, env)
 	if err != nil {
@@ -204,18 +204,5 @@ func TestLoad_InvalidIntEnv(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HTTPCATCH_CAPTURE_PORT") {
 		t.Errorf("error %q does not mention HTTPCATCH_CAPTURE_PORT", err)
-	}
-}
-
-func TestAnySinkEnabled(t *testing.T) {
-	t.Parallel()
-
-	if Defaults().AnySinkEnabled() {
-		t.Error("defaults should report no sinks enabled")
-	}
-	c := Defaults()
-	c.Sinks.Stdout = true
-	if !c.AnySinkEnabled() {
-		t.Error("stdout enabled should report true")
 	}
 }
