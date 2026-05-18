@@ -35,6 +35,7 @@ type App struct {
 	Sinks    []sinks.Sink
 	Memory   *sinks.MemorySink
 	SQLite   *sinks.SQLiteSink
+	Ruleset  *redact.Ruleset
 }
 
 func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extraSinks ...sinks.Sink) (*App, error) {
@@ -64,9 +65,14 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 	}
 	ss = append(ss, extraSinks...)
 
+	ruleset, err := redact.NewRuleset(cfg.Redaction)
+	if err != nil {
+		return nil, fmt.Errorf("redaction ruleset: %w", err)
+	}
+
 	q := capture.NewQueue(cfg.QueueSize)
 	counters := capture.NewCounters()
-	workers := pipeline.NewWorkerPool(cfg.Workers, q, redact.NoOp{}, ss, logger)
+	workers := pipeline.NewWorkerPool(cfg.Workers, q, ruleset, ss, logger)
 	handler := capture.NewCaptureHandler(capture.HandlerOptions{
 		Queue:         q,
 		Counters:      counters,
@@ -85,6 +91,7 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		Sinks:    ss,
 		Memory:   memSink,
 		SQLite:   sqliteSink,
+		Ruleset:  ruleset,
 	}, nil
 }
 
@@ -92,7 +99,9 @@ func (a *App) EmitStartupWarnings() {
 	if len(a.Sinks) == 0 {
 		a.Logger.Warn(ZeroSinksWarning + " — captured records will be discarded after dequeue; enable at least one sink (stdout/memory/sqlite) to persist captures")
 	}
-	a.Logger.Warn(UnredactedWarning + " — no redaction is applied to captured payloads; configure a redactor before exposing this instance to production traffic")
+	if a.Ruleset.IsUnredacted() {
+		a.Logger.Warn(UnredactedWarning + " — no redaction is applied to captured payloads; configure a redactor before exposing this instance to production traffic")
+	}
 }
 
 // Serve binds the capture port and runs until ctx is cancelled or the server

@@ -28,13 +28,19 @@ type SinksConfig struct {
 	SQLitePath     string `yaml:"sqlite_path"`
 }
 
+// RedactionConfig holds the parsed redaction rules for use by the ruleset.
+type RedactionConfig struct {
+	Headers []string
+}
+
 type Config struct {
-	CapturePort   int         `yaml:"capture_port"`
-	QueueSize     int         `yaml:"queue_size"`
-	BodyCap       int         `yaml:"body_cap"`
-	Workers       int         `yaml:"workers"`
-	ServiceHeader string      `yaml:"service_header"`
-	Sinks         SinksConfig `yaml:"sinks"`
+	CapturePort   int             `yaml:"capture_port"`
+	QueueSize     int             `yaml:"queue_size"`
+	BodyCap       int             `yaml:"body_cap"`
+	Workers       int             `yaml:"workers"`
+	ServiceHeader string          `yaml:"service_header"`
+	Sinks         SinksConfig     `yaml:"sinks"`
+	Redaction     RedactionConfig
 }
 
 func Defaults() Config {
@@ -59,15 +65,55 @@ type rawSinks struct {
 	SQLitePath     *string `yaml:"sqlite_path"`
 }
 
+type rawRegexRule struct {
+	Name    string `yaml:"name"`
+	Pattern string `yaml:"pattern"`
+}
+
+type rawCookieRule struct {
+	Mode  string   `yaml:"mode"`
+	Names []string `yaml:"names"`
+}
+
+type rawRedactionConfig struct {
+	Headers     []string        `yaml:"headers"`
+	QueryParams []string        `yaml:"query_params"`
+	JSONPaths   []string        `yaml:"json_paths"`
+	Regex       []rawRegexRule  `yaml:"regex"`
+	Cookies     []rawCookieRule `yaml:"cookies"`
+}
+
+var validRedactionKeys = map[string]bool{
+	"headers":      true,
+	"query_params": true,
+	"json_paths":   true,
+	"regex":        true,
+	"cookies":      true,
+}
+
+func (r *rawRedactionConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i < len(value.Content)-1; i += 2 {
+			key := value.Content[i].Value
+			if !validRedactionKeys[key] {
+				return fmt.Errorf("redaction: unknown key %q", key)
+			}
+		}
+	}
+	type plain rawRedactionConfig
+	return value.Decode((*plain)(r))
+}
+
 // Pointer fields distinguish "absent" from "set to zero" so the YAML cannot
 // silently overwrite a default with the zero value.
 type rawConfig struct {
-	CapturePort   *int     `yaml:"capture_port"`
-	QueueSize     *int     `yaml:"queue_size"`
-	BodyCap       *int     `yaml:"body_cap"`
-	Workers       *int     `yaml:"workers"`
-	ServiceHeader *string  `yaml:"service_header"`
-	Sinks         rawSinks `yaml:"sinks"`
+	CapturePort   *int                `yaml:"capture_port"`
+	QueueSize     *int                `yaml:"queue_size"`
+	BodyCap       *int                `yaml:"body_cap"`
+	Workers       *int                `yaml:"workers"`
+	ServiceHeader *string             `yaml:"service_header"`
+	Sinks         rawSinks            `yaml:"sinks"`
+	Redaction     *rawRedactionConfig `yaml:"redaction"`
 }
 
 func Load(path string, env func(string) string) (Config, error) {
@@ -125,6 +171,9 @@ func applyRaw(cfg *Config, raw rawConfig) {
 	}
 	if raw.Sinks.SQLitePath != nil {
 		cfg.Sinks.SQLitePath = *raw.Sinks.SQLitePath
+	}
+	if raw.Redaction != nil {
+		cfg.Redaction.Headers = raw.Redaction.Headers
 	}
 }
 

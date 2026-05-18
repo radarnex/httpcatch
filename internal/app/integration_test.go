@@ -23,6 +23,7 @@ import (
 	"github.com/radarnex/httpcatch/internal/app"
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/config"
+	"github.com/radarnex/httpcatch/internal/redact"
 	"github.com/radarnex/httpcatch/internal/sinks"
 )
 
@@ -100,7 +101,7 @@ func fire(t *testing.T, url, method string, body []byte, hdr http.Header) *http.
 
 func decodeLines(s string) ([]capture.CapturedRecord, error) {
 	out := []capture.CapturedRecord{}
-	for _, line := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(s, "\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -1135,5 +1136,120 @@ func TestIntegration_SQLite_MissingDirectoryFailsStartup(t *testing.T) {
 	_, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
 	if err == nil {
 		t.Fatal("expected app.Build to fail when sqlite directory does not exist")
+	}
+}
+
+func TestIntegration_HeaderRedaction(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Workers = 2
+	cfg.QueueSize = 64
+	cfg.Sinks.Stdout = true
+	cfg.Sinks.Memory = true
+	cfg.Sinks.MemoryCapacity = 100
+	cfg.Redaction.Headers = []string{"authorization"}
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	// Request A: has Authorization header that must be redacted, plus a safe header.
+	fire(t, ts.URL+"/redact-test", "POST", []byte("body-a"), http.Header{
+		"Authorization": []string{"Bearer secret-token"},
+		"X-Safe":        []string{"keep-me"},
+		"X-Marker":      []string{"req-a"},
+	})
+
+	// Request B: no Authorization header; X-Other must pass through untouched.
+	fire(t, ts.URL+"/redact-test", "POST", []byte("body-b"), http.Header{
+		"X-Other":  []string{"visible"},
+		"X-Marker": []string{"req-b"},
+	})
+
+	if !waitFor(func() bool {
+		return stdoutBuf.CountLines() >= 2 && a.Memory.Len() >= 2
+	}, 5*time.Second) {
+		t.Fatalf("timed out: stdout=%d memory=%d", stdoutBuf.CountLines(), a.Memory.Len())
+	}
+
+	stdoutRecords, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode stdout: %v", err)
+	}
+	if len(stdoutRecords) != 2 {
+		t.Fatalf("stdout: got %d records want 2", len(stdoutRecords))
+	}
+
+	byMarker := map[string]capture.CapturedRecord{}
+	for _, r := range stdoutRecords {
+		ms := r.Headers["X-Marker"]
+		if len(ms) == 1 {
+			byMarker[ms[0]] = r
+		}
+	}
+
+	recA, ok := byMarker["req-a"]
+	if !ok {
+		t.Fatal("missing stdout record for req-a")
+	}
+	if vals := recA.Headers["Authorization"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("req-a Authorization: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := recA.Headers["X-Safe"]; len(vals) != 1 || vals[0] != "keep-me" {
+		t.Errorf("req-a X-Safe: got %v, want [keep-me]", vals)
+	}
+
+	recB, ok := byMarker["req-b"]
+	if !ok {
+		t.Fatal("missing stdout record for req-b")
+	}
+	if vals := recB.Headers["X-Other"]; len(vals) != 1 || vals[0] != "visible" {
+		t.Errorf("req-b X-Other: got %v, want [visible]", vals)
+	}
+	if _, hasAuth := recB.Headers["Authorization"]; hasAuth {
+		t.Error("req-b should have no Authorization header")
+	}
+
+	// Verify memory sink sees identical redaction as stdout.
+	memRecords := a.Memory.Recent(10)
+	memByMarker := map[string]*capture.CapturedRecord{}
+	for _, r := range memRecords {
+		ms := r.Headers["X-Marker"]
+		if len(ms) == 1 {
+			memByMarker[ms[0]] = r
+		}
+	}
+
+	memA, ok := memByMarker["req-a"]
+	if !ok {
+		t.Fatal("missing memory record for req-a")
+	}
+	if vals := memA.Headers["Authorization"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("memory req-a Authorization: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := memA.Headers["X-Safe"]; len(vals) != 1 || vals[0] != "keep-me" {
+		t.Errorf("memory req-a X-Safe: got %v, want [keep-me]", vals)
+	}
+
+	memB, ok := memByMarker["req-b"]
+	if !ok {
+		t.Fatal("missing memory record for req-b")
+	}
+	if vals := memB.Headers["X-Other"]; len(vals) != 1 || vals[0] != "visible" {
+		t.Errorf("memory req-b X-Other: got %v, want [visible]", vals)
+	}
+
+	// Confirm IDs match between stdout and memory.
+	if recA.ID != memA.ID {
+		t.Errorf("req-a ID: stdout=%q memory=%q", recA.ID, memA.ID)
+	}
+	if recB.ID != memB.ID {
+		t.Errorf("req-b ID: stdout=%q memory=%q", recB.ID, memB.ID)
+	}
+
+	if strings.Contains(logBuf.String(), "unredacted") {
+		t.Errorf("unredacted warning should not fire when rules are configured, got:\n%s", logBuf.String())
 	}
 }
