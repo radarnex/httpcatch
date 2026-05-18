@@ -30,7 +30,8 @@ type SinksConfig struct {
 
 // RedactionConfig holds the parsed redaction rules for use by the ruleset.
 type RedactionConfig struct {
-	Headers []string
+	Headers     []string
+	QueryParams []string
 }
 
 type Config struct {
@@ -174,6 +175,7 @@ func applyRaw(cfg *Config, raw rawConfig) {
 	}
 	if raw.Redaction != nil {
 		cfg.Redaction.Headers = raw.Redaction.Headers
+		cfg.Redaction.QueryParams = raw.Redaction.QueryParams
 	}
 }
 

@@ -1253,3 +1253,78 @@ func TestIntegration_HeaderRedaction(t *testing.T) {
 		t.Errorf("unredacted warning should not fire when rules are configured, got:\n%s", logBuf.String())
 	}
 }
+
+func TestIntegration_HeaderAndQueryRedaction(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Workers = 2
+	cfg.QueueSize = 64
+	cfg.Sinks.Stdout = true
+	cfg.Sinks.Memory = true
+	cfg.Sinks.MemoryCapacity = 100
+	cfg.Redaction.Headers = []string{"authorization"}
+	cfg.Redaction.QueryParams = []string{"token"}
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	fire(t, ts.URL+"/q-test?token=secret-token&page=2", "POST", []byte("body"), http.Header{
+		"Authorization": []string{"Bearer secret"},
+		"X-Safe":        []string{"keep-me"},
+		"X-Marker":      []string{"req-q"},
+	})
+
+	if !waitFor(func() bool {
+		return stdoutBuf.CountLines() >= 1 && a.Memory.Len() >= 1
+	}, 5*time.Second) {
+		t.Fatalf("timed out: stdout=%d memory=%d", stdoutBuf.CountLines(), a.Memory.Len())
+	}
+
+	stdoutRecords, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode stdout: %v", err)
+	}
+	if len(stdoutRecords) != 1 {
+		t.Fatalf("stdout: got %d records want 1", len(stdoutRecords))
+	}
+	rec := stdoutRecords[0]
+
+	if vals := rec.Headers["Authorization"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("Authorization: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := rec.Headers["X-Safe"]; len(vals) != 1 || vals[0] != "keep-me" {
+		t.Errorf("X-Safe: got %v, want [keep-me]", vals)
+	}
+	if vals := rec.Query["token"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("query token: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := rec.Query["page"]; len(vals) != 1 || vals[0] != "2" {
+		t.Errorf("query page: got %v, want [2]", vals)
+	}
+
+	memRecords := a.Memory.Recent(1)
+	if len(memRecords) != 1 {
+		t.Fatalf("memory: got %d records want 1", len(memRecords))
+	}
+	memRec := memRecords[0]
+	if vals := memRec.Headers["Authorization"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("memory Authorization: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := memRec.Query["token"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("memory query token: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := memRec.Query["page"]; len(vals) != 1 || vals[0] != "2" {
+		t.Errorf("memory query page: got %v, want [2]", vals)
+	}
+
+	if rec.ID != memRec.ID {
+		t.Errorf("ID: stdout=%q memory=%q", rec.ID, memRec.ID)
+	}
+
+	if strings.Contains(logBuf.String(), "unredacted") {
+		t.Errorf("unredacted warning should not fire when rules are configured, got:\n%s", logBuf.String())
+	}
+}

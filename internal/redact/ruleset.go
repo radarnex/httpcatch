@@ -26,7 +26,9 @@ func NewRuleset(cfg config.RedactionConfig) (*Ruleset, error) {
 	for i, h := range cfg.Headers {
 		headers[i] = strings.ToLower(h)
 	}
-	return &Ruleset{headers: headers}, nil
+	queryParams := make([]string, len(cfg.QueryParams))
+	copy(queryParams, cfg.QueryParams)
+	return &Ruleset{headers: headers, queryParams: queryParams}, nil
 }
 
 func (r *Ruleset) IsUnredacted() bool {
@@ -52,9 +54,18 @@ func (r *Ruleset) Redact(rec *capture.CapturedRecord) *capture.CapturedRecord {
 }
 
 func applyCookieRules(_ *capture.CapturedRecord, _ []cookieRule) {}
-func applyQueryRules(_ *capture.CapturedRecord, _ []string)      {}
 func applyJSONPathRules(_ *capture.CapturedRecord, _ []string)   {}
 func applyRegexRules(_ *capture.CapturedRecord, _ []regexRule)   {}
+
+func applyQueryRules(out *capture.CapturedRecord, rules []string) {
+	for key, vals := range out.Query {
+		if slices.Contains(rules, key) {
+			for i := range vals {
+				vals[i] = Redacted
+			}
+		}
+	}
+}
 
 func applyHeaderRules(out *capture.CapturedRecord, rules []string) {
 	for key, vals := range out.Headers {
@@ -69,6 +80,7 @@ func applyHeaderRules(out *capture.CapturedRecord, rules []string) {
 func shallowCopyRecord(rec *capture.CapturedRecord) *capture.CapturedRecord {
 	out := *rec
 	out.Headers = copyStringSliceMap(rec.Headers)
+	out.Query = copyStringSliceMap(rec.Query)
 	return &out
 }
 

@@ -17,6 +17,12 @@ func makeRecord(headers map[string][]string) *capture.CapturedRecord {
 	}
 }
 
+func makeRecordWithQuery(query map[string][]string) *capture.CapturedRecord {
+	return &capture.CapturedRecord{
+		Query: query,
+	}
+}
+
 func TestHeaderRules_CaseInsensitive(t *testing.T) {
 	t.Parallel()
 
@@ -139,6 +145,162 @@ func TestHeaderRules_MultipleValuesRedacted(t *testing.T) {
 		if v != redact.Redacted {
 			t.Errorf("X-Multi[%d]: got %q, want %q", i, v, redact.Redacted)
 		}
+	}
+}
+
+func TestQueryRules_MatchingParamRedacted(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		rules    []string
+		query    map[string][]string
+		wantKey  string
+		wantVals []string
+	}{
+		{
+			name:     "single matching param",
+			rules:    []string{"token"},
+			query:    map[string][]string{"token": {"abc123"}},
+			wantKey:  "token",
+			wantVals: []string{redact.Redacted},
+		},
+		{
+			name:     "multi-value param all redacted",
+			rules:    []string{"password"},
+			query:    map[string][]string{"password": {"first", "second", "third"}},
+			wantKey:  "password",
+			wantVals: []string{redact.Redacted, redact.Redacted, redact.Redacted},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rs, err := redact.NewRuleset(config.RedactionConfig{QueryParams: tc.rules})
+			if err != nil {
+				t.Fatalf("NewRuleset: %v", err)
+			}
+
+			out := rs.Redact(makeRecordWithQuery(tc.query))
+
+			got := out.Query[tc.wantKey]
+			if len(got) != len(tc.wantVals) {
+				t.Fatalf("%s: got %d values, want %d", tc.wantKey, len(got), len(tc.wantVals))
+			}
+			for i, v := range got {
+				if v != tc.wantVals[i] {
+					t.Errorf("%s[%d]: got %q, want %q", tc.wantKey, i, v, tc.wantVals[i])
+				}
+			}
+		})
+	}
+}
+
+func TestQueryRules_NonMatchingPassThrough(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{QueryParams: []string{"token"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithQuery(map[string][]string{
+		"page": {"2"},
+	})
+	out := rs.Redact(rec)
+
+	vals := out.Query["page"]
+	if len(vals) != 1 || vals[0] != "2" {
+		t.Errorf("page: got %v, want [2]", vals)
+	}
+	if _, exists := out.Query["token"]; exists {
+		t.Error("token should not be present in output")
+	}
+}
+
+func TestQueryRules_CaseSensitive(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		queryKey string
+		want     string
+	}{
+		{"exact match redacted", "token", redact.Redacted},
+		{"capitalized untouched", "Token", "secret"},
+		{"upper untouched", "TOKEN", "secret"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rs, err := redact.NewRuleset(config.RedactionConfig{QueryParams: []string{"token"}})
+			if err != nil {
+				t.Fatalf("NewRuleset: %v", err)
+			}
+
+			rec := makeRecordWithQuery(map[string][]string{
+				tc.queryKey: {"secret"},
+			})
+			out := rs.Redact(rec)
+
+			vals := out.Query[tc.queryKey]
+			if len(vals) != 1 || vals[0] != tc.want {
+				t.Errorf("query %q: got %v, want [%q]", tc.queryKey, vals, tc.want)
+			}
+		})
+	}
+}
+
+func TestQueryRules_NoQueryPassThrough(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{QueryParams: []string{"token"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithQuery(nil)
+	out := rs.Redact(rec)
+
+	if len(out.Query) != 0 {
+		t.Errorf("expected empty query map, got %v", out.Query)
+	}
+}
+
+func TestQueryRules_RuleOnAbsentParamIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{QueryParams: []string{"missing"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithQuery(map[string][]string{
+		"keep": {"yes"},
+	})
+	out := rs.Redact(rec)
+
+	if vals := out.Query["keep"]; len(vals) != 1 || vals[0] != "yes" {
+		t.Errorf("keep: got %v, want [yes]", vals)
+	}
+	if _, exists := out.Query["missing"]; exists {
+		t.Error("missing should not be present in output")
+	}
+}
+
+func TestNewRuleset_WithQueryParams(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{QueryParams: []string{"token"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+	if rs.IsUnredacted() {
+		t.Error("config with query_params should yield IsUnredacted() == false")
 	}
 }
 
