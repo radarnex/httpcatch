@@ -28,7 +28,7 @@ func adminCfgLoopback() config.AdminConfig {
 func TestNew_ValidConfig_BuildsServer(t *testing.T) {
 	t.Parallel()
 
-	srv, err := admin.New(adminCfgLoopback(), discardLogger())
+	srv, err := admin.New(adminCfgLoopback(), discardLogger(), admin.MetricSources{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestNew_RefusedBind_ReturnsError(t *testing.T) {
 		Bind:       "0.0.0.0:8081",
 		SessionTTL: 24 * time.Hour,
 	}
-	_, err := admin.New(cfg, discardLogger())
+	_, err := admin.New(cfg, discardLogger(), admin.MetricSources{})
 	if err == nil {
 		t.Fatal("expected error for non-loopback bind without token or insecure flag")
 	}
@@ -59,7 +59,7 @@ func TestNew_RefusedBind_ReturnsError(t *testing.T) {
 func TestServe_Shutdown_RoundTrip(t *testing.T) {
 	t.Parallel()
 
-	srv, err := admin.New(adminCfgLoopback(), discardLogger())
+	srv, err := admin.New(adminCfgLoopback(), discardLogger(), admin.MetricSources{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestServe_Shutdown_RoundTrip(t *testing.T) {
 func TestHealthz_Returns200Ok(t *testing.T) {
 	t.Parallel()
 
-	srv, err := admin.New(adminCfgLoopback(), discardLogger())
+	srv, err := admin.New(adminCfgLoopback(), discardLogger(), admin.MetricSources{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestHealthz_Returns200Ok(t *testing.T) {
 		Bind:       addr,
 		SessionTTL: 24 * time.Hour,
 	}
-	srv, err = admin.New(cfg, discardLogger())
+	srv, err = admin.New(cfg, discardLogger(), admin.MetricSources{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestHealthz_IgnoresBogusAuthHeader(t *testing.T) {
 		Bind:       addr,
 		SessionTTL: 24 * time.Hour,
 	}
-	srv, err := admin.New(cfg, discardLogger())
+	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -1752,3 +1752,109 @@ func TestIntegration_CookieOrdering_OnlyNamedCookieRedacted(t *testing.T) {
 		t.Errorf("Cookie %q missing tracking=abc (sibling cookie should survive)", got)
 	}
 }
+
+// startFullApp boots both the capture port and the admin port on ephemeral
+// addresses and returns the capture URL, the admin base URL, and a teardown
+// function. The admin port is probed until ready before the function returns.
+func startFullApp(t *testing.T, cfg config.Config) (captureURL, adminURL string, teardown func()) {
+	t.Helper()
+
+	a, err := app.Build(cfg, testLogger(io.Discard), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Capture port via httptest so we get an ephemeral address.
+	captureSrv := httptest.NewServer(a.Handler)
+	a.Workers.Start(ctx)
+
+	// Admin port.
+	adminSrv := httptest.NewServer(a.Admin.Router())
+
+	teardown = func() {
+		captureSrv.Close()
+		adminSrv.Close()
+		a.Queue.Close()
+		a.Workers.Wait()
+		cancel()
+	}
+	return captureSrv.URL, adminSrv.URL, teardown
+}
+
+func TestIntegration_Metrics(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Workers = 1
+	cfg.QueueSize = 64
+
+	captureURL, adminURL, teardown := startFullApp(t, cfg)
+	defer teardown()
+
+	// Initial GET /metrics — assert 200 and documented shape.
+	resp, err := http.Get(adminURL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "text/plain; version=0.0.4; charset=utf-8" {
+		t.Errorf("Content-Type: got %q want text/plain; version=0.0.4; charset=utf-8", ct)
+	}
+
+	metricNames := []string{
+		"httpcatch_dropped_total",
+		"httpcatch_captured_without_correlation_total",
+		"httpcatch_captured_without_service_total",
+		"httpcatch_redaction_errors_total",
+		"httpcatch_build_info",
+	}
+	bodyStr := string(body)
+	for _, name := range metricNames {
+		if !strings.Contains(bodyStr, name) {
+			t.Errorf("body missing metric %q\nbody:\n%s", name, bodyStr)
+		}
+	}
+	if !strings.Contains(bodyStr, "httpcatch_captured_without_service_total 0") {
+		t.Errorf("expected initial without_service_total to be 0\nbody:\n%s", bodyStr)
+	}
+
+	// Fire a raw TCP request with no Host header to bump captured_without_service_total.
+	addr := strings.TrimPrefix(captureURL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial capture port: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("POST /u HTTP/1.0\r\nContent-Length: 2\r\n\r\nhi")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, 512)
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, _ := conn.Read(buf)
+	if !strings.Contains(string(buf[:n]), "202 Accepted") {
+		t.Fatalf("expected 202, got: %q", string(buf[:n]))
+	}
+
+	// Wait for the worker to process the record so the counter increments.
+	if !waitFor(func() bool {
+		resp2, err2 := http.Get(adminURL + "/metrics")
+		if err2 != nil {
+			return false
+		}
+		b, _ := io.ReadAll(resp2.Body)
+		resp2.Body.Close()
+		return strings.Contains(string(b), "httpcatch_captured_without_service_total 1")
+	}, 5*time.Second) {
+		t.Error("httpcatch_captured_without_service_total did not reach 1 within timeout")
+	}
+}

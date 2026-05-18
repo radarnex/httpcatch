@@ -30,7 +30,7 @@ type Server struct {
 // New validates the bind policy and constructs a Server. An error is returned
 // immediately if the policy refuses the bind address, so app composition can
 // fail startup before any listener is created.
-func New(cfg config.AdminConfig, logger *slog.Logger) (*Server, error) {
+func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -50,6 +50,7 @@ func New(cfg config.AdminConfig, logger *slog.Logger) (*Server, error) {
 
 	r := chi.NewRouter()
 	r.Get("/healthz", healthzHandler)
+	r.Get("/metrics", metricsHandler(toInternal(sources)))
 	r.Get("/login", auth.loginPageHandler)
 	r.Post("/auth/login", auth.loginPostHandler)
 	r.Post("/auth/logout", auth.logoutHandler)

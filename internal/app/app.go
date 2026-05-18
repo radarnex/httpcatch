@@ -83,7 +83,12 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		Logger:        logger,
 	})
 
-	adminSrv, err := admin.New(cfg.Admin, logger)
+	adminSrv, err := admin.New(cfg.Admin, logger, admin.MetricSources{
+		DroppedTotal:                    q.DroppedTotal,
+		CapturedWithoutCorrelationTotal: counters.CapturedWithoutCorrelationTotal,
+		CapturedWithoutServiceTotal:     counters.CapturedWithoutServiceTotal,
+		RedactionErrorsTotal:            ruleset.RedactionErrorsTotal,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("admin server: %w", err)
 	}

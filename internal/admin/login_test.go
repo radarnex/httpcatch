@@ -21,7 +21,7 @@ func newTestServer(t *testing.T, token string) *httptest.Server {
 		SessionTTL:    time.Hour,
 		SessionSecure: false,
 	}
-	srv, err := admin.New(cfg, discardLogger())
+	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{})
 	if err != nil {
 		t.Fatalf("admin.New: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestLogout_ValidCookie_RevokesAndRedirects(t *testing.T) {
 		Token:      testAdminToken,
 		SessionTTL: time.Hour,
 	}
-	srv, err := admin.New(cfg, discardLogger())
+	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{})
 	if err != nil {
 		t.Fatalf("admin.New: %v", err)
 	}

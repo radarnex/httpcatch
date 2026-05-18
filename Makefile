@@ -10,7 +10,7 @@ help: ## Show available targets
 		/^[a-zA-Z_-]+:.*?##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build: ## Build the httpcatch binary into ./bin/
-	$(GO) build -o $(BIN_DIR)/$(BINARY) $(PKG)
+	$(GO) build -ldflags "-X github.com/radarnex/httpcatch/internal/buildinfo.Version=$$(git rev-parse --short HEAD 2>/dev/null || echo dev) -X github.com/radarnex/httpcatch/internal/buildinfo.BuildTime=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o $(BIN_DIR)/$(BINARY) $(PKG)
 
 test: ## Run unit + integration tests
 	$(GO) test ./...

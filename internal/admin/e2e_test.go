@@ -32,7 +32,7 @@ func startServer(t *testing.T, token string) string {
 		SessionTTL:    time.Hour,
 		SessionSecure: false,
 	}
-	srv, err := admin.New(cfg, discardLogger())
+	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{})
 	if err != nil {
 		t.Fatalf("admin.New: %v", err)
 	}
