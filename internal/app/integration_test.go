@@ -1328,3 +1328,88 @@ func TestIntegration_HeaderAndQueryRedaction(t *testing.T) {
 		t.Errorf("unredacted warning should not fire when rules are configured, got:\n%s", logBuf.String())
 	}
 }
+
+func TestIntegration_CookieAndHeaderOrdering_HeaderRuleWins(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Workers = 1
+	cfg.QueueSize = 32
+	cfg.Sinks.Stdout = true
+	cfg.Redaction.Headers = []string{"cookie"}
+	cfg.Redaction.Cookies = []config.CookieRuleConfig{
+		{Mode: "redact", Names: []string{"session_id"}},
+	}
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	_, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	fire(t, ts.URL+"/cookie-ordering-header-wins", "GET", nil, http.Header{
+		"Cookie":   []string{"session_id=secret; user_pref=dark; tracking=abc"},
+		"X-Marker": []string{"hdr-wins"},
+	})
+
+	if !waitFor(func() bool { return stdoutBuf.CountLines() >= 1 }, 5*time.Second) {
+		t.Fatal("timed out waiting for record")
+	}
+	records, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records: got %d want 1", len(records))
+	}
+	vals := records[0].Headers["Cookie"]
+	if len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("Cookie: got %v, want [%q] (header rule must overwrite the cookie redactor's output)", vals, redact.Redacted)
+	}
+}
+
+func TestIntegration_CookieOrdering_OnlyNamedCookieRedacted(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Workers = 1
+	cfg.QueueSize = 32
+	cfg.Sinks.Stdout = true
+	cfg.Redaction.Cookies = []config.CookieRuleConfig{
+		{Mode: "redact", Names: []string{"session_id"}},
+	}
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	_, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	fire(t, ts.URL+"/cookie-ordering-cookie-only", "GET", nil, http.Header{
+		"Cookie":   []string{"session_id=secret; user_pref=dark; tracking=abc"},
+		"X-Marker": []string{"cookie-only"},
+	})
+
+	if !waitFor(func() bool { return stdoutBuf.CountLines() >= 1 }, 5*time.Second) {
+		t.Fatal("timed out waiting for record")
+	}
+	records, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records: got %d want 1", len(records))
+	}
+	vals := records[0].Headers["Cookie"]
+	if len(vals) != 1 {
+		t.Fatalf("Cookie: got %v, want 1 value", vals)
+	}
+	got := vals[0]
+	if !strings.Contains(got, "session_id="+redact.Redacted) {
+		t.Errorf("Cookie %q missing session_id=%q", got, redact.Redacted)
+	}
+	if !strings.Contains(got, "user_pref=dark") {
+		t.Errorf("Cookie %q missing user_pref=dark (sibling cookie should survive)", got)
+	}
+	if !strings.Contains(got, "tracking=abc") {
+		t.Errorf("Cookie %q missing tracking=abc (sibling cookie should survive)", got)
+	}
+}

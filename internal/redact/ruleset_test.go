@@ -376,6 +376,209 @@ redaction:
 	}
 }
 
+func TestCookieRules_Modes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		cookies   []config.CookieRuleConfig
+		headerKey string
+		input     []string
+		wantKey   string
+		wantVals  []string
+		wantGone  bool
+	}{
+		{
+			name:      "redact replaces value keeps name preserves others",
+			cookies:   []config.CookieRuleConfig{{Mode: "redact", Names: []string{"session_id"}}},
+			headerKey: "Cookie",
+			input:     []string{"session_id=secret; user_pref=dark; tracking=abc"},
+			wantKey:   "Cookie",
+			wantVals:  []string{"session_id=" + redact.Redacted + "; user_pref=dark; tracking=abc"},
+		},
+		{
+			name:      "default mode is redact",
+			cookies:   []config.CookieRuleConfig{{Names: []string{"session_id"}}},
+			headerKey: "Cookie",
+			input:     []string{"session_id=secret; user_pref=dark"},
+			wantKey:   "Cookie",
+			wantVals:  []string{"session_id=" + redact.Redacted + "; user_pref=dark"},
+		},
+		{
+			name:      "strip removes named cookies keeps others",
+			cookies:   []config.CookieRuleConfig{{Mode: "strip", Names: []string{"tracking"}}},
+			headerKey: "Cookie",
+			input:     []string{"session_id=keep; tracking=drop; user_pref=dark"},
+			wantKey:   "Cookie",
+			wantVals:  []string{"session_id=keep; user_pref=dark"},
+		},
+		{
+			name:      "strip emptying header removes header",
+			cookies:   []config.CookieRuleConfig{{Mode: "strip", Names: []string{"only"}}},
+			headerKey: "Cookie",
+			input:     []string{"only=gone"},
+			wantGone:  true,
+		},
+		{
+			name:      "allowlist keeps only named cookies",
+			cookies:   []config.CookieRuleConfig{{Mode: "allowlist", Names: []string{"session_id"}}},
+			headerKey: "Cookie",
+			input:     []string{"session_id=keep; tracking=drop; user_pref=drop"},
+			wantKey:   "Cookie",
+			wantVals:  []string{"session_id=keep"},
+		},
+		{
+			name:      "rule on unknown cookie name is a no-op",
+			cookies:   []config.CookieRuleConfig{{Mode: "redact", Names: []string{"absent"}}},
+			headerKey: "Cookie",
+			input:     []string{"session_id=keep; user_pref=dark"},
+			wantKey:   "Cookie",
+			wantVals:  []string{"session_id=keep; user_pref=dark"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rs, err := redact.NewRuleset(config.RedactionConfig{Cookies: tc.cookies})
+			if err != nil {
+				t.Fatalf("NewRuleset: %v", err)
+			}
+
+			rec := makeRecord(map[string][]string{tc.headerKey: tc.input})
+			out := rs.Redact(rec)
+
+			if tc.wantGone {
+				if _, ok := out.Headers[tc.headerKey]; ok {
+					t.Errorf("header %q should have been removed; got %v", tc.headerKey, out.Headers[tc.headerKey])
+				}
+				return
+			}
+			got := out.Headers[tc.wantKey]
+			if len(got) != len(tc.wantVals) {
+				t.Fatalf("%s: got %d values, want %d (%v)", tc.wantKey, len(got), len(tc.wantVals), got)
+			}
+			for i, v := range got {
+				if v != tc.wantVals[i] {
+					t.Errorf("%s[%d]: got %q, want %q", tc.wantKey, i, v, tc.wantVals[i])
+				}
+			}
+		})
+	}
+}
+
+func TestCookieRules_SetCookie(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		cookies  []config.CookieRuleConfig
+		input    []string
+		wantVals []string
+		wantGone bool
+	}{
+		{
+			name:     "redact preserves attributes",
+			cookies:  []config.CookieRuleConfig{{Mode: "redact", Names: []string{"sid"}}},
+			input:    []string{"sid=secret; Path=/; HttpOnly", "pref=dark; Path=/"},
+			wantVals: []string{"sid=" + redact.Redacted + "; Path=/; HttpOnly", "pref=dark; Path=/"},
+		},
+		{
+			name:     "strip drops named entries",
+			cookies:  []config.CookieRuleConfig{{Mode: "strip", Names: []string{"sid"}}},
+			input:    []string{"sid=secret; Path=/", "pref=dark; Path=/"},
+			wantVals: []string{"pref=dark; Path=/"},
+		},
+		{
+			name:     "allowlist keeps only named entries",
+			cookies:  []config.CookieRuleConfig{{Mode: "allowlist", Names: []string{"sid"}}},
+			input:    []string{"sid=keep; Path=/", "tracking=drop", "pref=drop"},
+			wantVals: []string{"sid=keep; Path=/"},
+		},
+		{
+			name:     "strip emptying Set-Cookie removes header",
+			cookies:  []config.CookieRuleConfig{{Mode: "strip", Names: []string{"only"}}},
+			input:    []string{"only=gone; Path=/"},
+			wantGone: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rs, err := redact.NewRuleset(config.RedactionConfig{Cookies: tc.cookies})
+			if err != nil {
+				t.Fatalf("NewRuleset: %v", err)
+			}
+
+			rec := makeRecord(map[string][]string{"Set-Cookie": tc.input})
+			out := rs.Redact(rec)
+
+			if tc.wantGone {
+				if _, ok := out.Headers["Set-Cookie"]; ok {
+					t.Errorf("Set-Cookie should have been removed; got %v", out.Headers["Set-Cookie"])
+				}
+				return
+			}
+			got := out.Headers["Set-Cookie"]
+			if len(got) != len(tc.wantVals) {
+				t.Fatalf("Set-Cookie: got %d values, want %d (%v)", len(got), len(tc.wantVals), got)
+			}
+			for i, v := range got {
+				if v != tc.wantVals[i] {
+					t.Errorf("Set-Cookie[%d]: got %q, want %q", i, v, tc.wantVals[i])
+				}
+			}
+		})
+	}
+}
+
+func TestCookieRules_BothHeadersProcessed(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Cookies: []config.CookieRuleConfig{{Mode: "redact", Names: []string{"sid"}}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecord(map[string][]string{
+		"Cookie":     {"sid=req-secret; other=keep"},
+		"Set-Cookie": {"sid=resp-secret; Path=/", "tracking=keep"},
+	})
+	out := rs.Redact(rec)
+
+	wantReq := "sid=" + redact.Redacted + "; other=keep"
+	if vals := out.Headers["Cookie"]; len(vals) != 1 || vals[0] != wantReq {
+		t.Errorf("Cookie: got %v, want [%q]", vals, wantReq)
+	}
+	wantResp := []string{"sid=" + redact.Redacted + "; Path=/", "tracking=keep"}
+	got := out.Headers["Set-Cookie"]
+	if len(got) != 2 || got[0] != wantResp[0] || got[1] != wantResp[1] {
+		t.Errorf("Set-Cookie: got %v, want %v", got, wantResp)
+	}
+}
+
+func TestCookieRules_UnknownModeIsStartupError(t *testing.T) {
+	t.Parallel()
+
+	_, err := redact.NewRuleset(config.RedactionConfig{
+		Cookies: []config.CookieRuleConfig{{Mode: "wipe", Names: []string{"sid"}}},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown cookie mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "cookies") {
+		t.Errorf("error %q does not mention cookies", err)
+	}
+	if !strings.Contains(err.Error(), "wipe") {
+		t.Errorf("error %q does not mention bad mode %q", err, "wipe")
+	}
+}
+
 func TestConfigLoad_AbsentRedactionBlock(t *testing.T) {
 	t.Parallel()
 

@@ -32,6 +32,15 @@ type SinksConfig struct {
 type RedactionConfig struct {
 	Headers     []string
 	QueryParams []string
+	Cookies     []CookieRuleConfig
+}
+
+// CookieRuleConfig is one entry under `cookies:` — a mode plus the names the
+// mode applies to. Mode is left as a string at the config layer; the ruleset
+// loader validates it against the set of known modes.
+type CookieRuleConfig struct {
+	Mode  string
+	Names []string
 }
 
 type Config struct {
@@ -176,6 +185,13 @@ func applyRaw(cfg *Config, raw rawConfig) {
 	if raw.Redaction != nil {
 		cfg.Redaction.Headers = raw.Redaction.Headers
 		cfg.Redaction.QueryParams = raw.Redaction.QueryParams
+		if len(raw.Redaction.Cookies) > 0 {
+			cookies := make([]CookieRuleConfig, len(raw.Redaction.Cookies))
+			for i, c := range raw.Redaction.Cookies {
+				cookies[i] = CookieRuleConfig{Mode: c.Mode, Names: c.Names}
+			}
+			cfg.Redaction.Cookies = cookies
+		}
 	}
 }
 
