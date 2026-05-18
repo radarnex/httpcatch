@@ -48,6 +48,8 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources) (*S
 	store := NewSessionStore(time.Now)
 	auth := &authHandlers{cfg: cfg, store: store, logger: logger}
 
+	etags := buildEtags(uiFS)
+
 	r := chi.NewRouter()
 	r.Get("/healthz", healthzHandler)
 	internal := toInternal(sources)
@@ -55,9 +57,11 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources) (*S
 	r.Get("/login", auth.loginPageHandler)
 	r.Post("/auth/login", auth.loginPostHandler)
 	r.Post("/auth/logout", auth.logoutHandler)
+	r.Get("/static/*", staticHandler(etags))
 
 	r.Group(func(r chi.Router) {
 		r.Use(Middleware(cfg.Token, store))
+		r.Get("/", indexHandler())
 		r.Get("/status", statusHandler(internal, internal.unredacted))
 	})
 

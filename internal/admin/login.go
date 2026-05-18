@@ -10,7 +10,7 @@ import (
 	"github.com/radarnex/httpcatch/internal/config"
 )
 
-var loginTmpl = template.Must(template.New("login").Parse(loginHTML))
+var loginTmpl = template.Must(template.ParseFS(uiFS, "ui/login.html"))
 
 // authHandlers groups the dependencies shared by the login page, login POST,
 // and logout handlers so they can be registered as methods rather than deeply

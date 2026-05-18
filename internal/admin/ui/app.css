@@ -1,0 +1,141 @@
+:root {
+  --bg: #f8f8f9;
+  --fg: #18181b;
+  --fg-muted: #71717a;
+  --surface: #ffffff;
+  --border: #e4e4e7;
+
+  --banner-danger-bg: #7f1d1d;
+  --banner-danger-fg: #fef2f2;
+  --banner-warn-bg: #78350f;
+  --banner-warn-fg: #fffbeb;
+
+  --chip-bg: #e4e4e7;
+  --chip-fg: #3f3f46;
+  --chip-warn-bg: #92400e;
+  --chip-warn-fg: #fef3c7;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 1rem;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* ── Topbar ─────────────────────────────────────────────────── */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: .625rem 1.25rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.wordmark {
+  font-weight: 600;
+  font-size: 1rem;
+  letter-spacing: -.01em;
+  margin-right: auto;
+}
+
+/* ── Chips ──────────────────────────────────────────────────── */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .25rem;
+  padding: .125rem .5rem;
+  border-radius: 9999px;
+  font-size: .75rem;
+  font-weight: 500;
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  white-space: nowrap;
+}
+
+.chip-warn {
+  background: var(--chip-warn-bg);
+  color: var(--chip-warn-fg);
+}
+
+/* ── Logout ─────────────────────────────────────────────────── */
+
+.logout-form {
+  display: flex;
+  margin: 0;
+}
+
+.logout-btn {
+  padding: .25rem .75rem;
+  font-size: .8125rem;
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.logout-btn:hover {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* ── Main ───────────────────────────────────────────────────── */
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem;
+}
+
+/* ── Banners ────────────────────────────────────────────────── */
+
+.banner {
+  display: block;
+  width: 100%;
+  padding: .75rem 1.25rem;
+  border-radius: 6px;
+  font-size: .9375rem;
+  font-weight: 500;
+  margin-bottom: .75rem;
+}
+
+.banner-danger {
+  background: var(--banner-danger-bg);
+  color: var(--banner-danger-fg);
+}
+
+.banner-warn {
+  background: var(--banner-warn-bg);
+  color: var(--banner-warn-fg);
+}
+
+/* ── Placeholder ────────────────────────────────────────────── */
+
+.placeholder {
+  padding: 3rem 1rem;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: .9375rem;
+}
+
+/* ── Footer ─────────────────────────────────────────────────── */
+
+.buildinfo {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 1.5rem;
+  font-size: .75rem;
+  color: var(--fg-muted);
+}

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+	"golang.org/x/net/html"
 
 	"github.com/radarnex/httpcatch/internal/app"
 	"github.com/radarnex/httpcatch/internal/capture"
@@ -1955,6 +1957,131 @@ func TestIntegration_Status(t *testing.T) {
 		return c2["captured_without_service_total"].(float64) == 1
 	}, 5*time.Second) {
 		t.Error("captured_without_service_total did not reach 1 within timeout")
+	}
+}
+
+// collectIDs walks an HTML parse tree and returns all id attribute values.
+func collectIDs(n *html.Node, ids map[string]bool) {
+	if n.Type == html.ElementNode {
+		for _, a := range n.Attr {
+			if a.Key == "id" {
+				ids[a.Val] = true
+			}
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		collectIDs(c, ids)
+	}
+}
+
+func TestIntegration_UIShell(t *testing.T) {
+	t.Parallel()
+
+	const token = "integration-ui-token"
+
+	cfg := config.Defaults()
+	cfg.Admin.Token = token
+
+	_, adminURL, teardown := startFullApp(t, cfg)
+	defer teardown()
+
+	noFollow := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// Log in to obtain a session cookie.
+	form := url.Values{"token": {token}}
+	loginResp, err := noFollow.PostForm(adminURL+"/auth/login", form)
+	if err != nil {
+		t.Fatalf("POST /auth/login: %v", err)
+	}
+	loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusSeeOther {
+		t.Errorf("login status: got %d want 303", loginResp.StatusCode)
+	}
+	var sessionCookie *http.Cookie
+	for _, c := range loginResp.Cookies() {
+		if c.Name == "httpcatch_session" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("no session cookie after login")
+	}
+
+	// GET / with the session cookie → 200 + HTML body.
+	req, _ := http.NewRequest(http.MethodGet, adminURL+"/", nil)
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(sessionCookie)
+	resp, err := noFollow.Do(req)
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET / status: got %d want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("GET / Content-Type: got %q", ct)
+	}
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "httpcatch") {
+		t.Error("GET / body: missing wordmark httpcatch")
+	}
+	if !strings.Contains(bodyStr, "/static/app.css") {
+		t.Error("GET / body: missing /static/app.css reference")
+	}
+	if !strings.Contains(bodyStr, "/static/app.js") {
+		t.Error("GET / body: missing /static/app.js reference")
+	}
+
+	// Parse HTML and assert the required banner DOM ids are present.
+	doc, err := html.Parse(strings.NewReader(bodyStr))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+	ids := make(map[string]bool)
+	collectIDs(doc, ids)
+	for _, id := range []string{
+		"banner-unredacted", "banner-dropped", "banner-redaction-errors",
+		"chip-service", "chip-correlation", "chip-version", "buildinfo",
+	} {
+		if !ids[id] {
+			t.Errorf("index.html: missing element with id=%q", id)
+		}
+	}
+
+	// GET /static/app.css (no auth) → 200 + correct content type.
+	cssResp, err := http.Get(adminURL + "/static/app.css")
+	if err != nil {
+		t.Fatalf("GET /static/app.css: %v", err)
+	}
+	io.Copy(io.Discard, cssResp.Body)
+	cssResp.Body.Close()
+	if cssResp.StatusCode != http.StatusOK {
+		t.Errorf("GET /static/app.css status: got %d want 200", cssResp.StatusCode)
+	}
+	if ct := cssResp.Header.Get("Content-Type"); ct != "text/css; charset=utf-8" {
+		t.Errorf("GET /static/app.css Content-Type: got %q", ct)
+	}
+
+	// GET /static/app.js (no auth) → 200 + correct content type.
+	jsResp, err := http.Get(adminURL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("GET /static/app.js: %v", err)
+	}
+	io.Copy(io.Discard, jsResp.Body)
+	jsResp.Body.Close()
+	if jsResp.StatusCode != http.StatusOK {
+		t.Errorf("GET /static/app.js status: got %d want 200", jsResp.StatusCode)
+	}
+	if ct := jsResp.Header.Get("Content-Type"); ct != "application/javascript; charset=utf-8" {
+		t.Errorf("GET /static/app.js Content-Type: got %q", ct)
 	}
 }
 
