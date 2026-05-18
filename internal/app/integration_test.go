@@ -1413,6 +1413,92 @@ func TestIntegration_JSONPathRedaction(t *testing.T) {
 	}
 }
 
+func TestIntegration_RegexRedaction(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Workers = 2
+	cfg.QueueSize = 64
+	cfg.Sinks.Stdout = true
+	cfg.Sinks.Memory = true
+	cfg.Sinks.MemoryCapacity = 100
+	cfg.Redaction.Regex = []config.RegexRuleConfig{
+		{Name: "ipv4", Pattern: `\b(?:\d{1,3}\.){3}\d{1,3}\b`},
+		{Name: "token_like", Pattern: `Bearer\s+[A-Za-z0-9._-]+`},
+		{Name: "aws_access_key", Pattern: `AKIA[0-9A-Z]{16}`},
+	}
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	body := []byte(`{"client":"10.0.0.1","note":"ok"}`)
+	fire(t, ts.URL+"/regex-redact?key=AKIAABCDEFGHIJKLMNOP&page=2", "POST", body, http.Header{
+		"Content-Type":  []string{"application/json"},
+		"Authorization": []string{"Bearer deadbeefdeadbeef"},
+		"X-Marker":      []string{"req-regex"},
+	})
+
+	if !waitFor(func() bool {
+		return stdoutBuf.CountLines() >= 1 && a.Memory.Len() >= 1
+	}, 5*time.Second) {
+		t.Fatalf("timed out: stdout=%d memory=%d", stdoutBuf.CountLines(), a.Memory.Len())
+	}
+
+	stdoutRecords, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode stdout: %v", err)
+	}
+	if len(stdoutRecords) != 1 {
+		t.Fatalf("stdout: got %d records want 1", len(stdoutRecords))
+	}
+	rec := stdoutRecords[0]
+
+	wantBody := `{"client":"` + redact.Redacted + `","note":"ok"}`
+	if string(rec.Body) != wantBody {
+		t.Errorf("body: got %q, want %q", rec.Body, wantBody)
+	}
+	if vals := rec.Headers["Authorization"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("Authorization: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := rec.Query["key"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("query key: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := rec.Query["page"]; len(vals) != 1 || vals[0] != "2" {
+		t.Errorf("query page: got %v, want [2]", vals)
+	}
+
+	memRecords := a.Memory.Recent(1)
+	if len(memRecords) != 1 {
+		t.Fatalf("memory: got %d records want 1", len(memRecords))
+	}
+	memRec := memRecords[0]
+	if string(memRec.Body) != wantBody {
+		t.Errorf("memory body: got %q, want %q", memRec.Body, wantBody)
+	}
+	if vals := memRec.Headers["Authorization"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("memory Authorization: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := memRec.Query["key"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("memory query key: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := memRec.Query["page"]; len(vals) != 1 || vals[0] != "2" {
+		t.Errorf("memory query page: got %v, want [2]", vals)
+	}
+
+	if rec.ID != memRec.ID {
+		t.Errorf("ID: stdout=%q memory=%q", rec.ID, memRec.ID)
+	}
+
+	if got := a.Ruleset.RedactionErrorsTotal(); got != 0 {
+		t.Errorf("RedactionErrorsTotal: got %d, want 0", got)
+	}
+	if strings.Contains(logBuf.String(), "unredacted") {
+		t.Errorf("unredacted warning should not fire when rules are configured, got:\n%s", logBuf.String())
+	}
+}
+
 func TestIntegration_CookieAndHeaderOrdering_HeaderRuleWins(t *testing.T) {
 	t.Parallel()
 

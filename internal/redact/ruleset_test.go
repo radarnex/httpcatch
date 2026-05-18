@@ -903,3 +903,357 @@ capture_port: 8080
 		t.Errorf("expected empty headers, got %v", cfg.Redaction.Headers)
 	}
 }
+
+const ipv4Pattern = `\b(?:\d{1,3}\.){3}\d{1,3}\b`
+
+func TestRegexRules_BodyTextLike(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "ipv4", Pattern: ipv4Pattern}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("application/json", []byte(`{"client":"10.0.0.1","note":"ok"}`))
+	out := rs.Redact(rec)
+
+	want := `{"client":"` + redact.Redacted + `","note":"ok"}`
+	if string(out.Body) != want {
+		t.Errorf("body: got %q, want %q", out.Body, want)
+	}
+}
+
+func TestRegexRules_HeaderValueMatched(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "ipv4", Pattern: ipv4Pattern}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecord(map[string][]string{
+		"X-Forwarded-For": {"192.168.1.1"},
+	})
+	out := rs.Redact(rec)
+
+	if vals := out.Headers["X-Forwarded-For"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("X-Forwarded-For: got %v, want [%q]", vals, redact.Redacted)
+	}
+}
+
+func TestRegexRules_QueryValueMatched(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "ipv4", Pattern: ipv4Pattern}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithQuery(map[string][]string{"ip": {"10.0.0.5"}})
+	out := rs.Redact(rec)
+
+	if vals := out.Query["ip"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("ip: got %v, want [%q]", vals, redact.Redacted)
+	}
+}
+
+func TestRegexRules_NoMatchIsByteEquivalentNoOp(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "ipv4", Pattern: ipv4Pattern}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	body := []byte(`{"client":"alice","note":"ok"}`)
+	original := append([]byte(nil), body...)
+	rec := &capture.CapturedRecord{
+		ContentType: "application/json",
+		Body:        body,
+		Headers:     map[string][]string{"X-Note": {"no ip here"}},
+		Query:       map[string][]string{"page": {"2"}},
+	}
+	out := rs.Redact(rec)
+
+	if string(out.Body) != string(original) {
+		t.Errorf("body changed: got %q, want %q", out.Body, original)
+	}
+	if vals := out.Headers["X-Note"]; len(vals) != 1 || vals[0] != "no ip here" {
+		t.Errorf("X-Note: got %v, want [no ip here]", vals)
+	}
+	if vals := out.Query["page"]; len(vals) != 1 || vals[0] != "2" {
+		t.Errorf("page: got %v, want [2]", vals)
+	}
+}
+
+func TestRegexRules_MultipleMatchesAllReplaced(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "ipv4", Pattern: ipv4Pattern}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("text/plain", []byte("a 10.0.0.1 b 10.0.0.2 c"))
+	out := rs.Redact(rec)
+
+	want := "a " + redact.Redacted + " b " + redact.Redacted + " c"
+	if string(out.Body) != want {
+		t.Errorf("body: got %q, want %q", out.Body, want)
+	}
+}
+
+func TestRegexRules_BinaryBodySkippedHeadersAndQueryScanned(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "ipv4", Pattern: ipv4Pattern}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	bodyBytes := []byte("10.0.0.1 inside-binary")
+	original := append([]byte(nil), bodyBytes...)
+	rec := &capture.CapturedRecord{
+		ContentType: "application/octet-stream",
+		Body:        bodyBytes,
+		Headers:     map[string][]string{"X-IP": {"192.168.1.1"}},
+		Query:       map[string][]string{"ip": {"10.0.0.5"}},
+	}
+	out := rs.Redact(rec)
+
+	if string(out.Body) != string(original) {
+		t.Errorf("binary body changed: got %q, want %q", out.Body, original)
+	}
+	if vals := out.Headers["X-IP"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("X-IP: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := out.Query["ip"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("query ip: got %v, want [%q]", vals, redact.Redacted)
+	}
+}
+
+func TestRegexRules_NonTextBodySkippedHeadersAndQueryScanned(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "ipv4", Pattern: ipv4Pattern}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	bodyBytes := []byte("not really a png but 10.0.0.1 lives here")
+	original := append([]byte(nil), bodyBytes...)
+	rec := &capture.CapturedRecord{
+		ContentType: "image/png",
+		Body:        bodyBytes,
+		Headers:     map[string][]string{"X-IP": {"192.168.1.1"}},
+		Query:       map[string][]string{"ip": {"10.0.0.5"}},
+	}
+	out := rs.Redact(rec)
+
+	if string(out.Body) != string(original) {
+		t.Errorf("image body changed: got %q, want %q", out.Body, original)
+	}
+	if vals := out.Headers["X-IP"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("X-IP: got %v, want [%q]", vals, redact.Redacted)
+	}
+	if vals := out.Query["ip"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("query ip: got %v, want [%q]", vals, redact.Redacted)
+	}
+}
+
+func TestIsTextLikeContentType(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		ct   string
+		want bool
+	}{
+		{"json bare", "application/json", true},
+		{"json with charset", "application/json; charset=utf-8", true},
+		{"xml bare", "application/xml", true},
+		{"form urlencoded", "application/x-www-form-urlencoded", true},
+		{"text html", "text/html", true},
+		{"text plain with charset", "text/plain; charset=utf-8", true},
+		{"vendor +json suffix", "application/vnd.api+json", true},
+		{"atom +xml suffix", "application/atom+xml", true},
+		{"octet stream", "application/octet-stream", false},
+		{"png image", "image/png", false},
+		{"pdf", "application/pdf", false},
+		{"empty", "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := redact.IsTextLikeContentType(tc.ct); got != tc.want {
+				t.Errorf("%q: got %v, want %v", tc.ct, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRegexRules_MultipleRulesBodyAndHeader(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{
+			{Name: "ipv4", Pattern: ipv4Pattern},
+			{Name: "token_like", Pattern: `Bearer\s+[A-Za-z0-9._-]+`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := &capture.CapturedRecord{
+		ContentType: "application/json",
+		Body:        []byte(`{"client":"10.0.0.1"}`),
+		Headers:     map[string][]string{"Authorization": {"Bearer abc.def-123"}},
+	}
+	out := rs.Redact(rec)
+
+	wantBody := `{"client":"` + redact.Redacted + `"}`
+	if string(out.Body) != wantBody {
+		t.Errorf("body: got %q, want %q", out.Body, wantBody)
+	}
+	if vals := out.Headers["Authorization"]; len(vals) != 1 || vals[0] != redact.Redacted {
+		t.Errorf("Authorization: got %v, want [%q]", vals, redact.Redacted)
+	}
+}
+
+func TestNewRuleset_WithRegex(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "ipv4", Pattern: ipv4Pattern}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+	if rs.IsUnredacted() {
+		t.Error("config with regex should yield IsUnredacted() == false")
+	}
+}
+
+func TestNewRuleset_InvalidRegexPatternIsLoaderError(t *testing.T) {
+	t.Parallel()
+
+	_, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "broken", Pattern: "["}},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid regex pattern, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "regex") {
+		t.Errorf("error %q does not mention regex", msg)
+	}
+	if !strings.Contains(msg, "broken") {
+		t.Errorf("error %q does not mention offending rule name", msg)
+	}
+	// The wrapped error message from regexp.Compile mentions "error parsing
+	// regexp" — assert the original error is surfaced for operator triage.
+	if !strings.Contains(msg, "parsing regexp") {
+		t.Errorf("error %q does not surface the regexp compile error", msg)
+	}
+}
+
+func TestNewRuleset_EmptyRegexPatternIsLoaderError(t *testing.T) {
+	t.Parallel()
+
+	_, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "no-pattern", Pattern: ""}},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty regex pattern, got nil")
+	}
+	if !strings.Contains(err.Error(), "no-pattern") {
+		t.Errorf("error %q does not mention offending rule name", err)
+	}
+	if !strings.Contains(err.Error(), "regex") {
+		t.Errorf("error %q does not mention regex", err)
+	}
+}
+
+func TestNewRuleset_EmptyRegexNameIsLoaderError(t *testing.T) {
+	t.Parallel()
+
+	_, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "", Pattern: ipv4Pattern}},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty regex name, got nil")
+	}
+	if !strings.Contains(err.Error(), "regex") {
+		t.Errorf("error %q does not mention regex", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "name") {
+		t.Errorf("error %q does not mention the missing name", err)
+	}
+}
+
+func TestConfigLoad_InvalidRegex_FailsRulesetConstruction(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, `
+redaction:
+  regex:
+    - name: broken
+      pattern: "["
+`)
+	cfg, err := config.Load(path, noEnv)
+	if err != nil {
+		t.Fatalf("config.Load should succeed (loader does not compile patterns): %v", err)
+	}
+
+	_, err = redact.NewRuleset(cfg.Redaction)
+	if err == nil {
+		t.Fatal("expected NewRuleset to fail on invalid regex pattern, got nil")
+	}
+	if !strings.Contains(err.Error(), "regex") {
+		t.Errorf("error %q does not mention regex", err)
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Errorf("error %q does not mention rule name", err)
+	}
+}
+
+func TestConfigLoad_ValidRegex_LoadsCleanly(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, `
+redaction:
+  regex:
+    - name: ipv4
+      pattern: '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    - name: aws_access_key
+      pattern: 'AKIA[0-9A-Z]{16}'
+`)
+	cfg, err := config.Load(path, noEnv)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	rs, err := redact.NewRuleset(cfg.Redaction)
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+	if rs.IsUnredacted() {
+		t.Error("ruleset with regex rules should not report unredacted")
+	}
+}

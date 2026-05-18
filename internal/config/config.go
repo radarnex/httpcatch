@@ -33,6 +33,7 @@ type RedactionConfig struct {
 	Headers     []string
 	QueryParams []string
 	JSONPaths   []string
+	Regex       []RegexRuleConfig
 	Cookies     []CookieRuleConfig
 }
 
@@ -42,6 +43,15 @@ type RedactionConfig struct {
 type CookieRuleConfig struct {
 	Mode  string
 	Names []string
+}
+
+// RegexRuleConfig is one entry under `regex:` — a human-readable name plus the
+// RE2 pattern. The pattern is left as a string at the config layer; the
+// ruleset loader compiles it and surfaces any compile error attributed to the
+// rule name.
+type RegexRuleConfig struct {
+	Name    string
+	Pattern string
 }
 
 type Config struct {
@@ -187,6 +197,13 @@ func applyRaw(cfg *Config, raw rawConfig) {
 		cfg.Redaction.Headers = raw.Redaction.Headers
 		cfg.Redaction.QueryParams = raw.Redaction.QueryParams
 		cfg.Redaction.JSONPaths = raw.Redaction.JSONPaths
+		if len(raw.Redaction.Regex) > 0 {
+			regex := make([]RegexRuleConfig, len(raw.Redaction.Regex))
+			for i, r := range raw.Redaction.Regex {
+				regex[i] = RegexRuleConfig{Name: r.Name, Pattern: r.Pattern}
+			}
+			cfg.Redaction.Regex = regex
+		}
 		if len(raw.Redaction.Cookies) > 0 {
 			cookies := make([]CookieRuleConfig, len(raw.Redaction.Cookies))
 			for i, c := range raw.Redaction.Cookies {

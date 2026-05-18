@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"mime"
 	"net/textproto"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -30,7 +31,10 @@ type cookieRule struct {
 	names []string
 }
 
-type regexRule struct{}
+type regexRule struct {
+	name    string
+	pattern *regexp.Regexp
+}
 
 type Ruleset struct {
 	headers         []string
@@ -76,10 +80,26 @@ func NewRuleset(cfg config.RedactionConfig) (*Ruleset, error) {
 		cookies = append(cookies, cookieRule{mode: mode, names: names})
 	}
 
+	regex := make([]regexRule, 0, len(cfg.Regex))
+	for _, r := range cfg.Regex {
+		if r.Name == "" {
+			return nil, fmt.Errorf("redaction: regex: rule name must not be empty")
+		}
+		if r.Pattern == "" {
+			return nil, fmt.Errorf("redaction: regex: rule %q: pattern must not be empty", r.Name)
+		}
+		compiled, err := regexp.Compile(r.Pattern)
+		if err != nil {
+			return nil, fmt.Errorf("redaction: regex: rule %q: %w", r.Name, err)
+		}
+		regex = append(regex, regexRule{name: r.Name, pattern: compiled})
+	}
+
 	return &Ruleset{
 		headers:     headers,
 		queryParams: queryParams,
 		jsonPaths:   jsonPaths,
+		regex:       regex,
 		cookies:     cookies,
 	}, nil
 }
@@ -132,7 +152,79 @@ func (r *Ruleset) Redact(rec *capture.CapturedRecord) *capture.CapturedRecord {
 	return out
 }
 
-func applyRegexRules(_ *capture.CapturedRecord, _ []regexRule) {}
+// redactedBytes is the body-side replacement buffer; pre-allocating once
+// avoids the per-match []byte conversion regexp.ReplaceAll would otherwise
+// perform. ReplaceAll treats $ in the replacement as a backreference; the
+// literal "[REDACTED]" is $-free, but a ReplaceAllLiteral variant would
+// require a string, so the body uses ReplaceAll over a constant []byte and
+// the headers/query paths use ReplaceAllLiteralString to immunise both
+// against future changes to the marker.
+var redactedBytes = []byte(Redacted)
+
+func applyRegexRules(out *capture.CapturedRecord, rules []regexRule) {
+	if len(rules) == 0 {
+		return
+	}
+	bodyEligible := len(out.Body) > 0 && isTextLikeContentType(out.ContentType)
+	for _, rule := range rules {
+		if bodyEligible {
+			out.Body = rule.pattern.ReplaceAll(out.Body, redactedBytes)
+		}
+		for _, vals := range out.Headers {
+			for i, v := range vals {
+				vals[i] = rule.pattern.ReplaceAllLiteralString(v, Redacted)
+			}
+		}
+		for _, vals := range out.Query {
+			for i, v := range vals {
+				vals[i] = rule.pattern.ReplaceAllLiteralString(v, Redacted)
+			}
+		}
+	}
+}
+
+// isTextLikeContentType is the body-application gate for regex rules. It
+// accepts JSON, XML, urlencoded form bodies, any text/* type, and any
+// +json / +xml structured-syntax suffix. Binary media types (octet-stream,
+// image/*, pdf, etc.) are rejected so the regex engine never scans bytes
+// that cannot semantically contain a textual secret.
+func isTextLikeContentType(ct string) bool {
+	media := parseMediaType(ct)
+	if media == "" {
+		return false
+	}
+	switch media {
+	case "application/json", "application/xml", "application/x-www-form-urlencoded":
+		return true
+	}
+	if strings.HasPrefix(media, "text/") {
+		return true
+	}
+	if strings.HasSuffix(media, "+json") || strings.HasSuffix(media, "+xml") {
+		return true
+	}
+	return false
+}
+
+// parseMediaType strips media-type parameters (e.g. "; charset=utf-8") and
+// lowercases the base type. mime.ParseMediaType handles the well-formed
+// case; the manual fallback covers malformed parameter sections without
+// defeating the gate for an otherwise valid base type.
+func parseMediaType(ct string) string {
+	if ct == "" {
+		return ""
+	}
+	media, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		if idx := strings.IndexByte(ct, ';'); idx >= 0 {
+			media = strings.TrimSpace(ct[:idx])
+		} else {
+			media = strings.TrimSpace(ct)
+		}
+		media = strings.ToLower(media)
+	}
+	return media
+}
 
 // applyJSONPathRules redacts values at each configured path when the record's
 // content-type is JSON. Failures are best-effort: on an unparseable body or a
@@ -171,19 +263,9 @@ func applyJSONPathRules(out *capture.CapturedRecord, rules []string, errs *atomi
 // any structured-syntax-suffix variant ending in +json (e.g. application/vnd.api+json).
 // Media-type parameters such as charset are stripped before matching.
 func isJSONContentType(ct string) bool {
-	if ct == "" {
+	media := parseMediaType(ct)
+	if media == "" {
 		return false
-	}
-	media, _, err := mime.ParseMediaType(ct)
-	if err != nil {
-		// Fall back to a manual split so a malformed parameter section does
-		// not defeat the gate for an otherwise valid base type.
-		if idx := strings.IndexByte(ct, ';'); idx >= 0 {
-			media = strings.TrimSpace(ct[:idx])
-		} else {
-			media = strings.TrimSpace(ct)
-		}
-		media = strings.ToLower(media)
 	}
 	if media == "application/json" {
 		return true
