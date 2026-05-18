@@ -1,15 +1,28 @@
 package redact_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/config"
 	"github.com/radarnex/httpcatch/internal/redact"
 )
+
+func gjsonGet(t *testing.T, body []byte, path string) string {
+	t.Helper()
+	return gjson.GetBytes(body, path).String()
+}
+
+func gjsonExists(t *testing.T, body []byte, path string) bool {
+	t.Helper()
+	return gjson.GetBytes(body, path).Exists()
+}
 
 func makeRecord(headers map[string][]string) *capture.CapturedRecord {
 	return &capture.CapturedRecord{
@@ -576,6 +589,303 @@ func TestCookieRules_UnknownModeIsStartupError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "wipe") {
 		t.Errorf("error %q does not mention bad mode %q", err, "wipe")
+	}
+}
+
+func makeRecordWithBody(contentType string, body []byte) *capture.CapturedRecord {
+	return &capture.CapturedRecord{
+		ContentType: contentType,
+		Body:        body,
+	}
+}
+
+func TestJSONPathRules_SimpleKey(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("application/json", []byte(`{"password":"hunter2","user":"alice"}`))
+	out := rs.Redact(rec)
+
+	if got := gjsonGet(t, out.Body, "password"); got != redact.Redacted {
+		t.Errorf("password: got %q, want %q", got, redact.Redacted)
+	}
+	if got := gjsonGet(t, out.Body, "user"); got != "alice" {
+		t.Errorf("user: got %q, want alice", got)
+	}
+	if got := rs.RedactionErrorsTotal(); got != 0 {
+		t.Errorf("RedactionErrorsTotal: got %d, want 0", got)
+	}
+}
+
+func TestJSONPathRules_NestedKey(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"credentials.token"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("application/json",
+		[]byte(`{"credentials":{"token":"deadbeef","user":"alice"},"meta":{"keep":true}}`))
+	out := rs.Redact(rec)
+
+	if got := gjsonGet(t, out.Body, "credentials.token"); got != redact.Redacted {
+		t.Errorf("credentials.token: got %q, want %q", got, redact.Redacted)
+	}
+	if got := gjsonGet(t, out.Body, "credentials.user"); got != "alice" {
+		t.Errorf("credentials.user: got %q, want alice", got)
+	}
+	if got := gjsonGet(t, out.Body, "meta.keep"); got != "true" {
+		t.Errorf("meta.keep: got %q, want true", got)
+	}
+}
+
+func TestJSONPathRules_ArrayWildcard(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"users.#.password"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("application/json",
+		[]byte(`{"users":[{"password":"a","name":"u1"},{"password":"b","name":"u2"},{"password":"c","name":"u3"}]}`))
+	out := rs.Redact(rec)
+
+	for i, want := range []string{redact.Redacted, redact.Redacted, redact.Redacted} {
+		got := gjsonGet(t, out.Body, fmt.Sprintf("users.%d.password", i))
+		if got != want {
+			t.Errorf("users[%d].password: got %q, want %q", i, got, want)
+		}
+	}
+	for i, wantName := range []string{"u1", "u2", "u3"} {
+		got := gjsonGet(t, out.Body, fmt.Sprintf("users.%d.name", i))
+		if got != wantName {
+			t.Errorf("users[%d].name: got %q, want %q", i, got, wantName)
+		}
+	}
+}
+
+func TestJSONPathRules_PathNotPresentIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"secret"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("application/json", []byte(`{"keep":"yes"}`))
+	out := rs.Redact(rec)
+
+	if got := gjsonGet(t, out.Body, "keep"); got != "yes" {
+		t.Errorf("keep: got %q, want yes", got)
+	}
+	if exists := gjsonExists(t, out.Body, "secret"); exists {
+		t.Errorf("secret should not have been created on the body; got body=%s", out.Body)
+	}
+	if got := rs.RedactionErrorsTotal(); got != 0 {
+		t.Errorf("RedactionErrorsTotal: got %d, want 0", got)
+	}
+}
+
+func TestJSONPathRules_NonJSONContentTypeUntouched(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		contentType string
+		body        []byte
+	}{
+		{"xml", "application/xml", []byte(`<root><password>hunter2</password></root>`)},
+		{"binary", "application/octet-stream", []byte{0x00, 0x01, 0x02, 0xff}},
+		{"plain-text", "text/plain", []byte(`password: hunter2`)},
+		{"empty-content-type", "", []byte(`{"password":"hunter2"}`)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+			if err != nil {
+				t.Fatalf("NewRuleset: %v", err)
+			}
+
+			original := append([]byte(nil), tc.body...)
+			rec := makeRecordWithBody(tc.contentType, tc.body)
+			out := rs.Redact(rec)
+
+			if string(out.Body) != string(original) {
+				t.Errorf("body changed: got %q, want %q", out.Body, original)
+			}
+			if got := rs.RedactionErrorsTotal(); got != 0 {
+				t.Errorf("RedactionErrorsTotal: got %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestJSONPathRules_InvalidJSONIncrementsCounter(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	original := []byte(`not-json`)
+	rec := makeRecordWithBody("application/json", original)
+	out := rs.Redact(rec)
+
+	if string(out.Body) != string(original) {
+		t.Errorf("body changed: got %q, want %q", out.Body, original)
+	}
+	if got := rs.RedactionErrorsTotal(); got != 1 {
+		t.Errorf("RedactionErrorsTotal: got %d, want 1", got)
+	}
+}
+
+func TestJSONPathRules_InvalidJSONIncrementsOncePerRecord(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		JSONPaths: []string{"password", "credentials.token", "users.#.password"},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("application/json", []byte(`not-json`))
+	rs.Redact(rec)
+
+	if got := rs.RedactionErrorsTotal(); got != 1 {
+		t.Errorf("RedactionErrorsTotal: got %d, want 1 (one increment per record, not per rule)", got)
+	}
+}
+
+func TestJSONPathRules_EmptyBodyIsSilentNoOp(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("application/json", nil)
+	out := rs.Redact(rec)
+
+	if len(out.Body) != 0 {
+		t.Errorf("body: got %q, want empty", out.Body)
+	}
+	if got := rs.RedactionErrorsTotal(); got != 0 {
+		t.Errorf("RedactionErrorsTotal: got %d, want 0", got)
+	}
+}
+
+func TestJSONPathRules_ContentTypeWithParameters(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		contentType string
+	}{
+		{"charset parameter", "application/json; charset=utf-8"},
+		{"vendor +json suffix", "application/vnd.api+json"},
+		{"vendor +json with parameter", "application/vnd.api+json; charset=utf-8"},
+		{"upper-case base type", "Application/JSON"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+			if err != nil {
+				t.Fatalf("NewRuleset: %v", err)
+			}
+
+			rec := makeRecordWithBody(tc.contentType, []byte(`{"password":"hunter2"}`))
+			out := rs.Redact(rec)
+
+			if got := gjsonGet(t, out.Body, "password"); got != redact.Redacted {
+				t.Errorf("password: got %q, want %q (content-type %q)", got, redact.Redacted, tc.contentType)
+			}
+		})
+	}
+}
+
+func TestJSONPathRules_PreservesKeysAndShape(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("application/json", []byte(`{"password":"hunter2","user":"alice","level":3}`))
+	out := rs.Redact(rec)
+
+	if !gjsonExists(t, out.Body, "password") {
+		t.Error("password key should be preserved")
+	}
+	if got := gjsonGet(t, out.Body, "password"); got != redact.Redacted {
+		t.Errorf("password value: got %q, want %q", got, redact.Redacted)
+	}
+	if got := gjsonGet(t, out.Body, "user"); got != "alice" {
+		t.Errorf("user: got %q, want alice", got)
+	}
+	if got := gjsonGet(t, out.Body, "level"); got != "3" {
+		t.Errorf("level: got %q, want 3", got)
+	}
+}
+
+func TestNewRuleset_InvalidJSONPathIsLoaderError(t *testing.T) {
+	t.Parallel()
+
+	_, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{""}})
+	if err == nil {
+		t.Fatal("expected error for empty json path, got nil")
+	}
+	if !strings.Contains(err.Error(), "json_paths") {
+		t.Errorf("error %q does not mention json_paths", err)
+	}
+}
+
+func TestConfigLoad_InvalidJSONPath_FailsRulesetConstruction(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, `
+redaction:
+  json_paths:
+    - ""
+`)
+	cfg, err := config.Load(path, noEnv)
+	if err != nil {
+		t.Fatalf("config.Load should succeed (loader does not validate path syntax): %v", err)
+	}
+
+	_, err = redact.NewRuleset(cfg.Redaction)
+	if err == nil {
+		t.Fatal("expected NewRuleset to fail on invalid json path, got nil")
+	}
+	if !strings.Contains(err.Error(), "json_paths") {
+		t.Errorf("error %q does not mention json_paths", err)
+	}
+}
+
+func TestNewRuleset_WithJSONPaths(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+	if rs.IsUnredacted() {
+		t.Error("config with json_paths should yield IsUnredacted() == false")
 	}
 }
 

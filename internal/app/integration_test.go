@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/radarnex/httpcatch/internal/app"
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/config"
@@ -1324,6 +1326,88 @@ func TestIntegration_HeaderAndQueryRedaction(t *testing.T) {
 		t.Errorf("ID: stdout=%q memory=%q", rec.ID, memRec.ID)
 	}
 
+	if strings.Contains(logBuf.String(), "unredacted") {
+		t.Errorf("unredacted warning should not fire when rules are configured, got:\n%s", logBuf.String())
+	}
+}
+
+func TestIntegration_JSONPathRedaction(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Workers = 2
+	cfg.QueueSize = 64
+	cfg.Sinks.Stdout = true
+	cfg.Sinks.Memory = true
+	cfg.Sinks.MemoryCapacity = 100
+	cfg.Redaction.JSONPaths = []string{"credentials.token"}
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	body := []byte(`{"credentials":{"token":"deadbeef","user":"alice"},"meta":{"keep":true}}`)
+	fire(t, ts.URL+"/json-redact?keep=2", "POST", body, http.Header{
+		"Content-Type": []string{"application/json"},
+		"X-Safe":       []string{"keep-me"},
+		"X-Marker":     []string{"req-json"},
+	})
+
+	if !waitFor(func() bool {
+		return stdoutBuf.CountLines() >= 1 && a.Memory.Len() >= 1
+	}, 5*time.Second) {
+		t.Fatalf("timed out: stdout=%d memory=%d", stdoutBuf.CountLines(), a.Memory.Len())
+	}
+
+	stdoutRecords, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode stdout: %v", err)
+	}
+	if len(stdoutRecords) != 1 {
+		t.Fatalf("stdout: got %d records want 1", len(stdoutRecords))
+	}
+	rec := stdoutRecords[0]
+
+	if got := gjson.GetBytes(rec.Body, "credentials.token").String(); got != redact.Redacted {
+		t.Errorf("credentials.token: got %q, want %q", got, redact.Redacted)
+	}
+	if got := gjson.GetBytes(rec.Body, "credentials.user").String(); got != "alice" {
+		t.Errorf("credentials.user: got %q, want alice", got)
+	}
+	if got := gjson.GetBytes(rec.Body, "meta.keep").String(); got != "true" {
+		t.Errorf("meta.keep: got %q, want true", got)
+	}
+
+	if vals := rec.Headers["X-Safe"]; len(vals) != 1 || vals[0] != "keep-me" {
+		t.Errorf("X-Safe: got %v, want [keep-me] (JSON-path rule must not touch headers)", vals)
+	}
+	if vals := rec.Query["keep"]; len(vals) != 1 || vals[0] != "2" {
+		t.Errorf("query keep: got %v, want [2] (JSON-path rule must not touch query)", vals)
+	}
+
+	memRecords := a.Memory.Recent(1)
+	if len(memRecords) != 1 {
+		t.Fatalf("memory: got %d records want 1", len(memRecords))
+	}
+	memRec := memRecords[0]
+	if got := gjson.GetBytes(memRec.Body, "credentials.token").String(); got != redact.Redacted {
+		t.Errorf("memory credentials.token: got %q, want %q", got, redact.Redacted)
+	}
+	if got := gjson.GetBytes(memRec.Body, "credentials.user").String(); got != "alice" {
+		t.Errorf("memory credentials.user: got %q, want alice", got)
+	}
+	if got := gjson.GetBytes(memRec.Body, "meta.keep").String(); got != "true" {
+		t.Errorf("memory meta.keep: got %q, want true", got)
+	}
+
+	if rec.ID != memRec.ID {
+		t.Errorf("ID: stdout=%q memory=%q", rec.ID, memRec.ID)
+	}
+
+	if got := a.Ruleset.RedactionErrorsTotal(); got != 0 {
+		t.Errorf("RedactionErrorsTotal: got %d, want 0", got)
+	}
 	if strings.Contains(logBuf.String(), "unredacted") {
 		t.Errorf("unredacted warning should not fire when rules are configured, got:\n%s", logBuf.String())
 	}

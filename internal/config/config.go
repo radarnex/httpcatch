@@ -32,6 +32,7 @@ type SinksConfig struct {
 type RedactionConfig struct {
 	Headers     []string
 	QueryParams []string
+	JSONPaths   []string
 	Cookies     []CookieRuleConfig
 }
 
@@ -185,6 +186,7 @@ func applyRaw(cfg *Config, raw rawConfig) {
 	if raw.Redaction != nil {
 		cfg.Redaction.Headers = raw.Redaction.Headers
 		cfg.Redaction.QueryParams = raw.Redaction.QueryParams
+		cfg.Redaction.JSONPaths = raw.Redaction.JSONPaths
 		if len(raw.Redaction.Cookies) > 0 {
 			cookies := make([]CookieRuleConfig, len(raw.Redaction.Cookies))
 			for i, c := range raw.Redaction.Cookies {

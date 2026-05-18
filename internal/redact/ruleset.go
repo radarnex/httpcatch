@@ -2,9 +2,14 @@ package redact
 
 import (
 	"fmt"
+	"mime"
 	"net/textproto"
 	"slices"
 	"strings"
+	"sync/atomic"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/config"
@@ -28,11 +33,20 @@ type cookieRule struct {
 type regexRule struct{}
 
 type Ruleset struct {
-	headers     []string
-	queryParams []string
-	jsonPaths   []string
-	regex       []regexRule
-	cookies     []cookieRule
+	headers         []string
+	queryParams     []string
+	jsonPaths       []string
+	regex           []regexRule
+	cookies         []cookieRule
+	redactionErrors atomic.Uint64
+}
+
+// RedactionErrorsTotal reports the count of best-effort redaction failures
+// (e.g. an unparseable JSON body that declared a JSON content-type, or a
+// failed sjson write). The counter is process-local and ticks once per
+// failure; records are never dropped on a redaction error.
+func (r *Ruleset) RedactionErrorsTotal() uint64 {
+	return r.redactionErrors.Load()
 }
 
 func NewRuleset(cfg config.RedactionConfig) (*Ruleset, error) {
@@ -42,6 +56,14 @@ func NewRuleset(cfg config.RedactionConfig) (*Ruleset, error) {
 	}
 	queryParams := make([]string, len(cfg.QueryParams))
 	copy(queryParams, cfg.QueryParams)
+
+	jsonPaths := make([]string, 0, len(cfg.JSONPaths))
+	for _, p := range cfg.JSONPaths {
+		if err := validateJSONPath(p); err != nil {
+			return nil, err
+		}
+		jsonPaths = append(jsonPaths, p)
+	}
 
 	cookies := make([]cookieRule, 0, len(cfg.Cookies))
 	for _, c := range cfg.Cookies {
@@ -57,8 +79,22 @@ func NewRuleset(cfg config.RedactionConfig) (*Ruleset, error) {
 	return &Ruleset{
 		headers:     headers,
 		queryParams: queryParams,
+		jsonPaths:   jsonPaths,
 		cookies:     cookies,
 	}, nil
+}
+
+// validateJSONPath rejects empty strings and probes the path with sjson on an
+// empty JSON object. sjson exposes no compile-only API; probing on `{}` is the
+// cheapest way to surface a syntactically broken path at startup.
+func validateJSONPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("redaction: json_paths: path must not be empty")
+	}
+	if _, err := sjson.SetBytes([]byte(`{}`), path, "_"); err != nil {
+		return fmt.Errorf("redaction: json_paths: invalid path %q: %w", path, err)
+	}
+	return nil
 }
 
 func parseCookieMode(s string) (cookieMode, error) {
@@ -91,13 +127,69 @@ func (r *Ruleset) Redact(rec *capture.CapturedRecord) *capture.CapturedRecord {
 	applyCookieRules(out, r.cookies)
 	applyHeaderRules(out, r.headers)
 	applyQueryRules(out, r.queryParams)
-	applyJSONPathRules(out, r.jsonPaths)
+	applyJSONPathRules(out, r.jsonPaths, &r.redactionErrors)
 	applyRegexRules(out, r.regex)
 	return out
 }
 
-func applyJSONPathRules(_ *capture.CapturedRecord, _ []string) {}
 func applyRegexRules(_ *capture.CapturedRecord, _ []regexRule) {}
+
+// applyJSONPathRules redacts values at each configured path when the record's
+// content-type is JSON. Failures are best-effort: on an unparseable body or a
+// failed write, errs is incremented and the body is left untouched so the
+// record can continue through fan-out.
+func applyJSONPathRules(out *capture.CapturedRecord, rules []string, errs *atomic.Uint64) {
+	if len(rules) == 0 {
+		return
+	}
+	if !isJSONContentType(out.ContentType) {
+		return
+	}
+	if len(out.Body) == 0 {
+		return
+	}
+	if !gjson.ValidBytes(out.Body) {
+		errs.Add(1)
+		return
+	}
+	body := out.Body
+	for _, path := range rules {
+		if !gjson.GetBytes(body, path).Exists() {
+			continue
+		}
+		next, err := sjson.SetBytes(body, path, Redacted)
+		if err != nil {
+			errs.Add(1)
+			continue
+		}
+		body = next
+	}
+	out.Body = body
+}
+
+// isJSONContentType returns true when the media type is application/json or
+// any structured-syntax-suffix variant ending in +json (e.g. application/vnd.api+json).
+// Media-type parameters such as charset are stripped before matching.
+func isJSONContentType(ct string) bool {
+	if ct == "" {
+		return false
+	}
+	media, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		// Fall back to a manual split so a malformed parameter section does
+		// not defeat the gate for an otherwise valid base type.
+		if idx := strings.IndexByte(ct, ';'); idx >= 0 {
+			media = strings.TrimSpace(ct[:idx])
+		} else {
+			media = strings.TrimSpace(ct)
+		}
+		media = strings.ToLower(media)
+	}
+	if media == "application/json" {
+		return true
+	}
+	return strings.HasSuffix(media, "+json")
+}
 
 func applyQueryRules(out *capture.CapturedRecord, rules []string) {
 	for key, vals := range out.Query {
