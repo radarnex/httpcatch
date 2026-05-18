@@ -336,14 +336,12 @@ func TestIntegration_DropSemantics(t *testing.T) {
 	var wg sync.WaitGroup
 	var ok202 atomic.Uint64
 	for range total {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			resp := fire(t, ts.URL+"/drop", "POST", []byte("payload"), nil)
 			if resp.StatusCode == http.StatusAccepted {
 				ok202.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
