@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -223,14 +224,20 @@ func TestIntegration_EndToEnd_BodyCapShape(t *testing.T) {
 		if r.Timestamp.IsZero() {
 			t.Errorf("%s: timestamp is zero", c.marker)
 		}
-		if r.Service != capture.PlaceholderService {
-			t.Errorf("%s: service got %q want %q", c.marker, r.Service, capture.PlaceholderService)
+		// httptest sends Host=127.0.0.1:port and no service/correlation
+		// headers, so derivation lands on the host fallback and a
+		// synthesized correlation UUID.
+		if r.ServiceSource != capture.ServiceSourceHost {
+			t.Errorf("%s: service_source got %q want %q", c.marker, r.ServiceSource, capture.ServiceSourceHost)
 		}
-		if r.ServiceSource != capture.PlaceholderServiceSource {
-			t.Errorf("%s: service_source got %q want %q", c.marker, r.ServiceSource, capture.PlaceholderServiceSource)
+		if r.Service == "" || r.Service == capture.UnknownService {
+			t.Errorf("%s: service got %q, expected non-empty host-derived value", c.marker, r.Service)
 		}
-		if r.CorrelationSource != capture.PlaceholderCorrelationSource {
-			t.Errorf("%s: correlation_source got %q want %q", c.marker, r.CorrelationSource, capture.PlaceholderCorrelationSource)
+		if r.CorrelationSource != capture.CorrelationSourceSynthesized {
+			t.Errorf("%s: correlation_source got %q want %q", c.marker, r.CorrelationSource, capture.CorrelationSourceSynthesized)
+		}
+		if r.CorrelationID == "" {
+			t.Errorf("%s: correlation_id is empty for synthesized record", c.marker)
 		}
 	}
 
@@ -450,6 +457,229 @@ func TestIntegration_StartupWarnings_ZeroSinks(t *testing.T) {
 	}
 	if len(a.Sinks) != 0 {
 		t.Errorf("expected zero sinks, got %d", len(a.Sinks))
+	}
+}
+
+func TestIntegration_IdentifiersAndCounters(t *testing.T) {
+	t.Parallel()
+
+	const traceID = "0af7651916cd43dd8448eb211c80319c"
+
+	cfg := config.Defaults()
+	cfg.Sinks.Stdout = true
+	cfg.Workers = 2
+	cfg.QueueSize = 64
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	type fired struct {
+		marker            string
+		headers           http.Header
+		wantService       string
+		wantServiceSource string
+		wantCorrID        string
+		wantCorrSource    string
+	}
+	cases := []fired{
+		{
+			marker:            "default-header",
+			headers:           http.Header{capture.DefaultServiceHeader: []string{"orders"}},
+			wantService:       "orders",
+			wantServiceSource: capture.ServiceSourceHeader,
+			wantCorrSource:    capture.CorrelationSourceSynthesized,
+		},
+		{
+			marker:            "host-fallback",
+			headers:           http.Header{},
+			wantServiceSource: capture.ServiceSourceHost,
+			wantCorrSource:    capture.CorrelationSourceSynthesized,
+		},
+		{
+			marker:            "traceparent-wins",
+			headers:           http.Header{capture.TraceparentHeader: []string{"00-" + traceID + "-b7ad6b7169203331-01"}, capture.RequestIDHeader: []string{"req-loser"}},
+			wantServiceSource: capture.ServiceSourceHost,
+			wantCorrID:        traceID,
+			wantCorrSource:    capture.CorrelationSourceTraceparent,
+		},
+		{
+			marker:            "request-id-only",
+			headers:           http.Header{capture.RequestIDHeader: []string{"req-xyz"}},
+			wantServiceSource: capture.ServiceSourceHost,
+			wantCorrID:        "req-xyz",
+			wantCorrSource:    capture.CorrelationSourceRequestID,
+		},
+		{
+			marker:            "x-correlation-id-ignored",
+			headers:           http.Header{"X-Correlation-ID": []string{"should-be-ignored"}},
+			wantServiceSource: capture.ServiceSourceHost,
+			wantCorrSource:    capture.CorrelationSourceSynthesized,
+		},
+	}
+
+	for _, c := range cases {
+		hdr := c.headers.Clone()
+		hdr.Set("X-Test-Marker", c.marker)
+		resp := fire(t, ts.URL+"/x", "POST", []byte("payload"), hdr)
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("%s: status got %d want 202", c.marker, resp.StatusCode)
+		}
+	}
+
+	if !waitFor(func() bool {
+		return stdoutBuf.CountLines() >= len(cases)
+	}, 5*time.Second) {
+		t.Fatalf("timed out waiting for %d records; got %d lines", len(cases), stdoutBuf.CountLines())
+	}
+
+	records, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	byMarker := map[string]capture.CapturedRecord{}
+	for _, r := range records {
+		ms := r.Headers["X-Test-Marker"]
+		if len(ms) != 1 {
+			t.Fatalf("record %s: expected 1 marker, got %v", r.ID, ms)
+		}
+		byMarker[ms[0]] = r
+	}
+
+	for _, c := range cases {
+		r, ok := byMarker[c.marker]
+		if !ok {
+			t.Fatalf("missing record for marker %s", c.marker)
+		}
+		if c.wantService != "" && r.Service != c.wantService {
+			t.Errorf("%s: service got %q want %q", c.marker, r.Service, c.wantService)
+		}
+		if r.ServiceSource != c.wantServiceSource {
+			t.Errorf("%s: service_source got %q want %q", c.marker, r.ServiceSource, c.wantServiceSource)
+		}
+		if c.wantServiceSource == capture.ServiceSourceHost && r.Service == "" {
+			t.Errorf("%s: host-derived service should be non-empty", c.marker)
+		}
+		if c.wantCorrID != "" && r.CorrelationID != c.wantCorrID {
+			t.Errorf("%s: correlation_id got %q want %q", c.marker, r.CorrelationID, c.wantCorrID)
+		}
+		if r.CorrelationSource != c.wantCorrSource {
+			t.Errorf("%s: correlation_source got %q want %q", c.marker, r.CorrelationSource, c.wantCorrSource)
+		}
+	}
+
+	// All five cases sent a Host header (httptest sets it), so the service
+	// fallback never bottoms out at "unknown" — no without-service hits.
+	if got := a.Counters.CapturedWithoutServiceTotal(); got != 0 {
+		t.Errorf("captured_without_service_total: got %d want 0", got)
+	}
+
+	// Three of five synthesized a correlation id: host-fallback,
+	// x-correlation-id-ignored, default-header (which sets no correlation).
+	const wantSynth = 3
+	if got := a.Counters.CapturedWithoutCorrelationTotal(); got != wantSynth {
+		t.Errorf("captured_without_correlation_total: got %d want %d", got, wantSynth)
+	}
+}
+
+func TestIntegration_CapturedWithoutServiceCounter(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Sinks.Stdout = true
+	cfg.Workers = 1
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	// Go's http.Client always populates the Host header. Drop down to raw
+	// TCP and send an HTTP/1.0 request without a Host header so the service
+	// fallback chain actually bottoms out at "unknown".
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	reqBytes := "POST /u HTTP/1.0\r\nContent-Length: 2\r\n\r\nhi"
+	if _, err := conn.Write([]byte(reqBytes)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	respBuf := make([]byte, 512)
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := conn.Read(respBuf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(respBuf[:n]), "202 Accepted") {
+		t.Fatalf("response did not include 202 Accepted, got: %q", string(respBuf[:n]))
+	}
+
+	if !waitFor(func() bool { return stdoutBuf.CountLines() >= 1 }, 5*time.Second) {
+		t.Fatal("timed out waiting for record")
+	}
+
+	records, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records: got %d want 1", len(records))
+	}
+	if records[0].ServiceSource != capture.ServiceSourceUnknown {
+		t.Errorf("service_source: got %q want %q", records[0].ServiceSource, capture.ServiceSourceUnknown)
+	}
+	if records[0].Service != capture.UnknownService {
+		t.Errorf("service: got %q want %q", records[0].Service, capture.UnknownService)
+	}
+	if got := a.Counters.CapturedWithoutServiceTotal(); got != 1 {
+		t.Errorf("captured_without_service_total: got %d want 1", got)
+	}
+}
+
+func TestIntegration_CustomServiceHeader(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Sinks.Stdout = true
+	cfg.Workers = 1
+	cfg.ServiceHeader = "X-Service-Tag"
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	_, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	hdr := http.Header{
+		"X-Service-Tag":              []string{"billing"},
+		capture.DefaultServiceHeader: []string{"ignored"},
+	}
+	resp := fire(t, ts.URL+"/c", "POST", []byte("x"), hdr)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202", resp.StatusCode)
+	}
+
+	if !waitFor(func() bool { return stdoutBuf.CountLines() >= 1 }, 5*time.Second) {
+		t.Fatal("timed out waiting for record")
+	}
+	records, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records: got %d want 1", len(records))
+	}
+	if records[0].Service != "billing" {
+		t.Errorf("service: got %q want %q", records[0].Service, "billing")
+	}
+	if records[0].ServiceSource != capture.ServiceSourceHeader {
+		t.Errorf("service_source: got %q want %q", records[0].ServiceSource, capture.ServiceSourceHeader)
 	}
 }
 

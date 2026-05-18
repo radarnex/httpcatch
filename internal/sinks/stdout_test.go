@@ -31,10 +31,10 @@ func TestStdoutSink_EmitsCanonicalJSONLine(t *testing.T) {
 		BodyOriginalSize:  5,
 		ContentType:       "text/plain",
 		SourceIP:          "10.0.0.1",
-		Service:           capture.PlaceholderService,
-		ServiceSource:     capture.PlaceholderServiceSource,
+		Service:           "orders",
+		ServiceSource:     capture.ServiceSourceHeader,
 		CorrelationID:     "corr-1",
-		CorrelationSource: capture.PlaceholderCorrelationSource,
+		CorrelationSource: capture.CorrelationSourceTraceparent,
 	}
 
 	if err := sink.Write(context.Background(), rec); err != nil {
@@ -62,11 +62,11 @@ func TestStdoutSink_EmitsCanonicalJSONLine(t *testing.T) {
 	if !decoded.Timestamp.Equal(ts) {
 		t.Errorf("timestamp: got %v want %v", decoded.Timestamp, ts)
 	}
-	if decoded.ServiceSource != capture.PlaceholderServiceSource {
-		t.Errorf("service_source: got %q want %q", decoded.ServiceSource, capture.PlaceholderServiceSource)
+	if decoded.ServiceSource != capture.ServiceSourceHeader {
+		t.Errorf("service_source: got %q want %q", decoded.ServiceSource, capture.ServiceSourceHeader)
 	}
-	if decoded.CorrelationSource != capture.PlaceholderCorrelationSource {
-		t.Errorf("correlation_source: got %q want %q", decoded.CorrelationSource, capture.PlaceholderCorrelationSource)
+	if decoded.CorrelationSource != capture.CorrelationSourceTraceparent {
+		t.Errorf("correlation_source: got %q want %q", decoded.CorrelationSource, capture.CorrelationSourceTraceparent)
 	}
 }
 

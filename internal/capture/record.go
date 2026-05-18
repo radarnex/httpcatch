@@ -2,13 +2,6 @@ package capture
 
 import "time"
 
-const (
-	PlaceholderService           = "placeholder"
-	PlaceholderServiceSource     = "placeholder"
-	PlaceholderCorrelationID     = "placeholder"
-	PlaceholderCorrelationSource = "placeholder"
-)
-
 type Cookie struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`

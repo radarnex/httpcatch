@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	DefaultCapturePort = 8080
-	DefaultQueueSize   = 1024
-	DefaultBodyCap     = 1 << 20
+	DefaultCapturePort   = 8080
+	DefaultQueueSize     = 1024
+	DefaultBodyCap       = 1 << 20
+	DefaultServiceHeader = "X-Httpcatch-Service"
 )
 
 type SinksConfig struct {
@@ -22,20 +23,22 @@ type SinksConfig struct {
 }
 
 type Config struct {
-	CapturePort int         `yaml:"capture_port"`
-	QueueSize   int         `yaml:"queue_size"`
-	BodyCap     int         `yaml:"body_cap"`
-	Workers     int         `yaml:"workers"`
-	Sinks       SinksConfig `yaml:"sinks"`
+	CapturePort   int         `yaml:"capture_port"`
+	QueueSize     int         `yaml:"queue_size"`
+	BodyCap       int         `yaml:"body_cap"`
+	Workers       int         `yaml:"workers"`
+	ServiceHeader string      `yaml:"service_header"`
+	Sinks         SinksConfig `yaml:"sinks"`
 }
 
 func Defaults() Config {
 	return Config{
-		CapturePort: DefaultCapturePort,
-		QueueSize:   DefaultQueueSize,
-		BodyCap:     DefaultBodyCap,
-		Workers:     runtime.NumCPU(),
-		Sinks:       SinksConfig{},
+		CapturePort:   DefaultCapturePort,
+		QueueSize:     DefaultQueueSize,
+		BodyCap:       DefaultBodyCap,
+		Workers:       runtime.NumCPU(),
+		ServiceHeader: DefaultServiceHeader,
+		Sinks:         SinksConfig{},
 	}
 }
 
@@ -46,11 +49,12 @@ type rawSinks struct {
 // Pointer fields distinguish "absent" from "set to zero" so the YAML cannot
 // silently overwrite a default with the zero value.
 type rawConfig struct {
-	CapturePort *int     `yaml:"capture_port"`
-	QueueSize   *int     `yaml:"queue_size"`
-	BodyCap     *int     `yaml:"body_cap"`
-	Workers     *int     `yaml:"workers"`
-	Sinks       rawSinks `yaml:"sinks"`
+	CapturePort   *int     `yaml:"capture_port"`
+	QueueSize     *int     `yaml:"queue_size"`
+	BodyCap       *int     `yaml:"body_cap"`
+	Workers       *int     `yaml:"workers"`
+	ServiceHeader *string  `yaml:"service_header"`
+	Sinks         rawSinks `yaml:"sinks"`
 }
 
 func Load(path string, env func(string) string) (Config, error) {
@@ -91,6 +95,9 @@ func applyRaw(cfg *Config, raw rawConfig) {
 	if raw.Workers != nil {
 		cfg.Workers = *raw.Workers
 	}
+	if raw.ServiceHeader != nil {
+		cfg.ServiceHeader = *raw.ServiceHeader
+	}
 	if raw.Sinks.Stdout != nil {
 		cfg.Sinks.Stdout = *raw.Sinks.Stdout
 	}
@@ -115,6 +122,9 @@ func applyEnv(cfg *Config, env func(string) string) error {
 			return fmt.Errorf("%s: invalid integer %q: %w", step.name, v, err)
 		}
 		*step.dest = n
+	}
+	if v := env("HTTPCATCH_SERVICE_HEADER"); v != "" {
+		cfg.ServiceHeader = v
 	}
 	if v := env("HTTPCATCH_SINKS"); v != "" {
 		cfg.Sinks = SinksConfig{}

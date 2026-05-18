@@ -26,12 +26,13 @@ const (
 const shutdownDrainTimeout = 5 * time.Second
 
 type App struct {
-	Cfg     config.Config
-	Logger  *slog.Logger
-	Queue   *capture.Queue
-	Workers *pipeline.WorkerPool
-	Handler http.Handler
-	Sinks   []sinks.Sink
+	Cfg      config.Config
+	Logger   *slog.Logger
+	Queue    *capture.Queue
+	Counters *capture.Counters
+	Workers  *pipeline.WorkerPool
+	Handler  http.Handler
+	Sinks    []sinks.Sink
 }
 
 func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extraSinks ...sinks.Sink) *App {
@@ -48,16 +49,24 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 	ss = append(ss, extraSinks...)
 
 	q := capture.NewQueue(cfg.QueueSize)
+	counters := capture.NewCounters()
 	workers := pipeline.NewWorkerPool(cfg.Workers, q, redact.NoOp{}, ss, logger)
-	handler := capture.NewCaptureHandler(q, cfg.BodyCap, logger)
+	handler := capture.NewCaptureHandler(capture.HandlerOptions{
+		Queue:         q,
+		Counters:      counters,
+		ServiceHeader: cfg.ServiceHeader,
+		BodyCap:       cfg.BodyCap,
+		Logger:        logger,
+	})
 
 	return &App{
-		Cfg:     cfg,
-		Logger:  logger,
-		Queue:   q,
-		Workers: workers,
-		Handler: handler,
-		Sinks:   ss,
+		Cfg:      cfg,
+		Logger:   logger,
+		Queue:    q,
+		Counters: counters,
+		Workers:  workers,
+		Handler:  handler,
+		Sinks:    ss,
 	}
 }
 

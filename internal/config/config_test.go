@@ -36,6 +36,9 @@ func TestLoad_DefaultsWhenEmpty(t *testing.T) {
 	if cfg.Sinks.Stdout {
 		t.Errorf("no sinks should be enabled by default")
 	}
+	if cfg.ServiceHeader != DefaultServiceHeader {
+		t.Errorf("service_header: got %q want %q", cfg.ServiceHeader, DefaultServiceHeader)
+	}
 }
 
 func TestLoad_YAML(t *testing.T) {
@@ -48,6 +51,7 @@ capture_port: 9090
 queue_size: 4096
 body_cap: 0
 workers: 2
+service_header: X-Custom-Service
 sinks:
   stdout: true
 `
@@ -73,6 +77,9 @@ sinks:
 	if !cfg.Sinks.Stdout {
 		t.Errorf("stdout sink should be enabled from YAML")
 	}
+	if cfg.ServiceHeader != "X-Custom-Service" {
+		t.Errorf("service_header: got %q want %q", cfg.ServiceHeader, "X-Custom-Service")
+	}
 }
 
 func TestLoad_EnvOverridesYAMLAndDefaults(t *testing.T) {
@@ -89,11 +96,12 @@ workers: 1
 		t.Fatal(err)
 	}
 	env := mapEnv(map[string]string{
-		"HTTPCATCH_CAPTURE_PORT": "12345",
-		"HTTPCATCH_QUEUE_SIZE":   "16",
-		"HTTPCATCH_BODY_CAP":     "2048",
-		"HTTPCATCH_WORKER_COUNT": "4",
-		"HTTPCATCH_SINKS":        "stdout",
+		"HTTPCATCH_CAPTURE_PORT":   "12345",
+		"HTTPCATCH_QUEUE_SIZE":     "16",
+		"HTTPCATCH_BODY_CAP":       "2048",
+		"HTTPCATCH_WORKER_COUNT":   "4",
+		"HTTPCATCH_SERVICE_HEADER": "X-Env-Service",
+		"HTTPCATCH_SINKS":          "stdout",
 	})
 	cfg, err := Load(path, env)
 	if err != nil {
@@ -110,6 +118,9 @@ workers: 1
 	}
 	if cfg.Workers != 4 {
 		t.Errorf("workers: got %d want 4", cfg.Workers)
+	}
+	if cfg.ServiceHeader != "X-Env-Service" {
+		t.Errorf("service_header: got %q want %q", cfg.ServiceHeader, "X-Env-Service")
 	}
 	if !cfg.Sinks.Stdout {
 		t.Errorf("stdout sink should be enabled via env")
