@@ -683,6 +683,168 @@ func TestIntegration_CustomServiceHeader(t *testing.T) {
 	}
 }
 
+func TestIntegration_MemoryAndStdout_FanOutAndEviction(t *testing.T) {
+	t.Parallel()
+
+	const (
+		capacity = 10
+		fired    = 50
+	)
+	cfg := config.Defaults()
+	cfg.Workers = 1
+	cfg.QueueSize = 256
+	cfg.Sinks.Stdout = true
+	cfg.Sinks.Memory = true
+	cfg.Sinks.MemoryCapacity = capacity
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	if a.Memory == nil {
+		t.Fatal("expected app.Memory to be set when sinks.memory is enabled")
+	}
+	if a.Memory.Capacity() != capacity {
+		t.Fatalf("memory capacity: got %d want %d", a.Memory.Capacity(), capacity)
+	}
+
+	markers := make([]string, fired)
+	for i := range fired {
+		markers[i] = fmt.Sprintf("rec-%02d", i)
+		hdr := http.Header{"X-Test-Marker": []string{markers[i]}}
+		resp := fire(t, ts.URL+"/m", "POST", []byte(markers[i]), hdr)
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("%s: status got %d want 202", markers[i], resp.StatusCode)
+		}
+	}
+
+	if !waitFor(func() bool {
+		return stdoutBuf.CountLines() >= fired && a.Memory.Len() >= capacity
+	}, 10*time.Second) {
+		t.Fatalf("timed out: stdout=%d (want %d), memory=%d (want %d)",
+			stdoutBuf.CountLines(), fired, a.Memory.Len(), capacity)
+	}
+
+	stdoutRecords, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode stdout: %v", err)
+	}
+	if len(stdoutRecords) != fired {
+		t.Fatalf("stdout records: got %d want %d", len(stdoutRecords), fired)
+	}
+
+	memRecords := a.Memory.Recent(fired)
+	if len(memRecords) != capacity {
+		t.Fatalf("memory records: got %d want %d", len(memRecords), capacity)
+	}
+
+	for i, r := range memRecords {
+		wantMarker := markers[fired-1-i]
+		got := r.Headers["X-Test-Marker"]
+		if len(got) != 1 || got[0] != wantMarker {
+			t.Errorf("memory[%d]: marker got %v want %q", i, got, wantMarker)
+		}
+	}
+
+	stdoutByID := make(map[string]capture.CapturedRecord, len(stdoutRecords))
+	for _, r := range stdoutRecords {
+		stdoutByID[r.ID] = r
+	}
+	for i, mem := range memRecords {
+		std, ok := stdoutByID[mem.ID]
+		if !ok {
+			t.Fatalf("memory[%d] id %q not present in stdout", i, mem.ID)
+		}
+		if std.Method != mem.Method {
+			t.Errorf("id %s: method stdout=%q memory=%q", mem.ID, std.Method, mem.Method)
+		}
+		if std.Path != mem.Path {
+			t.Errorf("id %s: path stdout=%q memory=%q", mem.ID, std.Path, mem.Path)
+		}
+		if std.Service != mem.Service {
+			t.Errorf("id %s: service stdout=%q memory=%q", mem.ID, std.Service, mem.Service)
+		}
+		if std.ServiceSource != mem.ServiceSource {
+			t.Errorf("id %s: service_source stdout=%q memory=%q", mem.ID, std.ServiceSource, mem.ServiceSource)
+		}
+		if std.CorrelationID != mem.CorrelationID {
+			t.Errorf("id %s: correlation_id stdout=%q memory=%q", mem.ID, std.CorrelationID, mem.CorrelationID)
+		}
+		if std.CorrelationSource != mem.CorrelationSource {
+			t.Errorf("id %s: correlation_source stdout=%q memory=%q", mem.ID, std.CorrelationSource, mem.CorrelationSource)
+		}
+		if std.BodyOriginalSize != mem.BodyOriginalSize {
+			t.Errorf("id %s: body_original_size stdout=%d memory=%d", mem.ID, std.BodyOriginalSize, mem.BodyOriginalSize)
+		}
+		if std.BodyTruncated != mem.BodyTruncated {
+			t.Errorf("id %s: body_truncated stdout=%v memory=%v", mem.ID, std.BodyTruncated, mem.BodyTruncated)
+		}
+		if !bytes.Equal(std.Body, mem.Body) {
+			t.Errorf("id %s: body bytes diverge (stdout=%q memory=%q)", mem.ID, std.Body, mem.Body)
+		}
+		if !std.Timestamp.Equal(mem.Timestamp) {
+			t.Errorf("id %s: timestamp stdout=%v memory=%v", mem.ID, std.Timestamp, mem.Timestamp)
+		}
+	}
+
+	if dropped := a.Queue.DroppedTotal(); dropped != 0 {
+		t.Errorf("dropped_total: got %d want 0 (queue=%d, fired=%d)",
+			dropped, cfg.QueueSize, fired)
+	}
+}
+
+func TestIntegration_MemoryStdoutAndFailingSink_OneShotIsolation(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Workers = 1
+	cfg.Sinks.Stdout = true
+	cfg.Sinks.Memory = true
+	cfg.Sinks.MemoryCapacity = 10
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, ts, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf, failingSink{})
+	defer teardown()
+
+	if a.Memory == nil {
+		t.Fatal("expected app.Memory to be set when sinks.memory is enabled")
+	}
+
+	resp := fire(t, ts.URL+"/three-sinks", "POST", []byte("payload"), http.Header{
+		"X-Test-Marker": []string{"triple"},
+	})
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202", resp.StatusCode)
+	}
+
+	if !waitFor(func() bool {
+		return stdoutBuf.CountLines() >= 1 && a.Memory.Len() >= 1
+	}, 5*time.Second) {
+		t.Fatalf("timed out: stdout=%d memory=%d", stdoutBuf.CountLines(), a.Memory.Len())
+	}
+
+	stdoutRecords, err := decodeLines(stdoutBuf.String())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(stdoutRecords) != 1 {
+		t.Fatalf("stdout: got %d records want 1", len(stdoutRecords))
+	}
+	memRecords := a.Memory.Recent(1)
+	if len(memRecords) != 1 {
+		t.Fatalf("memory: got %d records want 1", len(memRecords))
+	}
+	if stdoutRecords[0].ID != memRecords[0].ID {
+		t.Errorf("id mismatch: stdout=%q memory=%q", stdoutRecords[0].ID, memRecords[0].ID)
+	}
+	if stdoutRecords[0].Path != "/three-sinks" || memRecords[0].Path != "/three-sinks" {
+		t.Errorf("path: stdout=%q memory=%q want /three-sinks",
+			stdoutRecords[0].Path, memRecords[0].Path)
+	}
+}
+
 func TestIntegration_StartupWarnings_UnredactedAlwaysFires(t *testing.T) {
 	t.Parallel()
 

@@ -36,6 +36,12 @@ func TestLoad_DefaultsWhenEmpty(t *testing.T) {
 	if cfg.Sinks.Stdout {
 		t.Errorf("no sinks should be enabled by default")
 	}
+	if cfg.Sinks.Memory {
+		t.Errorf("no sinks should be enabled by default")
+	}
+	if cfg.Sinks.MemoryCapacity != DefaultMemoryCapacity {
+		t.Errorf("memory_capacity: got %d want %d", cfg.Sinks.MemoryCapacity, DefaultMemoryCapacity)
+	}
 	if cfg.ServiceHeader != DefaultServiceHeader {
 		t.Errorf("service_header: got %q want %q", cfg.ServiceHeader, DefaultServiceHeader)
 	}
@@ -54,6 +60,8 @@ workers: 2
 service_header: X-Custom-Service
 sinks:
   stdout: true
+  memory: true
+  memory_capacity: 50
 `
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -77,6 +85,12 @@ sinks:
 	if !cfg.Sinks.Stdout {
 		t.Errorf("stdout sink should be enabled from YAML")
 	}
+	if !cfg.Sinks.Memory {
+		t.Errorf("memory sink should be enabled from YAML")
+	}
+	if cfg.Sinks.MemoryCapacity != 50 {
+		t.Errorf("memory_capacity: got %d want 50", cfg.Sinks.MemoryCapacity)
+	}
 	if cfg.ServiceHeader != "X-Custom-Service" {
 		t.Errorf("service_header: got %q want %q", cfg.ServiceHeader, "X-Custom-Service")
 	}
@@ -96,12 +110,13 @@ workers: 1
 		t.Fatal(err)
 	}
 	env := mapEnv(map[string]string{
-		"HTTPCATCH_CAPTURE_PORT":   "12345",
-		"HTTPCATCH_QUEUE_SIZE":     "16",
-		"HTTPCATCH_BODY_CAP":       "2048",
-		"HTTPCATCH_WORKER_COUNT":   "4",
-		"HTTPCATCH_SERVICE_HEADER": "X-Env-Service",
-		"HTTPCATCH_SINKS":          "stdout",
+		"HTTPCATCH_CAPTURE_PORT":    "12345",
+		"HTTPCATCH_QUEUE_SIZE":      "16",
+		"HTTPCATCH_BODY_CAP":        "2048",
+		"HTTPCATCH_WORKER_COUNT":    "4",
+		"HTTPCATCH_SERVICE_HEADER":  "X-Env-Service",
+		"HTTPCATCH_SINKS":           "stdout,memory",
+		"HTTPCATCH_MEMORY_CAPACITY": "25",
 	})
 	cfg, err := Load(path, env)
 	if err != nil {
@@ -124,6 +139,12 @@ workers: 1
 	}
 	if !cfg.Sinks.Stdout {
 		t.Errorf("stdout sink should be enabled via env")
+	}
+	if !cfg.Sinks.Memory {
+		t.Errorf("memory sink should be enabled via env")
+	}
+	if cfg.Sinks.MemoryCapacity != 25 {
+		t.Errorf("memory_capacity: got %d want 25", cfg.Sinks.MemoryCapacity)
 	}
 }
 
@@ -149,52 +170,38 @@ func TestLoad_EnvOnly_NoConfigFile(t *testing.T) {
 func TestValidate_FieldSpecificErrors(t *testing.T) {
 	t.Parallel()
 
+	// Each case mutates a known-valid baseline so new validation rules don't
+	// have to ripple through every row.
+	base := func() Config {
+		return Config{
+			CapturePort: 8080,
+			QueueSize:   1,
+			Workers:     1,
+			Sinks:       SinksConfig{MemoryCapacity: DefaultMemoryCapacity},
+		}
+	}
 	tests := []struct {
 		name   string
-		cfg    Config
+		mutate func(*Config)
 		expect string
 	}{
-		{
-			name:   "zero capture port",
-			cfg:    Config{CapturePort: 0, QueueSize: 1, Workers: 1},
-			expect: "capture_port",
-		},
-		{
-			name:   "negative capture port",
-			cfg:    Config{CapturePort: -1, QueueSize: 1, Workers: 1},
-			expect: "capture_port",
-		},
-		{
-			name:   "out-of-range capture port",
-			cfg:    Config{CapturePort: 70000, QueueSize: 1, Workers: 1},
-			expect: "capture_port",
-		},
-		{
-			name:   "zero queue size",
-			cfg:    Config{CapturePort: 8080, QueueSize: 0, Workers: 1},
-			expect: "queue_size",
-		},
-		{
-			name:   "negative queue size",
-			cfg:    Config{CapturePort: 8080, QueueSize: -5, Workers: 1},
-			expect: "queue_size",
-		},
-		{
-			name:   "zero workers",
-			cfg:    Config{CapturePort: 8080, QueueSize: 1, Workers: 0},
-			expect: "workers",
-		},
-		{
-			name:   "negative body cap",
-			cfg:    Config{CapturePort: 8080, QueueSize: 1, Workers: 1, BodyCap: -1},
-			expect: "body_cap",
-		},
+		{"zero capture port", func(c *Config) { c.CapturePort = 0 }, "capture_port"},
+		{"negative capture port", func(c *Config) { c.CapturePort = -1 }, "capture_port"},
+		{"out-of-range capture port", func(c *Config) { c.CapturePort = 70000 }, "capture_port"},
+		{"zero queue size", func(c *Config) { c.QueueSize = 0 }, "queue_size"},
+		{"negative queue size", func(c *Config) { c.QueueSize = -5 }, "queue_size"},
+		{"zero workers", func(c *Config) { c.Workers = 0 }, "workers"},
+		{"negative body cap", func(c *Config) { c.BodyCap = -1 }, "body_cap"},
+		{"zero memory capacity", func(c *Config) { c.Sinks.MemoryCapacity = 0 }, "sinks.memory_capacity"},
+		{"negative memory capacity", func(c *Config) { c.Sinks.MemoryCapacity = -3 }, "sinks.memory_capacity"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := tt.cfg.Validate()
+			cfg := base()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -202,6 +209,48 @@ func TestValidate_FieldSpecificErrors(t *testing.T) {
 				t.Errorf("error %q does not mention %q", err, tt.expect)
 			}
 		})
+	}
+}
+
+func TestLoad_RejectsZeroMemoryCapacity(t *testing.T) {
+	t.Parallel()
+
+	env := mapEnv(map[string]string{"HTTPCATCH_MEMORY_CAPACITY": "0"})
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "memory_capacity") {
+		t.Errorf("error %q does not mention memory_capacity", err)
+	}
+}
+
+func TestLoad_EnvSinksPreservesMemoryCapacity(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `
+sinks:
+  memory_capacity: 42
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := mapEnv(map[string]string{"HTTPCATCH_SINKS": "memory"})
+	cfg, err := Load(path, env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Sinks.Memory {
+		t.Errorf("memory sink should be enabled via HTTPCATCH_SINKS")
+	}
+	if cfg.Sinks.Stdout {
+		t.Errorf("stdout sink should not be enabled when HTTPCATCH_SINKS lists only memory")
+	}
+	if cfg.Sinks.MemoryCapacity != 42 {
+		t.Errorf("memory_capacity from YAML should survive HTTPCATCH_SINKS reset: got %d want 42",
+			cfg.Sinks.MemoryCapacity)
 	}
 }
 

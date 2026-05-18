@@ -12,14 +12,17 @@ import (
 )
 
 const (
-	DefaultCapturePort   = 8080
-	DefaultQueueSize     = 1024
-	DefaultBodyCap       = 1 << 20
-	DefaultServiceHeader = "X-Httpcatch-Service"
+	DefaultCapturePort    = 8080
+	DefaultQueueSize      = 1024
+	DefaultBodyCap        = 1 << 20
+	DefaultServiceHeader  = "X-Httpcatch-Service"
+	DefaultMemoryCapacity = 1000
 )
 
 type SinksConfig struct {
-	Stdout bool `yaml:"stdout"`
+	Stdout         bool `yaml:"stdout"`
+	Memory         bool `yaml:"memory"`
+	MemoryCapacity int  `yaml:"memory_capacity"`
 }
 
 type Config struct {
@@ -38,12 +41,16 @@ func Defaults() Config {
 		BodyCap:       DefaultBodyCap,
 		Workers:       runtime.NumCPU(),
 		ServiceHeader: DefaultServiceHeader,
-		Sinks:         SinksConfig{},
+		Sinks: SinksConfig{
+			MemoryCapacity: DefaultMemoryCapacity,
+		},
 	}
 }
 
 type rawSinks struct {
-	Stdout *bool `yaml:"stdout"`
+	Stdout         *bool `yaml:"stdout"`
+	Memory         *bool `yaml:"memory"`
+	MemoryCapacity *int  `yaml:"memory_capacity"`
 }
 
 // Pointer fields distinguish "absent" from "set to zero" so the YAML cannot
@@ -101,6 +108,12 @@ func applyRaw(cfg *Config, raw rawConfig) {
 	if raw.Sinks.Stdout != nil {
 		cfg.Sinks.Stdout = *raw.Sinks.Stdout
 	}
+	if raw.Sinks.Memory != nil {
+		cfg.Sinks.Memory = *raw.Sinks.Memory
+	}
+	if raw.Sinks.MemoryCapacity != nil {
+		cfg.Sinks.MemoryCapacity = *raw.Sinks.MemoryCapacity
+	}
 }
 
 func applyEnv(cfg *Config, env func(string) string) error {
@@ -112,6 +125,7 @@ func applyEnv(cfg *Config, env func(string) string) error {
 		{"HTTPCATCH_QUEUE_SIZE", &cfg.QueueSize},
 		{"HTTPCATCH_BODY_CAP", &cfg.BodyCap},
 		{"HTTPCATCH_WORKER_COUNT", &cfg.Workers},
+		{"HTTPCATCH_MEMORY_CAPACITY", &cfg.Sinks.MemoryCapacity},
 	} {
 		v := env(step.name)
 		if v == "" {
@@ -127,11 +141,14 @@ func applyEnv(cfg *Config, env func(string) string) error {
 		cfg.ServiceHeader = v
 	}
 	if v := env("HTTPCATCH_SINKS"); v != "" {
-		cfg.Sinks = SinksConfig{}
+		cfg.Sinks.Stdout = false
+		cfg.Sinks.Memory = false
 		for _, name := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' }) {
 			switch strings.ToLower(strings.TrimSpace(name)) {
 			case "stdout":
 				cfg.Sinks.Stdout = true
+			case "memory":
+				cfg.Sinks.Memory = true
 			default:
 				return fmt.Errorf("HTTPCATCH_SINKS: unknown sink %q", name)
 			}
@@ -153,6 +170,9 @@ func (c Config) Validate() error {
 	}
 	if c.BodyCap < 0 {
 		errs = append(errs, fmt.Errorf("body_cap: must be >= 0, got %d", c.BodyCap))
+	}
+	if c.Sinks.MemoryCapacity < 1 {
+		errs = append(errs, fmt.Errorf("sinks.memory_capacity: must be >= 1, got %d", c.Sinks.MemoryCapacity))
 	}
 	return errors.Join(errs...)
 }

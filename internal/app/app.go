@@ -33,6 +33,7 @@ type App struct {
 	Workers  *pipeline.WorkerPool
 	Handler  http.Handler
 	Sinks    []sinks.Sink
+	Memory   *sinks.MemorySink
 }
 
 func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extraSinks ...sinks.Sink) *App {
@@ -45,6 +46,11 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 	var ss []sinks.Sink
 	if cfg.Sinks.Stdout {
 		ss = append(ss, sinks.NewWriterSink(stdoutWriter))
+	}
+	var memSink *sinks.MemorySink
+	if cfg.Sinks.Memory {
+		memSink = sinks.NewMemorySink(cfg.Sinks.MemoryCapacity)
+		ss = append(ss, memSink)
 	}
 	ss = append(ss, extraSinks...)
 
@@ -67,6 +73,7 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		Workers:  workers,
 		Handler:  handler,
 		Sinks:    ss,
+		Memory:   memSink,
 	}
 }
 
