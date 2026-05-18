@@ -1,0 +1,42 @@
+BINARY := httpcatch
+BIN_DIR := bin
+PKG     := ./cmd/httpcatch
+GO      ?= go
+
+.PHONY: help build test test-race vet fmt fmt-check tidy check run clean
+
+help: ## Show available targets
+	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} \
+		/^[a-zA-Z_-]+:.*?##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+build: ## Build the httpcatch binary into ./bin/
+	$(GO) build -o $(BIN_DIR)/$(BINARY) $(PKG)
+
+test: ## Run unit + integration tests
+	$(GO) test ./...
+
+test-race: ## Run tests with the race detector
+	$(GO) test -race -count=1 ./...
+
+vet: ## go vet
+	$(GO) vet ./...
+
+fmt: ## Format all Go files
+	$(GO) fmt ./...
+
+fmt-check: ## Fail if any file is not gofmt-clean
+	@out="$$(gofmt -l .)"; \
+	if [ -n "$$out" ]; then \
+		echo "gofmt needed for:"; echo "$$out"; exit 1; \
+	fi
+
+tidy: ## go mod tidy
+	$(GO) mod tidy
+
+check: fmt-check vet test-race ## Pre-push validation: fmt + vet + race tests
+
+run: build ## Build then run; pass flags via ARGS, e.g. make run ARGS="--config c.yaml"
+	./$(BIN_DIR)/$(BINARY) $(ARGS)
+
+clean: ## Remove build artifacts
+	rm -rf $(BIN_DIR)
