@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +19,8 @@ const (
 	DefaultServiceHeader  = "X-Httpcatch-Service"
 	DefaultMemoryCapacity = 1000
 	DefaultSQLitePath     = "./httpcatch.db"
+	DefaultAdminBind      = "127.0.0.1:8081"
+	DefaultAdminSessionTTL = 24 * time.Hour
 )
 
 type SinksConfig struct {
@@ -26,6 +29,15 @@ type SinksConfig struct {
 	MemoryCapacity int    `yaml:"memory_capacity"`
 	SQLite         bool   `yaml:"sqlite"`
 	SQLitePath     string `yaml:"sqlite_path"`
+}
+
+// AdminConfig holds the parsed admin port settings.
+type AdminConfig struct {
+	Bind           string
+	Token          string
+	InsecureListen bool
+	SessionTTL     time.Duration
+	SessionSecure  bool
 }
 
 // RedactionConfig holds the parsed redaction rules for use by the ruleset.
@@ -62,6 +74,7 @@ type Config struct {
 	ServiceHeader string          `yaml:"service_header"`
 	Sinks         SinksConfig     `yaml:"sinks"`
 	Redaction     RedactionConfig
+	Admin         AdminConfig
 }
 
 func Defaults() Config {
@@ -74,6 +87,10 @@ func Defaults() Config {
 		Sinks: SinksConfig{
 			MemoryCapacity: DefaultMemoryCapacity,
 			SQLitePath:     DefaultSQLitePath,
+		},
+		Admin: AdminConfig{
+			Bind:       DefaultAdminBind,
+			SessionTTL: DefaultAdminSessionTTL,
 		},
 	}
 }
@@ -102,6 +119,35 @@ type rawRedactionConfig struct {
 	JSONPaths   []string        `yaml:"json_paths"`
 	Regex       []rawRegexRule  `yaml:"regex"`
 	Cookies     []rawCookieRule `yaml:"cookies"`
+}
+
+type rawAdminConfig struct {
+	Bind           *string `yaml:"bind"`
+	Token          *string `yaml:"token"`
+	InsecureListen *bool   `yaml:"insecure_listen"`
+	SessionTTL     *string `yaml:"session_ttl"`
+	SessionSecure  *bool   `yaml:"session_secure"`
+}
+
+var validAdminKeys = map[string]bool{
+	"bind":            true,
+	"token":           true,
+	"insecure_listen": true,
+	"session_ttl":     true,
+	"session_secure":  true,
+}
+
+func (r *rawAdminConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i < len(value.Content)-1; i += 2 {
+			key := value.Content[i].Value
+			if !validAdminKeys[key] {
+				return fmt.Errorf("admin: unknown key %q", key)
+			}
+		}
+	}
+	type plain rawAdminConfig
+	return value.Decode((*plain)(r))
 }
 
 var validRedactionKeys = map[string]bool{
@@ -135,6 +181,7 @@ type rawConfig struct {
 	ServiceHeader *string             `yaml:"service_header"`
 	Sinks         rawSinks            `yaml:"sinks"`
 	Redaction     *rawRedactionConfig `yaml:"redaction"`
+	Admin         *rawAdminConfig     `yaml:"admin"`
 }
 
 func Load(path string, env func(string) string) (Config, error) {
@@ -148,7 +195,9 @@ func Load(path string, env func(string) string) (Config, error) {
 		if err := yaml.Unmarshal(data, &raw); err != nil {
 			return cfg, fmt.Errorf("parse config %q: %w", path, err)
 		}
-		applyRaw(&cfg, raw)
+		if err := applyRaw(&cfg, raw); err != nil {
+			return cfg, fmt.Errorf("parse config %q: %w", path, err)
+		}
 	}
 	if env == nil {
 		env = os.Getenv
@@ -162,7 +211,7 @@ func Load(path string, env func(string) string) (Config, error) {
 	return cfg, nil
 }
 
-func applyRaw(cfg *Config, raw rawConfig) {
+func applyRaw(cfg *Config, raw rawConfig) error {
 	if raw.CapturePort != nil {
 		cfg.CapturePort = *raw.CapturePort
 	}
@@ -212,6 +261,28 @@ func applyRaw(cfg *Config, raw rawConfig) {
 			cfg.Redaction.Cookies = cookies
 		}
 	}
+	if raw.Admin != nil {
+		if raw.Admin.Bind != nil {
+			cfg.Admin.Bind = *raw.Admin.Bind
+		}
+		if raw.Admin.Token != nil {
+			cfg.Admin.Token = *raw.Admin.Token
+		}
+		if raw.Admin.InsecureListen != nil {
+			cfg.Admin.InsecureListen = *raw.Admin.InsecureListen
+		}
+		if raw.Admin.SessionTTL != nil {
+			d, err := time.ParseDuration(*raw.Admin.SessionTTL)
+			if err != nil {
+				return fmt.Errorf("admin.session_ttl: invalid duration %q: %w", *raw.Admin.SessionTTL, err)
+			}
+			cfg.Admin.SessionTTL = d
+		}
+		if raw.Admin.SessionSecure != nil {
+			cfg.Admin.SessionSecure = *raw.Admin.SessionSecure
+		}
+	}
+	return nil
 }
 
 func applyEnv(cfg *Config, env func(string) string) error {
@@ -258,7 +329,45 @@ func applyEnv(cfg *Config, env func(string) string) error {
 			}
 		}
 	}
+	if v := env("HTTPCATCH_ADMIN_BIND"); v != "" {
+		cfg.Admin.Bind = v
+	}
+	if v := env("HTTPCATCH_ADMIN_TOKEN"); v != "" {
+		cfg.Admin.Token = v
+	}
+	if v := env("HTTPCATCH_ADMIN_INSECURE_LISTEN"); v != "" {
+		b, err := parseBoolEnv("HTTPCATCH_ADMIN_INSECURE_LISTEN", v)
+		if err != nil {
+			return err
+		}
+		cfg.Admin.InsecureListen = b
+	}
+	if v := env("HTTPCATCH_ADMIN_SESSION_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("HTTPCATCH_ADMIN_SESSION_TTL: invalid duration %q: %w", v, err)
+		}
+		cfg.Admin.SessionTTL = d
+	}
+	if v := env("HTTPCATCH_ADMIN_SESSION_SECURE"); v != "" {
+		b, err := parseBoolEnv("HTTPCATCH_ADMIN_SESSION_SECURE", v)
+		if err != nil {
+			return err
+		}
+		cfg.Admin.SessionSecure = b
+	}
 	return nil
+}
+
+func parseBoolEnv(name, v string) (bool, error) {
+	switch v {
+	case "true", "1":
+		return true, nil
+	case "false", "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s: invalid boolean %q: must be true/1 or false/0", name, v)
+	}
 }
 
 func (c Config) Validate() error {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/radarnex/httpcatch/internal/admin"
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/config"
 	"github.com/radarnex/httpcatch/internal/pipeline"
@@ -36,6 +37,7 @@ type App struct {
 	Memory   *sinks.MemorySink
 	SQLite   *sinks.SQLiteSink
 	Ruleset  *redact.Ruleset
+	Admin    *admin.Server
 }
 
 func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extraSinks ...sinks.Sink) (*App, error) {
@@ -81,6 +83,11 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		Logger:        logger,
 	})
 
+	adminSrv, err := admin.New(cfg.Admin, logger)
+	if err != nil {
+		return nil, fmt.Errorf("admin server: %w", err)
+	}
+
 	return &App{
 		Cfg:      cfg,
 		Logger:   logger,
@@ -92,6 +99,7 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		Memory:   memSink,
 		SQLite:   sqliteSink,
 		Ruleset:  ruleset,
+		Admin:    adminSrv,
 	}, nil
 }
 
@@ -104,9 +112,11 @@ func (a *App) EmitStartupWarnings() {
 	}
 }
 
-// Serve binds the capture port and runs until ctx is cancelled or the server
-// fails. On shutdown the queue is closed and the worker pool is given
-// shutdownDrainTimeout to drain; a stuck sink cannot wedge shutdown forever.
+// Serve binds both the capture port and the admin port, then runs until ctx is
+// cancelled or either server fails. Failure in either listener triggers
+// shutdown of the other. On shutdown the queue is closed and the worker pool
+// is given shutdownDrainTimeout to drain; a stuck sink cannot wedge shutdown
+// forever.
 func (a *App) Serve(ctx context.Context) error {
 	a.Workers.Start(ctx)
 
@@ -116,22 +126,43 @@ func (a *App) Serve(ctx context.Context) error {
 		a.shutdown()
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
-	server := &http.Server{Handler: a.Handler}
+	captureServer := &http.Server{Handler: a.Handler}
 	a.Logger.Info("capture port listening", "addr", ln.Addr().String())
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- server.Serve(ln) }()
+	captureErrCh := make(chan error, 1)
+	go func() { captureErrCh <- captureServer.Serve(ln) }()
+
+	adminErrCh := make(chan error, 1)
+	serveCtx, cancelServe := context.WithCancel(ctx)
+	defer cancelServe()
+	go func() { adminErrCh <- a.Admin.Serve(serveCtx) }()
 
 	var serveErr error
 	select {
 	case <-ctx.Done():
+		// Context cancelled: shut down both servers.
 		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
-		_ = server.Shutdown(shutCtx)
+		_ = captureServer.Shutdown(shutCtx)
 		cancel()
-	case err := <-errCh:
+		// Admin server will see serveCtx cancelled (which mirrors ctx) and
+		// shut itself down.
+	case err := <-captureErrCh:
 		if !errors.Is(err, http.ErrServerClosed) {
 			serveErr = err
 		}
+		// Shut down admin server on capture-port failure.
+		cancelServe()
+		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+		_ = captureServer.Shutdown(shutCtx)
+		cancel()
+	case err := <-adminErrCh:
+		if err != nil {
+			serveErr = err
+		}
+		// Shut down capture server on admin-port failure.
+		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+		_ = captureServer.Shutdown(shutCtx)
+		cancel()
 	}
 	a.shutdown()
 	return serveErr

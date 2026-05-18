@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func noEnv(string) string { return "" }
@@ -313,5 +314,185 @@ func TestLoad_InvalidIntEnv(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HTTPCATCH_CAPTURE_PORT") {
 		t.Errorf("error %q does not mention HTTPCATCH_CAPTURE_PORT", err)
+	}
+}
+
+func TestLoad_AdminDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load("", noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Admin.Bind != DefaultAdminBind {
+		t.Errorf("admin.bind: got %q want %q", cfg.Admin.Bind, DefaultAdminBind)
+	}
+	if cfg.Admin.Token != "" {
+		t.Errorf("admin.token: got %q want empty", cfg.Admin.Token)
+	}
+	if cfg.Admin.InsecureListen {
+		t.Errorf("admin.insecure_listen: got true want false")
+	}
+	if cfg.Admin.SessionTTL != DefaultAdminSessionTTL {
+		t.Errorf("admin.session_ttl: got %v want %v", cfg.Admin.SessionTTL, DefaultAdminSessionTTL)
+	}
+	if cfg.Admin.SessionSecure {
+		t.Errorf("admin.session_secure: got true want false")
+	}
+}
+
+func TestLoad_AdminYAMLBlock(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `
+admin:
+  bind: 0.0.0.0:9090
+  token: "secret"
+  insecure_listen: true
+  session_ttl: 30m
+  session_secure: true
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Admin.Bind != "0.0.0.0:9090" {
+		t.Errorf("admin.bind: got %q want 0.0.0.0:9090", cfg.Admin.Bind)
+	}
+	if cfg.Admin.Token != "secret" {
+		t.Errorf("admin.token: got %q want secret", cfg.Admin.Token)
+	}
+	if !cfg.Admin.InsecureListen {
+		t.Errorf("admin.insecure_listen: got false want true")
+	}
+	if cfg.Admin.SessionTTL != 30*time.Minute {
+		t.Errorf("admin.session_ttl: got %v want 30m", cfg.Admin.SessionTTL)
+	}
+	if !cfg.Admin.SessionSecure {
+		t.Errorf("admin.session_secure: got false want true")
+	}
+}
+
+func TestLoad_AdminYAML_UnknownKey(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `
+admin:
+  bind: 127.0.0.1:8081
+  mystery_key: oops
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path, noEnv)
+	if err == nil {
+		t.Fatal("expected error for unknown admin key, got nil")
+	}
+	if !strings.Contains(err.Error(), "mystery_key") {
+		t.Errorf("error %q should mention the unknown key", err.Error())
+	}
+}
+
+func TestLoad_AdminYAML_InvalidSessionTTL(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	body := `
+admin:
+  session_ttl: "not-a-duration"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path, noEnv)
+	if err == nil {
+		t.Fatal("expected error for invalid session_ttl, got nil")
+	}
+	if !strings.Contains(err.Error(), "admin.session_ttl") {
+		t.Errorf("error %q should mention admin.session_ttl", err.Error())
+	}
+}
+
+func TestLoad_AdminEnvOverrides(t *testing.T) {
+	t.Parallel()
+
+	env := mapEnv(map[string]string{
+		"HTTPCATCH_ADMIN_BIND":            "0.0.0.0:9999",
+		"HTTPCATCH_ADMIN_TOKEN":           "mytoken",
+		"HTTPCATCH_ADMIN_INSECURE_LISTEN": "true",
+		"HTTPCATCH_ADMIN_SESSION_TTL":     "1h",
+		"HTTPCATCH_ADMIN_SESSION_SECURE":  "1",
+	})
+	cfg, err := Load("", env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Admin.Bind != "0.0.0.0:9999" {
+		t.Errorf("admin.bind: got %q want 0.0.0.0:9999", cfg.Admin.Bind)
+	}
+	if cfg.Admin.Token != "mytoken" {
+		t.Errorf("admin.token: got %q want mytoken", cfg.Admin.Token)
+	}
+	if !cfg.Admin.InsecureListen {
+		t.Errorf("admin.insecure_listen: got false want true")
+	}
+	if cfg.Admin.SessionTTL != time.Hour {
+		t.Errorf("admin.session_ttl: got %v want 1h", cfg.Admin.SessionTTL)
+	}
+	if !cfg.Admin.SessionSecure {
+		t.Errorf("admin.session_secure: got false want true")
+	}
+}
+
+func TestLoad_AdminEnv_InvalidInsecureListen(t *testing.T) {
+	t.Parallel()
+
+	env := mapEnv(map[string]string{
+		"HTTPCATCH_ADMIN_INSECURE_LISTEN": "bogus",
+	})
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("expected error for invalid HTTPCATCH_ADMIN_INSECURE_LISTEN, got nil")
+	}
+	if !strings.Contains(err.Error(), "HTTPCATCH_ADMIN_INSECURE_LISTEN") {
+		t.Errorf("error %q should mention the env var name", err.Error())
+	}
+}
+
+func TestLoad_AdminEnv_InvalidSessionTTL(t *testing.T) {
+	t.Parallel()
+
+	env := mapEnv(map[string]string{
+		"HTTPCATCH_ADMIN_SESSION_TTL": "not-a-duration",
+	})
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("expected error for invalid HTTPCATCH_ADMIN_SESSION_TTL, got nil")
+	}
+	if !strings.Contains(err.Error(), "HTTPCATCH_ADMIN_SESSION_TTL") {
+		t.Errorf("error %q should mention the env var name", err.Error())
+	}
+}
+
+func TestLoad_AdminEnv_InvalidSessionSecure(t *testing.T) {
+	t.Parallel()
+
+	env := mapEnv(map[string]string{
+		"HTTPCATCH_ADMIN_SESSION_SECURE": "yes",
+	})
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("expected error for invalid HTTPCATCH_ADMIN_SESSION_SECURE, got nil")
+	}
+	if !strings.Contains(err.Error(), "HTTPCATCH_ADMIN_SESSION_SECURE") {
+		t.Errorf("error %q should mention the env var name", err.Error())
 	}
 }

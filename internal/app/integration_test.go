@@ -29,6 +29,19 @@ import (
 	"github.com/radarnex/httpcatch/internal/sinks"
 )
 
+// freeAddr returns a local address with an available port by briefly binding
+// and releasing it.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("freeAddr: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
 // syncBuffer lets the worker write while the test polls. Lines is updated on
 // Write so poll loops do not have to scan the buffer each iteration.
 type syncBuffer struct {
@@ -1533,6 +1546,164 @@ func TestIntegration_CookieAndHeaderOrdering_HeaderRuleWins(t *testing.T) {
 	if len(vals) != 1 || vals[0] != redact.Redacted {
 		t.Errorf("Cookie: got %v, want [%q] (header rule must overwrite the cookie redactor's output)", vals, redact.Redacted)
 	}
+}
+
+func TestIntegration_AdminPort_HealthzAndCapturePort(t *testing.T) {
+	t.Parallel()
+
+	adminAddr := freeAddr(t)
+	captureAddr := freeAddr(t)
+
+	cfg := config.Defaults()
+	cfg.CapturePort = mustPort(t, captureAddr)
+	cfg.Admin.Bind = adminAddr
+	cfg.Sinks.Stdout = true
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), &stdoutBuf)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Serve(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not return after context cancel")
+		}
+	}()
+
+	// Wait for both ports to be ready.
+	waitPort(t, adminAddr, 3*time.Second)
+	waitPort(t, captureAddr, 3*time.Second)
+
+	// Hit /healthz on the admin port.
+	resp, err := http.Get("http://" + adminAddr + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("healthz status: got %d want 200", resp.StatusCode)
+	}
+	if string(body) != "ok" {
+		t.Errorf("healthz body: got %q want ok", string(body))
+	}
+
+	// Fire a captured request at the capture port and assert it lands.
+	captureResp, err := http.Post("http://"+captureAddr+"/test", "text/plain", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("capture POST: %v", err)
+	}
+	io.Copy(io.Discard, captureResp.Body)
+	captureResp.Body.Close()
+	if captureResp.StatusCode != http.StatusAccepted {
+		t.Errorf("capture status: got %d want 202", captureResp.StatusCode)
+	}
+
+	if !waitFor(func() bool { return stdoutBuf.CountLines() >= 1 }, 5*time.Second) {
+		t.Fatal("timed out waiting for captured record in stdout")
+	}
+}
+
+func TestIntegration_AdminPort_BindRefusal_NonLoopback(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Admin.Bind = "0.0.0.0:0"
+	// Token and InsecureListen both unset: should refuse.
+
+	var logBuf bytes.Buffer
+	_, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err == nil {
+		t.Fatal("expected app.Build to fail for non-loopback bind without token or insecure flag")
+	}
+	if !strings.Contains(err.Error(), "admin") {
+		t.Errorf("error %q should mention admin", err.Error())
+	}
+}
+
+func TestIntegration_AdminPort_HealthzIgnoresBogusAuth(t *testing.T) {
+	t.Parallel()
+
+	adminAddr := freeAddr(t)
+	captureAddr := freeAddr(t)
+
+	cfg := config.Defaults()
+	cfg.CapturePort = mustPort(t, captureAddr)
+	cfg.Admin.Bind = adminAddr
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Serve(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not return after context cancel")
+		}
+	}()
+
+	waitPort(t, adminAddr, 3*time.Second)
+
+	req, _ := http.NewRequest(http.MethodGet, "http://"+adminAddr+"/healthz", nil)
+	req.Header.Set("Authorization", "Bearer totally-invalid-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /healthz with auth header: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("healthz with bogus auth: got %d want 200", resp.StatusCode)
+	}
+	if string(body) != "ok" {
+		t.Errorf("body: got %q want ok", string(body))
+	}
+}
+
+// mustPort extracts the port number from "host:port".
+func mustPort(t *testing.T, addr string) int {
+	t.Helper()
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("mustPort: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
+		t.Fatalf("mustPort parse %q: %v", portStr, err)
+	}
+	return port
+}
+
+// waitPort polls until the given address accepts a TCP connection or the
+// timeout expires.
+func waitPort(t *testing.T, addr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("port %s not ready within %v", addr, timeout)
 }
 
 func TestIntegration_CookieOrdering_OnlyNamedCookieRedacted(t *testing.T) {
