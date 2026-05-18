@@ -24,6 +24,7 @@ type Server struct {
 	cfg    config.AdminConfig
 	logger *slog.Logger
 	router chi.Router
+	store  *SessionStore
 }
 
 // New validates the bind policy and constructs a Server. An error is returned
@@ -40,13 +41,34 @@ func New(cfg config.AdminConfig, logger *slog.Logger) (*Server, error) {
 	}
 	logger.Info("admin port bind policy", "bind", cfg.Bind, "reason", string(reason))
 
+	if cfg.Token == "" && reason == ReasonLoopbackDefault {
+		logger.Warn("admin token is empty on loopback bind; admin endpoints (except /healthz) are unreachable until admin.token is configured")
+	}
+
+	store := NewSessionStore(time.Now)
+	auth := &authHandlers{cfg: cfg, store: store, logger: logger}
+
 	r := chi.NewRouter()
 	r.Get("/healthz", healthzHandler)
+	r.Get("/login", auth.loginPageHandler)
+	r.Post("/auth/login", auth.loginPostHandler)
+	r.Post("/auth/logout", auth.logoutHandler)
+
+	// Placeholder protected route so middleware can be exercised end-to-end.
+	// Issue 04 removes this once the real /status endpoint replaces it.
+	r.Group(func(r chi.Router) {
+		r.Use(Middleware(cfg.Token, store))
+		r.Get("/admin/ping", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte("pong"))
+		})
+	})
 
 	return &Server{
 		cfg:    cfg,
 		logger: logger,
 		router: r,
+		store:  store,
 	}, nil
 }
 
@@ -63,6 +85,8 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("admin: listen %s: %w", s.cfg.Bind, err)
 	}
+
+	s.store.StartSweeper(ctx, time.Minute)
 
 	srv := &http.Server{Handler: s.router}
 	s.logger.Info("admin port listening", "addr", ln.Addr().String())
