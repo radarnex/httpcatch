@@ -26,7 +26,7 @@ func newInspectServer(t *testing.T, readers admin.ReadSources) *httptest.Server 
 		SessionTTL:    time.Hour,
 		SessionSecure: false,
 	}
-	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{}, readers)
+	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{}, admin.ServerOptions{Readers: readers})
 	if err != nil {
 		t.Fatalf("admin.New: %v", err)
 	}

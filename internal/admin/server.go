@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/config"
 	"github.com/radarnex/httpcatch/internal/inspect"
 )
@@ -35,10 +36,26 @@ type ReadSources struct {
 	SQLite inspect.Reader
 }
 
+// EventsSources wires the queue and configuration the Events API handler needs.
+// Queue may be nil; the events handler returns 503 when no queue is configured.
+type EventsSources struct {
+	Queue            *capture.Queue
+	BodyCap          int
+	MaxEventsPayload int
+	Counters         *EventsCounters
+}
+
+// ServerOptions bundles the optional dependencies that various route groups need.
+// Fields have sensible zero values (nil = feature disabled).
+type ServerOptions struct {
+	Readers ReadSources
+	Events  EventsSources
+}
+
 // New validates the bind policy and constructs a Server. An error is returned
 // immediately if the policy refuses the bind address, so app composition can
 // fail startup before any listener is created.
-func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, readers ...ReadSources) (*Server, error) {
+func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opts ...ServerOptions) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -58,10 +75,12 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, rea
 
 	etags := buildEtags(uiFS)
 
-	var rs ReadSources
-	if len(readers) > 0 {
-		rs = readers[0]
+	var serverOpts ServerOptions
+	if len(opts) > 0 {
+		serverOpts = opts[0]
 	}
+	rs := serverOpts.Readers
+	es := serverOpts.Events
 
 	r := chi.NewRouter()
 	r.Get("/healthz", healthzHandler)
@@ -79,6 +98,11 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, rea
 		r.Get("/requests", requestsHandler(rs.Memory, rs.SQLite))
 		r.Get("/requests/{id}", requestDetailHandler(rs.Memory, rs.SQLite))
 	})
+
+	// POST /events uses bearer-only auth (no session cookie) to eliminate CSRF risk.
+	// App middleware calling this endpoint always uses a bearer token, never a browser cookie.
+	r.With(Middleware(cfg.Token, store, WithCookieAuth(false))).
+		Post("/events", eventsHandler(es.Queue, es.BodyCap, es.MaxEventsPayload, es.Counters))
 
 	return &Server{
 		cfg:    cfg,

@@ -91,13 +91,32 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		readers.SQLite = sqliteSink
 	}
 
+	eventsCounters := admin.NewEventsCounters()
+
 	adminSrv, err := admin.New(cfg.Admin, logger, admin.MetricSources{
 		DroppedTotal:                    q.DroppedTotal,
 		CapturedWithoutCorrelationTotal: counters.CapturedWithoutCorrelationTotal,
 		CapturedWithoutServiceTotal:     counters.CapturedWithoutServiceTotal,
 		RedactionErrorsTotal:            ruleset.RedactionErrorsTotal,
 		Unredacted:                      ruleset.IsUnredacted,
-	}, readers)
+
+		EventsIngestedResponseTotal:          eventsCounters.EventsIngestedResponseTotal,
+		EventsIngestedOutboundTotal:          eventsCounters.EventsIngestedOutboundTotal,
+		EventsRejectedInvalidJSONTotal:       eventsCounters.EventsRejectedInvalidJSONTotal,
+		EventsRejectedPayloadTooLargeTotal:   eventsCounters.EventsRejectedPayloadTooLargeTotal,
+		EventsRejectedUnknownTypeTotal:       eventsCounters.EventsRejectedUnknownTypeTotal,
+		EventsRejectedMissingTypeTotal:       eventsCounters.EventsRejectedMissingTypeTotal,
+		EventsRejectedMissingRequiredFieldTotal: eventsCounters.EventsRejectedMissingRequiredFieldTotal,
+		EventsRejectedEmptyBatchTotal:        eventsCounters.EventsRejectedEmptyBatchTotal,
+	}, admin.ServerOptions{
+		Readers: readers,
+		Events: admin.EventsSources{
+			Queue:            q,
+			BodyCap:          cfg.BodyCap,
+			MaxEventsPayload: cfg.MaxEventsPayload,
+			Counters:         eventsCounters,
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("admin server: %w", err)
 	}

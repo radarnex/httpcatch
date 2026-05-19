@@ -13,14 +13,15 @@ import (
 )
 
 const (
-	DefaultCapturePort    = 8080
-	DefaultQueueSize      = 1024
-	DefaultBodyCap        = 1 << 20
-	DefaultServiceHeader  = "X-Httpcatch-Service"
-	DefaultMemoryCapacity = 1000
-	DefaultSQLitePath     = "./httpcatch.db"
-	DefaultAdminBind      = "127.0.0.1:8081"
-	DefaultAdminSessionTTL = 24 * time.Hour
+	DefaultCapturePort      = 8080
+	DefaultQueueSize        = 1024
+	DefaultBodyCap          = 1 << 20
+	DefaultMaxEventsPayload = 1 << 20 // 1 MiB
+	DefaultServiceHeader    = "X-Httpcatch-Service"
+	DefaultMemoryCapacity   = 1000
+	DefaultSQLitePath       = "./httpcatch.db"
+	DefaultAdminBind        = "127.0.0.1:8081"
+	DefaultAdminSessionTTL  = 24 * time.Hour
 )
 
 type SinksConfig struct {
@@ -67,23 +68,25 @@ type RegexRuleConfig struct {
 }
 
 type Config struct {
-	CapturePort   int             `yaml:"capture_port"`
-	QueueSize     int             `yaml:"queue_size"`
-	BodyCap       int             `yaml:"body_cap"`
-	Workers       int             `yaml:"workers"`
-	ServiceHeader string          `yaml:"service_header"`
-	Sinks         SinksConfig     `yaml:"sinks"`
-	Redaction     RedactionConfig
-	Admin         AdminConfig
+	CapturePort      int             `yaml:"capture_port"`
+	QueueSize        int             `yaml:"queue_size"`
+	BodyCap          int             `yaml:"body_cap"`
+	MaxEventsPayload int             `yaml:"max_events_payload"`
+	Workers          int             `yaml:"workers"`
+	ServiceHeader    string          `yaml:"service_header"`
+	Sinks            SinksConfig     `yaml:"sinks"`
+	Redaction        RedactionConfig
+	Admin            AdminConfig
 }
 
 func Defaults() Config {
 	return Config{
-		CapturePort:   DefaultCapturePort,
-		QueueSize:     DefaultQueueSize,
-		BodyCap:       DefaultBodyCap,
-		Workers:       runtime.NumCPU(),
-		ServiceHeader: DefaultServiceHeader,
+		CapturePort:      DefaultCapturePort,
+		QueueSize:        DefaultQueueSize,
+		BodyCap:          DefaultBodyCap,
+		MaxEventsPayload: DefaultMaxEventsPayload,
+		Workers:          runtime.NumCPU(),
+		ServiceHeader:    DefaultServiceHeader,
 		Sinks: SinksConfig{
 			MemoryCapacity: DefaultMemoryCapacity,
 			SQLitePath:     DefaultSQLitePath,
@@ -174,14 +177,15 @@ func (r *rawRedactionConfig) UnmarshalYAML(value *yaml.Node) error {
 // Pointer fields distinguish "absent" from "set to zero" so the YAML cannot
 // silently overwrite a default with the zero value.
 type rawConfig struct {
-	CapturePort   *int                `yaml:"capture_port"`
-	QueueSize     *int                `yaml:"queue_size"`
-	BodyCap       *int                `yaml:"body_cap"`
-	Workers       *int                `yaml:"workers"`
-	ServiceHeader *string             `yaml:"service_header"`
-	Sinks         rawSinks            `yaml:"sinks"`
-	Redaction     *rawRedactionConfig `yaml:"redaction"`
-	Admin         *rawAdminConfig     `yaml:"admin"`
+	CapturePort      *int                `yaml:"capture_port"`
+	QueueSize        *int                `yaml:"queue_size"`
+	BodyCap          *int                `yaml:"body_cap"`
+	MaxEventsPayload *int                `yaml:"max_events_payload"`
+	Workers          *int                `yaml:"workers"`
+	ServiceHeader    *string             `yaml:"service_header"`
+	Sinks            rawSinks            `yaml:"sinks"`
+	Redaction        *rawRedactionConfig `yaml:"redaction"`
+	Admin            *rawAdminConfig     `yaml:"admin"`
 }
 
 func Load(path string, env func(string) string) (Config, error) {
@@ -220,6 +224,9 @@ func applyRaw(cfg *Config, raw rawConfig) error {
 	}
 	if raw.BodyCap != nil {
 		cfg.BodyCap = *raw.BodyCap
+	}
+	if raw.MaxEventsPayload != nil {
+		cfg.MaxEventsPayload = *raw.MaxEventsPayload
 	}
 	if raw.Workers != nil {
 		cfg.Workers = *raw.Workers
@@ -293,6 +300,7 @@ func applyEnv(cfg *Config, env func(string) string) error {
 		{"HTTPCATCH_CAPTURE_PORT", &cfg.CapturePort},
 		{"HTTPCATCH_QUEUE_SIZE", &cfg.QueueSize},
 		{"HTTPCATCH_BODY_CAP", &cfg.BodyCap},
+		{"HTTPCATCH_MAX_EVENTS_PAYLOAD", &cfg.MaxEventsPayload},
 		{"HTTPCATCH_WORKER_COUNT", &cfg.Workers},
 		{"HTTPCATCH_MEMORY_CAPACITY", &cfg.Sinks.MemoryCapacity},
 	} {
@@ -383,6 +391,9 @@ func (c Config) Validate() error {
 	}
 	if c.BodyCap < 0 {
 		errs = append(errs, fmt.Errorf("body_cap: must be >= 0, got %d", c.BodyCap))
+	}
+	if c.MaxEventsPayload < 0 {
+		errs = append(errs, fmt.Errorf("max_events_payload: must be >= 0, got %d", c.MaxEventsPayload))
 	}
 	if c.Sinks.MemoryCapacity < 1 {
 		errs = append(errs, fmt.Errorf("sinks.memory_capacity: must be >= 1, got %d", c.Sinks.MemoryCapacity))

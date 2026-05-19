@@ -17,6 +17,9 @@ const (
 	CorrelationSourceTraceparent = "traceparent"
 	CorrelationSourceRequestID   = "request_id"
 	CorrelationSourceSynthesized = "synthesized"
+	// CorrelationSourceExplicit is used when the events API caller supplies a
+	// correlation_id directly in the event body.
+	CorrelationSourceExplicit = "explicit"
 )
 
 // IdentifyCorrelation resolves the correlation identifier for a captured
