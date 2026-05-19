@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// ErrNotImplemented is returned by Reader methods that are declared in the
-// interface but not yet backed by an implementation.
-var ErrNotImplemented = errors.New("not implemented")
+// ErrNotFound is returned by ReadDetail when the requested id does not match
+// any record in this reader.
+var ErrNotFound = errors.New("not found")
 
 // RootRow is one entry in the GET /requests list. Every captured-request row
 // carries kind "request". Orphan-event rows carry their own kind values.
@@ -29,10 +29,13 @@ type RootRow struct {
 	Status        *int       `json:"status"` // nullable; populated via events join
 }
 
-// DetailRecord is the return type of ReadDetail. Its concrete shape is defined
-// by the detail handler; this declaration keeps Reader compilable without it.
-type DetailRecord interface {
-	detailRecord()
+// DetailRecord is the return type of ReadDetail. Root is the record matched by
+// id; Events holds every other record sharing the same correlation_id, ordered
+// by timestamp ascending. Events is always non-nil (empty slice when there are
+// no siblings).
+type DetailRecord struct {
+	Root   any   `json:"root"`
+	Events []any `json:"events"`
 }
 
 // InspectQuery carries the parameters parsed from GET /requests. Additional
@@ -52,7 +55,7 @@ type Reader interface {
 	ReadRoots(ctx context.Context, q InspectQuery, limit int, cursor *Cursor) (rows []RootRow, nextCursor *Cursor, err error)
 
 	// ReadDetail returns the full record for id plus any correlated records.
-	// Returns ErrNotImplemented when no detail implementation is wired.
+	// Returns ErrNotFound when the id does not match any record.
 	ReadDetail(ctx context.Context, id string) (DetailRecord, error)
 
 	// ServicesSeen returns the distinct list of services observed since the

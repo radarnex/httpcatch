@@ -2,6 +2,7 @@ package sinks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -250,12 +251,241 @@ func TestSQLiteReader_ServicesSeen_SinceFilter(t *testing.T) {
 	}
 }
 
-func TestSQLiteReader_ReadDetail_ReturnsErrNotImplemented(t *testing.T) {
+func TestSQLiteReader_ReadDetail_NotFound(t *testing.T) {
 	t.Parallel()
 
 	s, _ := openTestSink(t)
-	_, err := s.ReadDetail(context.Background(), "any-id")
-	if err != inspect.ErrNotImplemented {
-		t.Errorf("ReadDetail: got %v want ErrNotImplemented", err)
+	_, err := s.ReadDetail(context.Background(), "missing-id")
+	if !errors.Is(err, inspect.ErrNotFound) {
+		t.Errorf("ReadDetail: got %v want ErrNotFound", err)
+	}
+}
+
+func TestSQLiteReader_ReadDetail_CapturedRequest_NoSiblings(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	r := sqliteRequest("req-1", ts, "svc", "GET", "/", "corr-1", "1.2.3.4")
+	if err := s.Write(ctx, r); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	detail, err := s.ReadDetail(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("ReadDetail: %v", err)
+	}
+	cr, ok := detail.Root.(*capture.CapturedRequest)
+	if !ok {
+		t.Fatalf("Root is %T, want *capture.CapturedRequest", detail.Root)
+	}
+	if cr.ID != "req-1" {
+		t.Errorf("Root.ID: got %q want req-1", cr.ID)
+	}
+	if len(detail.Events) != 0 {
+		t.Errorf("Events: got %d want 0", len(detail.Events))
+	}
+}
+
+func TestSQLiteReader_ReadDetail_CapturedRequest_WithResponseEvent(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	req := sqliteRequest("req-1", base, "svc", "GET", "/", "corr-1", "1.2.3.4")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+	ev := &capture.ResponseEvent{
+		ID:            "evt-1",
+		Timestamp:     base.Add(time.Second),
+		CorrelationID: "corr-1",
+		Service:       "svc",
+		ServiceSource: "app",
+		Status:        200,
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+	if err := s.Write(ctx, ev); err != nil {
+		t.Fatalf("Write ev: %v", err)
+	}
+
+	detail, err := s.ReadDetail(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("ReadDetail: %v", err)
+	}
+	if len(detail.Events) != 1 {
+		t.Fatalf("Events: got %d want 1", len(detail.Events))
+	}
+	sibling, ok := detail.Events[0].(*capture.ResponseEvent)
+	if !ok {
+		t.Fatalf("Events[0] is %T, want *capture.ResponseEvent", detail.Events[0])
+	}
+	if sibling.ID != "evt-1" {
+		t.Errorf("Events[0].ID: got %q want evt-1", sibling.ID)
+	}
+	if sibling.Status != 200 {
+		t.Errorf("Events[0].Status: got %d want 200", sibling.Status)
+	}
+}
+
+func TestSQLiteReader_ReadDetail_EventRoot(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	req := sqliteRequest("req-1", base, "svc", "GET", "/", "corr-1", "1.2.3.4")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+	ev := &capture.ResponseEvent{
+		ID:            "evt-1",
+		Timestamp:     base.Add(time.Second),
+		CorrelationID: "corr-1",
+		Service:       "svc",
+		ServiceSource: "app",
+		Status:        201,
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+	if err := s.Write(ctx, ev); err != nil {
+		t.Fatalf("Write ev: %v", err)
+	}
+
+	detail, err := s.ReadDetail(ctx, "evt-1")
+	if err != nil {
+		t.Fatalf("ReadDetail: %v", err)
+	}
+	re, ok := detail.Root.(*capture.ResponseEvent)
+	if !ok {
+		t.Fatalf("Root is %T, want *capture.ResponseEvent", detail.Root)
+	}
+	if re.ID != "evt-1" {
+		t.Errorf("Root.ID: got %q want evt-1", re.ID)
+	}
+	if re.Status != 201 {
+		t.Errorf("Root.Status: got %d want 201", re.Status)
+	}
+	if len(detail.Events) != 1 {
+		t.Fatalf("Events: got %d want 1", len(detail.Events))
+	}
+	sibling, ok := detail.Events[0].(*capture.CapturedRequest)
+	if !ok {
+		t.Fatalf("Events[0] is %T, want *capture.CapturedRequest", detail.Events[0])
+	}
+	if sibling.ID != "req-1" {
+		t.Errorf("Events[0].ID: got %q want req-1", sibling.ID)
+	}
+}
+
+func TestSQLiteReader_ReadDetail_OutboundEvent(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	ev := &capture.OutboundEvent{
+		ID:            "out-1",
+		Timestamp:     base,
+		CorrelationID: "corr-2",
+		Service:       "svc",
+		ServiceSource: "app",
+		DurationMS:    42,
+		Request: capture.OutboundRequestHalf{
+			Method:  "POST",
+			Path:    "/payments",
+			Headers: map[string][]string{},
+			Body:    []byte("{}"),
+		},
+		Response: &capture.OutboundResponseHalf{
+			Status:  201,
+			Headers: map[string][]string{},
+			Body:    []byte("ok"),
+		},
+	}
+	if err := s.Write(ctx, ev); err != nil {
+		t.Fatalf("Write ev: %v", err)
+	}
+
+	detail, err := s.ReadDetail(ctx, "out-1")
+	if err != nil {
+		t.Fatalf("ReadDetail: %v", err)
+	}
+	oe, ok := detail.Root.(*capture.OutboundEvent)
+	if !ok {
+		t.Fatalf("Root is %T, want *capture.OutboundEvent", detail.Root)
+	}
+	if oe.ID != "out-1" {
+		t.Errorf("Root.ID: got %q want out-1", oe.ID)
+	}
+	if oe.Request.Method != "POST" {
+		t.Errorf("Root.Request.Method: got %q want POST", oe.Request.Method)
+	}
+	if oe.Response == nil {
+		t.Fatal("Root.Response is nil")
+	}
+	if oe.Response.Status != 201 {
+		t.Errorf("Root.Response.Status: got %d want 201", oe.Response.Status)
+	}
+	if len(detail.Events) != 0 {
+		t.Errorf("Events: got %d want 0", len(detail.Events))
+	}
+}
+
+func TestSQLiteReader_ReadDetail_SiblingsOrderedByTimestampASC(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	req := sqliteRequest("req-1", base, "svc", "GET", "/", "corr-1", "x")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+	ev2 := &capture.ResponseEvent{
+		ID:            "evt-2",
+		Timestamp:     base.Add(3 * time.Second),
+		CorrelationID: "corr-1",
+		Service:       "svc",
+		ServiceSource: "app",
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+	ev1 := &capture.ResponseEvent{
+		ID:            "evt-1",
+		Timestamp:     base.Add(time.Second),
+		CorrelationID: "corr-1",
+		Service:       "svc",
+		ServiceSource: "app",
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+	if err := s.Write(ctx, ev2); err != nil {
+		t.Fatalf("Write ev2: %v", err)
+	}
+	if err := s.Write(ctx, ev1); err != nil {
+		t.Fatalf("Write ev1: %v", err)
+	}
+
+	detail, err := s.ReadDetail(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("ReadDetail: %v", err)
+	}
+	if len(detail.Events) != 2 {
+		t.Fatalf("Events: got %d want 2", len(detail.Events))
+	}
+	ids := []string{
+		detail.Events[0].(capture.Record).RecordID(),
+		detail.Events[1].(capture.Record).RecordID(),
+	}
+	if ids[0] != "evt-1" || ids[1] != "evt-2" {
+		t.Errorf("events order: got %v want [evt-1 evt-2]", ids)
 	}
 }

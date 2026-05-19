@@ -77,6 +77,7 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, rea
 		r.Get("/", indexHandler())
 		r.Get("/status", statusHandler(internal, internal.unredacted))
 		r.Get("/requests", requestsHandler(rs.Memory, rs.SQLite))
+		r.Get("/requests/{id}", requestDetailHandler(rs.Memory, rs.SQLite))
 	})
 
 	return &Server{

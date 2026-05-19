@@ -2,6 +2,7 @@ package sinks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"testing"
@@ -284,13 +285,197 @@ func TestMemoryReader_ReadRoots_NoNextCursorWhenExhausted(t *testing.T) {
 	}
 }
 
-func TestMemoryReader_ReadDetail_ReturnsErrNotImplemented(t *testing.T) {
+func TestMemoryReader_ReadDetail_NotFound(t *testing.T) {
 	t.Parallel()
 
 	s := NewMemorySink(10)
-	_, err := s.ReadDetail(context.Background(), "any-id")
-	if err != inspect.ErrNotImplemented {
-		t.Errorf("ReadDetail: got %v want ErrNotImplemented", err)
+	_, err := s.ReadDetail(context.Background(), "missing-id")
+	if !errors.Is(err, inspect.ErrNotFound) {
+		t.Errorf("ReadDetail: got %v want ErrNotFound", err)
+	}
+}
+
+func TestMemoryReader_ReadDetail_CapturedRequest_NoSiblings(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(10)
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	r := makeRequest("req-1", ts, "svc", "GET", "/", "corr-1", "1.2.3.4")
+	if err := s.Write(ctx, r); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	detail, err := s.ReadDetail(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("ReadDetail: %v", err)
+	}
+	cr, ok := detail.Root.(*capture.CapturedRequest)
+	if !ok {
+		t.Fatalf("Root is %T, want *capture.CapturedRequest", detail.Root)
+	}
+	if cr.ID != "req-1" {
+		t.Errorf("Root.ID: got %q want req-1", cr.ID)
+	}
+	if len(detail.Events) != 0 {
+		t.Errorf("Events: got %d want 0", len(detail.Events))
+	}
+}
+
+func TestMemoryReader_ReadDetail_CapturedRequest_WithSiblings(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(10)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	req := makeRequest("req-1", base, "svc", "GET", "/", "corr-1", "1.2.3.4")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+	ev := &capture.ResponseEvent{
+		ID:            "evt-1",
+		Timestamp:     base.Add(time.Second),
+		CorrelationID: "corr-1",
+		Service:       "svc",
+		ServiceSource: "app",
+		Status:        200,
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+	if err := s.Write(ctx, ev); err != nil {
+		t.Fatalf("Write ev: %v", err)
+	}
+
+	// Unrelated record with different correlation.
+	other := makeRequest("req-other", base.Add(2*time.Second), "svc", "POST", "/x", "corr-other", "x")
+	if err := s.Write(ctx, other); err != nil {
+		t.Fatalf("Write other: %v", err)
+	}
+
+	detail, err := s.ReadDetail(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("ReadDetail: %v", err)
+	}
+	cr, ok := detail.Root.(*capture.CapturedRequest)
+	if !ok {
+		t.Fatalf("Root is %T, want *capture.CapturedRequest", detail.Root)
+	}
+	if cr.ID != "req-1" {
+		t.Errorf("Root.ID: got %q want req-1", cr.ID)
+	}
+	if len(detail.Events) != 1 {
+		t.Fatalf("Events: got %d want 1", len(detail.Events))
+	}
+	sibling, ok := detail.Events[0].(*capture.ResponseEvent)
+	if !ok {
+		t.Fatalf("Events[0] is %T, want *capture.ResponseEvent", detail.Events[0])
+	}
+	if sibling.ID != "evt-1" {
+		t.Errorf("Events[0].ID: got %q want evt-1", sibling.ID)
+	}
+}
+
+func TestMemoryReader_ReadDetail_EventRoot(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(10)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	req := makeRequest("req-1", base, "svc", "GET", "/", "corr-1", "1.2.3.4")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+	ev := &capture.ResponseEvent{
+		ID:            "evt-1",
+		Timestamp:     base.Add(time.Second),
+		CorrelationID: "corr-1",
+		Service:       "svc",
+		ServiceSource: "app",
+		Status:        200,
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+	if err := s.Write(ctx, ev); err != nil {
+		t.Fatalf("Write ev: %v", err)
+	}
+
+	// Resolve by event id.
+	detail, err := s.ReadDetail(ctx, "evt-1")
+	if err != nil {
+		t.Fatalf("ReadDetail: %v", err)
+	}
+	re, ok := detail.Root.(*capture.ResponseEvent)
+	if !ok {
+		t.Fatalf("Root is %T, want *capture.ResponseEvent", detail.Root)
+	}
+	if re.ID != "evt-1" {
+		t.Errorf("Root.ID: got %q want evt-1", re.ID)
+	}
+	// Sibling is the captured request.
+	if len(detail.Events) != 1 {
+		t.Fatalf("Events: got %d want 1", len(detail.Events))
+	}
+	sibling, ok := detail.Events[0].(*capture.CapturedRequest)
+	if !ok {
+		t.Fatalf("Events[0] is %T, want *capture.CapturedRequest", detail.Events[0])
+	}
+	if sibling.ID != "req-1" {
+		t.Errorf("Events[0].ID: got %q want req-1", sibling.ID)
+	}
+}
+
+func TestMemoryReader_ReadDetail_SiblingsOrderedByTimestampASC(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(10)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	req := makeRequest("req-1", base, "svc", "GET", "/", "corr-1", "x")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+	// Write two events out of order.
+	ev2 := &capture.ResponseEvent{
+		ID:            "evt-2",
+		Timestamp:     base.Add(3 * time.Second),
+		CorrelationID: "corr-1",
+		Service:       "svc",
+		ServiceSource: "app",
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+	ev1 := &capture.ResponseEvent{
+		ID:            "evt-1",
+		Timestamp:     base.Add(time.Second),
+		CorrelationID: "corr-1",
+		Service:       "svc",
+		ServiceSource: "app",
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+	if err := s.Write(ctx, ev2); err != nil {
+		t.Fatalf("Write ev2: %v", err)
+	}
+	if err := s.Write(ctx, ev1); err != nil {
+		t.Fatalf("Write ev1: %v", err)
+	}
+
+	detail, err := s.ReadDetail(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("ReadDetail: %v", err)
+	}
+	if len(detail.Events) != 2 {
+		t.Fatalf("Events: got %d want 2", len(detail.Events))
+	}
+	ids := []string{
+		detail.Events[0].(capture.Record).RecordID(),
+		detail.Events[1].(capture.Record).RecordID(),
+	}
+	if ids[0] != "evt-1" || ids[1] != "evt-2" {
+		t.Errorf("events order: got %v want [evt-1 evt-2]", ids)
 	}
 }
 

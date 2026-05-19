@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -468,5 +469,438 @@ func TestRequests_RowFieldsPresent(t *testing.T) {
 	}
 	if rec["status"] != nil {
 		t.Errorf("status: got %v want null", rec["status"])
+	}
+}
+
+// getRequestDetail sends an authenticated GET /requests/{id} and returns the response.
+func getRequestDetail(t *testing.T, ts *httptest.Server, id string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/requests/"+id, nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /requests/%s: %v", id, err)
+	}
+	return resp
+}
+
+type detailBody struct {
+	Root   map[string]any   `json:"root"`
+	Events []map[string]any `json:"events"`
+}
+
+func decodeDetailBody(t *testing.T, resp *http.Response) detailBody {
+	t.Helper()
+	defer resp.Body.Close()
+	var b detailBody
+	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
+		t.Fatalf("decode detail body: %v", err)
+	}
+	return b
+}
+
+func TestRequestDetail_NoAuth_Returns401(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/requests/some-id", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /requests/some-id: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status: got %d want 401", resp.StatusCode)
+	}
+}
+
+func TestRequestDetail_StdoutOnly_Returns404(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	resp := getRequestDetail(t, ts, "any-id")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status: got %d want 404", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type: got %q want application/json", ct)
+	}
+}
+
+func TestRequestDetail_UnknownID_Returns404(t *testing.T) {
+	t.Parallel()
+
+	mem := sinks.NewMemorySink(10)
+	ts := newInspectServer(t, admin.ReadSources{Memory: mem})
+	resp := getRequestDetail(t, ts, "missing-id")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status: got %d want 404", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["error"] == nil {
+		t.Errorf("expected error field in 404 body")
+	}
+}
+
+func TestRequestDetail_MemoryOnly_CapturedRequest_EmptyEvents(t *testing.T) {
+	t.Parallel()
+
+	mem := sinks.NewMemorySink(10)
+	ctx := context.Background()
+	ts2 := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	r := &capture.CapturedRequest{
+		ID:            "req-abc",
+		Timestamp:     ts2,
+		Service:       "svc",
+		Method:        "GET",
+		Path:          "/api",
+		CorrelationID: "corr-abc",
+		SourceIP:      "1.2.3.4",
+	}
+	if err := mem.Write(ctx, r); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{Memory: mem})
+	resp := getRequestDetail(t, ts, "req-abc")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type: got %q want application/json", ct)
+	}
+	body := decodeDetailBody(t, resp)
+	if body.Root == nil {
+		t.Fatal("root is nil")
+	}
+	if body.Root["id"] != "req-abc" {
+		t.Errorf("root.id: got %v want req-abc", body.Root["id"])
+	}
+	if body.Events == nil {
+		t.Error("events must not be nil (should be [])")
+	}
+	if len(body.Events) != 0 {
+		t.Errorf("events: got %d want 0", len(body.Events))
+	}
+}
+
+func TestRequestDetail_ContentTypeJSON(t *testing.T) {
+	t.Parallel()
+
+	mem := sinks.NewMemorySink(10)
+	ctx := context.Background()
+	r := &capture.CapturedRequest{
+		ID:            "req-ct",
+		Timestamp:     time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC),
+		Service:       "svc",
+		Method:        "GET",
+		Path:          "/",
+		CorrelationID: "corr-ct",
+		SourceIP:      "x",
+	}
+	if err := mem.Write(ctx, r); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{Memory: mem})
+	resp := getRequestDetail(t, ts, "req-ct")
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type: got %q want application/json", ct)
+	}
+}
+
+func TestRequestDetail_SQLiteOnly_CapturedRequest(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sqliteSink, err := sinks.NewSQLiteSink(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sqliteSink.Close() })
+
+	ctx := context.Background()
+	ts2 := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	r := &capture.CapturedRequest{
+		ID:                "sql-req-1",
+		Timestamp:         ts2,
+		Service:           "svc",
+		Method:            "POST",
+		Path:              "/api/orders",
+		CorrelationID:     "corr-sql-1",
+		SourceIP:          "10.0.0.1",
+		Headers:           map[string][]string{"Host": {"example.com"}},
+		Query:             map[string][]string{},
+		Cookies:           []capture.Cookie{},
+		Body:              []byte("{}"),
+		ServiceSource:     capture.ServiceSourceHeader,
+		CorrelationSource: capture.CorrelationSourceTraceparent,
+	}
+	if err := sqliteSink.Write(ctx, r); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{SQLite: sqliteSink})
+	resp := getRequestDetail(t, ts, "sql-req-1")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d want 200", resp.StatusCode)
+	}
+	body := decodeDetailBody(t, resp)
+	if body.Root == nil {
+		t.Fatal("root is nil")
+	}
+	if body.Root["id"] != "sql-req-1" {
+		t.Errorf("root.id: got %v want sql-req-1", body.Root["id"])
+	}
+	if len(body.Events) != 0 {
+		t.Errorf("events: got %d want 0", len(body.Events))
+	}
+}
+
+func TestRequestDetail_MemoryAndSQLite_Merge(t *testing.T) {
+	t.Parallel()
+
+	mem := sinks.NewMemorySink(10)
+	dir := t.TempDir()
+	sqliteSink, err := sinks.NewSQLiteSink(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sqliteSink.Close() })
+
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// Write a captured request to both sinks.
+	req := &capture.CapturedRequest{
+		ID:                "merge-req-1",
+		Timestamp:         base,
+		Service:           "svc",
+		Method:            "GET",
+		Path:              "/",
+		CorrelationID:     "corr-merge",
+		SourceIP:          "x",
+		Headers:           map[string][]string{"Host": {"h"}},
+		Query:             map[string][]string{},
+		Cookies:           []capture.Cookie{},
+		Body:              []byte{},
+		ServiceSource:     capture.ServiceSourceHeader,
+		CorrelationSource: capture.CorrelationSourceTraceparent,
+	}
+	if err := mem.Write(ctx, req); err != nil {
+		t.Fatalf("mem.Write req: %v", err)
+	}
+	if err := sqliteSink.Write(ctx, req); err != nil {
+		t.Fatalf("sqlite.Write req: %v", err)
+	}
+
+	// Write a response event to SQLite only (simulating an event SQLite persisted
+	// but which has not (yet) aged into memory for this test).
+	ev := &capture.ResponseEvent{
+		ID:            "merge-evt-1",
+		Timestamp:     base.Add(time.Second),
+		CorrelationID: "corr-merge",
+		Service:       "svc",
+		ServiceSource: "app",
+		Status:        200,
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+	if err := sqliteSink.Write(ctx, ev); err != nil {
+		t.Fatalf("sqlite.Write ev: %v", err)
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{Memory: mem, SQLite: sqliteSink})
+	resp := getRequestDetail(t, ts, "merge-req-1")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d want 200", resp.StatusCode)
+	}
+	body := decodeDetailBody(t, resp)
+	if body.Root == nil {
+		t.Fatal("root is nil")
+	}
+	if body.Root["id"] != "merge-req-1" {
+		t.Errorf("root.id: got %v want merge-req-1", body.Root["id"])
+	}
+	// The event from SQLite should appear in events list (merged from secondary).
+	if len(body.Events) != 1 {
+		t.Errorf("events: got %d want 1 (event merged from sqlite)", len(body.Events))
+	}
+}
+
+func TestRequestDetail_RootFields_CapturedRequest(t *testing.T) {
+	t.Parallel()
+
+	mem := sinks.NewMemorySink(10)
+	ctx := context.Background()
+	r := &capture.CapturedRequest{
+		ID:                "field-req",
+		Timestamp:         time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC),
+		Service:           "orders",
+		Method:            "POST",
+		Path:              "/api/orders",
+		CorrelationID:     "corr-fields",
+		SourceIP:          "10.0.0.2",
+		ServiceSource:     capture.ServiceSourceHeader,
+		CorrelationSource: capture.CorrelationSourceTraceparent,
+		Headers:           map[string][]string{"Content-Type": {"application/json"}},
+		Query:             map[string][]string{},
+		Cookies:           []capture.Cookie{},
+		Body:              []byte(`{"order_id":"123"}`),
+	}
+	if err := mem.Write(ctx, r); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{Memory: mem})
+	resp := getRequestDetail(t, ts, "field-req")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	body := decodeDetailBody(t, resp)
+	root := body.Root
+
+	// Verify canonical variant fields present on the root.
+	for _, f := range []string{"id", "service", "service_source", "correlation_id", "correlation_source", "method", "path", "headers", "body"} {
+		if _, ok := root[f]; !ok {
+			t.Errorf("root missing field %q", f)
+		}
+	}
+	if root["service"] != "orders" {
+		t.Errorf("root.service: got %v want orders", root["service"])
+	}
+	if root["correlation_source"] != capture.CorrelationSourceTraceparent {
+		t.Errorf("root.correlation_source: got %v want %s", root["correlation_source"], capture.CorrelationSourceTraceparent)
+	}
+}
+
+func TestRequestDetail_EventsAlwaysPresent(t *testing.T) {
+	t.Parallel()
+
+	mem := sinks.NewMemorySink(10)
+	ctx := context.Background()
+	r := &capture.CapturedRequest{
+		ID:            "always-events-req",
+		Timestamp:     time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC),
+		Service:       "svc",
+		Method:        "GET",
+		Path:          "/",
+		CorrelationID: "corr-ae",
+		SourceIP:      "x",
+	}
+	if err := mem.Write(ctx, r); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{Memory: mem})
+	resp := getRequestDetail(t, ts, "always-events-req")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+
+	// Decode raw JSON to check that "events" key is present (not omitted).
+	defer resp.Body.Close()
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	eventsRaw, ok := raw["events"]
+	if !ok {
+		t.Fatal("events key missing from response JSON")
+	}
+	eventsSlice, ok := eventsRaw.([]any)
+	if !ok {
+		t.Fatalf("events is %T, want []any", eventsRaw)
+	}
+	if len(eventsSlice) != 0 {
+		t.Errorf("events: got %d want 0", len(eventsSlice))
+	}
+}
+
+// TestRequestDetail_Integration_MemoryAndSQLite boots an admin server with both
+// memory and sqlite readers enabled, writes a captured request to both sinks,
+// and asserts that GET /requests/{id} returns the request with events: [].
+func TestRequestDetail_Integration_MemoryAndSQLite(t *testing.T) {
+	t.Parallel()
+
+	mem := sinks.NewMemorySink(100)
+	dir := t.TempDir()
+	sqliteSink, err := sinks.NewSQLiteSink(dir + "/integration.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sqliteSink.Close() })
+
+	ctx := context.Background()
+	ts2 := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	r := &capture.CapturedRequest{
+		ID:                "int-req-1",
+		Timestamp:         ts2,
+		Service:           "orders",
+		Method:            "POST",
+		Path:              "/api/orders",
+		CorrelationID:     "corr-int-1",
+		SourceIP:          "10.0.0.1",
+		Headers:           map[string][]string{"Host": {"example.com"}, "Authorization": {"Bearer secret"}},
+		Query:             map[string][]string{"page": {"1"}},
+		Cookies:           []capture.Cookie{{Name: "session", Value: "abc"}},
+		Body:              []byte(`{"item":"widget"}`),
+		ContentType:       "application/json",
+		ServiceSource:     capture.ServiceSourceHeader,
+		CorrelationSource: capture.CorrelationSourceTraceparent,
+	}
+	if err := mem.Write(ctx, r); err != nil {
+		t.Fatalf("mem.Write: %v", err)
+	}
+	if err := sqliteSink.Write(ctx, r); err != nil {
+		t.Fatalf("sqlite.Write: %v", err)
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{Memory: mem, SQLite: sqliteSink})
+	resp := getRequestDetail(t, ts, "int-req-1")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type: got %q want application/json", ct)
+	}
+
+	defer resp.Body.Close()
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Root is present.
+	root, ok := raw["root"].(map[string]any)
+	if !ok {
+		t.Fatalf("root is %T, want map", raw["root"])
+	}
+	if root["id"] != "int-req-1" {
+		t.Errorf("root.id: got %v want int-req-1", root["id"])
+	}
+	if root["service"] != "orders" {
+		t.Errorf("root.service: got %v want orders", root["service"])
+	}
+
+	// events key is present and empty (no correlated events yet).
+	eventsRaw, ok := raw["events"]
+	if !ok {
+		t.Fatal("events key missing from response")
+	}
+	eventsSlice, ok := eventsRaw.([]any)
+	if !ok {
+		t.Fatalf("events is %T, want []any", eventsRaw)
+	}
+	if len(eventsSlice) != 0 {
+		t.Errorf("events: got %d want 0 (no events API yet)", len(eventsSlice))
 	}
 }

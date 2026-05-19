@@ -75,9 +75,48 @@ func (s *MemorySink) ReadRoots(_ context.Context, _ inspect.InspectQuery, limit 
 	return rows, nextCursor, nil
 }
 
-// ReadDetail returns ErrNotImplemented until the detail handler slice ships.
-func (s *MemorySink) ReadDetail(_ context.Context, _ string) (inspect.DetailRecord, error) {
-	return nil, inspect.ErrNotImplemented
+// ReadDetail resolves the given id in the ring buffer. It first scans for the
+// id among all records; if found, it gathers every other record sharing the
+// same correlation_id as siblings. Returns ErrNotFound when the id is absent.
+func (s *MemorySink) ReadDetail(_ context.Context, id string) (inspect.DetailRecord, error) {
+	all := s.Recent(s.Len())
+
+	// Find the root record by id.
+	var root capture.Record
+	for _, r := range all {
+		if r.RecordID() == id {
+			root = r
+			break
+		}
+	}
+	if root == nil {
+		return inspect.DetailRecord{}, inspect.ErrNotFound
+	}
+
+	corrID := root.RecordCorrelationID()
+
+	// Gather siblings: every record sharing the correlation_id except the root
+	// itself, sorted by timestamp ascending.
+	var siblings []capture.Record
+	for _, r := range all {
+		if r.RecordID() != id && r.RecordCorrelationID() == corrID {
+			siblings = append(siblings, r)
+		}
+	}
+	sort.SliceStable(siblings, func(i, j int) bool {
+		ti := siblings[i].RecordTimestamp()
+		tj := siblings[j].RecordTimestamp()
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		return siblings[i].RecordID() < siblings[j].RecordID()
+	})
+
+	events := make([]any, len(siblings))
+	for i, r := range siblings {
+		events[i] = r
+	}
+	return inspect.DetailRecord{Root: root, Events: events}, nil
 }
 
 // ServicesSeen returns the distinct services present in the ring buffer that
