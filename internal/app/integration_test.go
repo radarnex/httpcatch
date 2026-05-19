@@ -2029,7 +2029,7 @@ func TestIntegration_UIShell(t *testing.T) {
 		t.Fatal("no session cookie after login")
 	}
 
-	// GET / with the session cookie → 200 + HTML body.
+	// GET / with the session cookie → 303 redirect to /ui/requests.
 	req, _ := http.NewRequest(http.MethodGet, adminURL+"/", nil)
 	req.Header.Set("Accept", "text/html")
 	req.AddCookie(sessionCookie)
@@ -2037,24 +2037,42 @@ func TestIntegration_UIShell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("GET / status: got %d want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("GET / status: got %d want 303", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
-		t.Errorf("GET / Content-Type: got %q", ct)
+	if loc := resp.Header.Get("Location"); loc != "/ui/requests" {
+		t.Errorf("GET / Location: got %q want /ui/requests", loc)
+	}
+
+	// GET /ui/requests with the session cookie → 200 + HTML body with shell layout.
+	req2, _ := http.NewRequest(http.MethodGet, adminURL+"/ui/requests", nil)
+	req2.Header.Set("Accept", "text/html")
+	req2.AddCookie(sessionCookie)
+	resp2, err := noFollow.Do(req2)
+	if err != nil {
+		t.Fatalf("GET /ui/requests: %v", err)
+	}
+	body, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("GET /ui/requests status: got %d want 200", resp2.StatusCode)
+	}
+	if ct := resp2.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("GET /ui/requests Content-Type: got %q", ct)
 	}
 	bodyStr := string(body)
 	if !strings.Contains(bodyStr, "httpcatch") {
-		t.Error("GET / body: missing wordmark httpcatch")
+		t.Error("GET /ui/requests body: missing wordmark httpcatch")
 	}
 	if !strings.Contains(bodyStr, "/static/app.css") {
-		t.Error("GET / body: missing /static/app.css reference")
+		t.Error("GET /ui/requests body: missing /static/app.css reference")
 	}
 	if !strings.Contains(bodyStr, "/static/app.js") {
-		t.Error("GET / body: missing /static/app.js reference")
+		t.Error("GET /ui/requests body: missing /static/app.js reference")
 	}
 
 	// Parse HTML and assert the required banner DOM ids are present.
@@ -2069,7 +2087,7 @@ func TestIntegration_UIShell(t *testing.T) {
 		"chip-service", "chip-correlation", "chip-version", "buildinfo",
 	} {
 		if !ids[id] {
-			t.Errorf("index.html: missing element with id=%q", id)
+			t.Errorf("layout: missing element with id=%q", id)
 		}
 	}
 

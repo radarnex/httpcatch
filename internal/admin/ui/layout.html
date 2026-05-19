@@ -1,0 +1,37 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>httpcatch</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a href="/ui/requests" class="wordmark">httpcatch</a>
+    <span id="chip-service" class="chip chip-warn" hidden>service? <span data-count></span></span>
+    <span id="chip-correlation" class="chip chip-warn" hidden>correlation? <span data-count></span></span>
+    <span id="chip-version" class="chip"></span>
+    <form action="/auth/logout" method="POST" class="logout-form">
+      <button type="submit" class="logout-btn">Logout</button>
+    </form>
+  </header>
+
+  <main>
+    <div id="banner-unredacted" class="banner banner-danger" role="alert" hidden>
+      Unredacted mode — no redaction rules are configured. Captured payloads are stored as-is.
+    </div>
+    <div id="banner-dropped" class="banner banner-warn" role="status" hidden>
+      <span data-count></span> records dropped — capture queue is overflowing.
+    </div>
+    <div id="banner-redaction-errors" class="banner banner-warn" role="status" hidden>
+      <span data-count></span> redaction errors — check logs for unparseable JSON bodies.
+    </div>
+    {{block "body" .}}{{end}}
+  </main>
+
+  <footer id="buildinfo" class="buildinfo"></footer>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>{{end}}

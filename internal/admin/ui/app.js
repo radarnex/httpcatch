@@ -76,6 +76,7 @@
   document.addEventListener("DOMContentLoaded", function () {
     refresh();
     startPolling();
+    initCurlCopy();
   });
 
   document.addEventListener("visibilitychange", function () {
@@ -86,4 +87,64 @@
       stopPolling();
     }
   });
+
+  function shellEscape(s) {
+    // Wrap in single quotes and escape any single quotes within the value.
+    return "'" + s.replace(/'/g, "'\\''") + "'";
+  }
+
+  function initCurlCopy() {
+    var btn = document.getElementById("curl-copy-btn");
+    if (!btn) return;
+    btn.removeAttribute("hidden");
+
+    btn.addEventListener("click", function () {
+      var method = btn.getAttribute("data-method") || "GET";
+      var path = btn.getAttribute("data-path") || "/";
+      var headersJSON = btn.getAttribute("data-headers") || "{}";
+      var bodyB64 = btn.getAttribute("data-body") || "";
+
+      var headers;
+      try {
+        headers = JSON.parse(headersJSON);
+      } catch (_) {
+        headers = {};
+      }
+
+      var parts = ["curl", "-X", shellEscape(method)];
+
+      // Headers
+      Object.keys(headers).forEach(function (name) {
+        var values = headers[name];
+        if (Array.isArray(values)) {
+          values.forEach(function (v) {
+            parts.push("-H", shellEscape(name + ": " + v));
+          });
+        }
+      });
+
+      // Body
+      var body = "";
+      if (bodyB64) {
+        try {
+          body = atob(bodyB64);
+        } catch (_) {
+          body = "";
+        }
+      }
+      if (body) {
+        parts.push("--data-raw", shellEscape(body));
+      }
+
+      parts.push(shellEscape(path));
+
+      var cmd = parts.join(" ");
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cmd).catch(function (err) {
+          console.error("httpcatch: clipboard write failed:", err);
+        });
+      }
+    });
+  }
 })();

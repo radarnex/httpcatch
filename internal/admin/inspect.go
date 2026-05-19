@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,118 @@ type rootsResponse struct {
 	NextCursor *string           `json:"next_cursor"`
 }
 
+// gatherRoots fetches and merges root rows from whichever readers are enabled,
+// applying the memory→sqlite fall-through and dedup logic. Returns the rows,
+// the next cursor (nil when no further pages), the read source label, and any
+// error. When both readers are nil the caller receives (nil, nil, readSourceNone, nil).
+func gatherRoots(ctx context.Context, q inspect.InspectQuery, memReader, sqlReader inspect.Reader) ([]inspect.RootRow, *inspect.Cursor, string, error) {
+	limit := q.Limit
+
+	if memReader == nil && sqlReader == nil {
+		return nil, nil, readSourceNone, nil
+	}
+
+	// Any non-temporal filter forces SQLite-only reads. Memory cannot apply
+	// joins (e.g. status via the events table) and filtered queries must not
+	// silently miss records that aged out of the ring buffer.
+	if hasNonTemporalFilter(q) || memReader == nil {
+		if sqlReader == nil {
+			return nil, nil, readSourceNone, nil
+		}
+		rows, next, err := sqlReader.ReadRoots(ctx, q, limit, q.Cursor)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		return rows, next, readSourceSQLite, nil
+	}
+
+	// Memory-eligible path: temporal-only or no filters.
+	memRows, memNext, err := memReader.ReadRoots(ctx, q, limit, q.Cursor)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if len(memRows) >= limit || sqlReader == nil {
+		return memRows, memNext, readSourceMemory, nil
+	}
+
+	// Memory yielded fewer rows than requested; fall through to SQLite for the
+	// full page. Deduplicate by id across both sets, re-sort, then trim to limit.
+	memIDs := make(map[string]struct{}, len(memRows))
+	for _, row := range memRows {
+		memIDs[row.ID] = struct{}{}
+	}
+	sqlRows, _, err := sqlReader.ReadRoots(ctx, q, limit, q.Cursor)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	deduped := make([]inspect.RootRow, 0, len(memRows)+len(sqlRows))
+	deduped = append(deduped, memRows...)
+	for _, row := range sqlRows {
+		if _, dup := memIDs[row.ID]; !dup {
+			deduped = append(deduped, row)
+		}
+	}
+	// Re-sort merged result timestamp DESC, id DESC.
+	sort.SliceStable(deduped, func(i, j int) bool {
+		ti := deduped[i].Timestamp
+		tj := deduped[j].Timestamp
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return deduped[i].ID > deduped[j].ID
+	})
+	// Trim to limit and compute next cursor.
+	var nextCur *inspect.Cursor
+	if len(deduped) > limit {
+		last := deduped[limit-1]
+		nextCur = &inspect.Cursor{Timestamp: last.Timestamp, ID: last.ID}
+		deduped = deduped[:limit]
+	}
+	var source string
+	if len(memRows) > 0 && len(sqlRows) > 0 {
+		source = readSourceMemorySQLite
+	} else if len(sqlRows) > 0 {
+		source = readSourceSQLite
+	} else {
+		source = readSourceMemory
+	}
+	return deduped, nextCur, source, nil
+}
+
+// gatherDetail resolves a record by id, merging siblings across readers.
+// Resolution order: memory first; SQLite on miss. Siblings from the other
+// reader are merged when the root is found. Returns ErrNotFound when neither
+// reader has the record.
+func gatherDetail(ctx context.Context, id string, memReader, sqlReader inspect.Reader) (inspect.DetailRecord, error) {
+	if memReader != nil {
+		detail, err := memReader.ReadDetail(ctx, id)
+		if err == nil {
+			if sqlReader != nil {
+				if sqlDetail, sqlErr := sqlReader.ReadDetail(ctx, id); sqlErr == nil {
+					detail = mergeDetailSiblings(detail, sqlDetail)
+				}
+			}
+			return detail, nil
+		}
+		if !errors.Is(err, inspect.ErrNotFound) {
+			return inspect.DetailRecord{}, err
+		}
+	}
+	if sqlReader == nil {
+		return inspect.DetailRecord{}, inspect.ErrNotFound
+	}
+	detail, err := sqlReader.ReadDetail(ctx, id)
+	if err != nil {
+		return inspect.DetailRecord{}, err
+	}
+	if memReader != nil {
+		if memDetail, memErr := memReader.ReadDetail(ctx, id); memErr == nil {
+			detail = mergeDetailSiblings(detail, memDetail)
+		}
+	}
+	return detail, nil
+}
+
 // requestsHandler returns an http.HandlerFunc for GET /requests.
 // memReader and sqlReader may both be nil (stdout-only configuration).
 func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
@@ -38,100 +151,14 @@ func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 			return
 		}
 
-		limit := q.Limit
-		cursor := q.Cursor
 		ctx := r.Context()
-
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 
-		if memReader == nil && sqlReader == nil {
-			w.Header().Set("X-Httpcatch-Read-Source", readSourceNone)
-			w.WriteHeader(http.StatusOK)
-			writeRootsResponse(w, nil, nil)
+		rows, nextCur, source, err := gatherRoots(ctx, q, memReader, sqlReader)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("read error: %v", err), http.StatusInternalServerError)
 			return
-		}
-
-		var (
-			rows    []inspect.RootRow
-			nextCur *inspect.Cursor
-			source  string
-		)
-
-		// Any non-temporal filter forces SQLite-only reads. Memory cannot apply
-		// joins (e.g. status via the events table) and filtered queries must not
-		// silently miss records that aged out of the ring buffer.
-		if hasNonTemporalFilter(q) || memReader == nil {
-			if sqlReader == nil {
-				// No SQLite available; return empty list (e.g. stdout-only with filters).
-				w.Header().Set("X-Httpcatch-Read-Source", readSourceNone)
-				w.WriteHeader(http.StatusOK)
-				writeRootsResponse(w, nil, nil)
-				return
-			}
-			sqlRows, sqlNext, err := sqlReader.ReadRoots(ctx, q, limit, cursor)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("sqlite read error: %v", err), http.StatusInternalServerError)
-				return
-			}
-			rows = sqlRows
-			nextCur = sqlNext
-			source = readSourceSQLite
-		} else {
-			// Memory-eligible path: temporal-only or no filters.
-			memRows, memNext, err := memReader.ReadRoots(ctx, q, limit, cursor)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("memory read error: %v", err), http.StatusInternalServerError)
-				return
-			}
-			if len(memRows) >= limit || sqlReader == nil {
-				rows = memRows
-				nextCur = memNext
-				source = readSourceMemory
-			} else {
-				// Memory yielded fewer rows than requested; fall through to SQLite
-				// for the full page. Deduplicate by id across both sets, re-sort,
-				// then trim to limit.
-				memIDs := make(map[string]struct{}, len(memRows))
-				for _, row := range memRows {
-					memIDs[row.ID] = struct{}{}
-				}
-				sqlRows, _, err := sqlReader.ReadRoots(ctx, q, limit, cursor)
-				if err != nil {
-					http.Error(w, fmt.Sprintf("sqlite read error: %v", err), http.StatusInternalServerError)
-					return
-				}
-				deduped := make([]inspect.RootRow, 0, len(memRows)+len(sqlRows))
-				deduped = append(deduped, memRows...)
-				for _, row := range sqlRows {
-					if _, dup := memIDs[row.ID]; !dup {
-						deduped = append(deduped, row)
-					}
-				}
-				// Re-sort merged result timestamp DESC, id DESC.
-				sort.SliceStable(deduped, func(i, j int) bool {
-					ti := deduped[i].Timestamp
-					tj := deduped[j].Timestamp
-					if !ti.Equal(tj) {
-						return ti.After(tj)
-					}
-					return deduped[i].ID > deduped[j].ID
-				})
-				// Trim to limit and compute next cursor.
-				if len(deduped) > limit {
-					last := deduped[limit-1]
-					nextCur = &inspect.Cursor{Timestamp: last.Timestamp, ID: last.ID}
-					deduped = deduped[:limit]
-				}
-				rows = deduped
-				if len(memRows) > 0 && len(sqlRows) > 0 {
-					source = readSourceMemorySQLite
-				} else if len(sqlRows) > 0 {
-					source = readSourceSQLite
-				} else {
-					source = readSourceMemory
-				}
-			}
 		}
 
 		w.Header().Set("X-Httpcatch-Read-Source", source)
@@ -175,10 +202,6 @@ func writeRootsResponse(w http.ResponseWriter, rows []inspect.RootRow, nextCur *
 // requestDetailHandler returns an http.HandlerFunc for GET /requests/{id}.
 // memReader and sqlReader may both be nil (stdout-only configuration), in which
 // case every call returns 404 — stdout-only mode has no read surface.
-//
-// Resolution order: memory is tried first. If memory finds the root, sibling
-// gathering also pulls from SQLite (when enabled) and deduplicates by id. If
-// memory does not find the root, SQLite is consulted.
 func requestDetailHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
@@ -192,48 +215,14 @@ func requestDetailHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc 
 			return
 		}
 
-		// Try memory first.
-		if memReader != nil {
-			detail, err := memReader.ReadDetail(ctx, id)
-			if err == nil {
-				if sqlReader != nil {
-					sqlDetail, sqlErr := sqlReader.ReadDetail(ctx, id)
-					if sqlErr == nil {
-						detail = mergeDetailSiblings(detail, sqlDetail)
-					}
-					// If SQLite returns not-found or another error, the memory
-					// result is used as-is; SQLite may simply not have the record.
-				}
-				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(detail)
-				return
-			}
-			if !errors.Is(err, inspect.ErrNotFound) {
-				http.Error(w, fmt.Sprintf("memory read error: %v", err), http.StatusInternalServerError)
-				return
-			}
-		}
-
-		// Memory did not find the root (or memory is disabled). Fall through to SQLite.
-		if sqlReader == nil {
-			writeDetailNotFound(w, id)
-			return
-		}
-		detail, err := sqlReader.ReadDetail(ctx, id)
+		detail, err := gatherDetail(ctx, id, memReader, sqlReader)
 		if errors.Is(err, inspect.ErrNotFound) {
 			writeDetailNotFound(w, id)
 			return
 		}
 		if err != nil {
-			http.Error(w, fmt.Sprintf("sqlite read error: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("read error: %v", err), http.StatusInternalServerError)
 			return
-		}
-		// SQLite found the root. Merge any siblings that memory holds.
-		if memReader != nil {
-			memDetail, memErr := memReader.ReadDetail(ctx, id)
-			if memErr == nil {
-				detail = mergeDetailSiblings(detail, memDetail)
-			}
 		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(detail)

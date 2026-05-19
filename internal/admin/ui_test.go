@@ -45,7 +45,7 @@ func sessionCookieFor(t *testing.T, baseURL, token string, client *http.Client) 
 	return nil
 }
 
-func TestIndex_WithSession_Returns200HTML(t *testing.T) {
+func TestIndex_WithSession_Redirects303ToUIRequests(t *testing.T) {
 	t.Parallel()
 
 	base, client := newUIServer(t, testAdminToken)
@@ -60,23 +60,11 @@ func TestIndex_WithSession_Returns200HTML(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status: got %d want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("status: got %d want 303", resp.StatusCode)
 	}
-	ct := resp.Header.Get("Content-Type")
-	if ct != "text/html; charset=utf-8" {
-		t.Errorf("Content-Type: got %q", ct)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	s := string(body)
-	if !strings.Contains(s, "<title>httpcatch</title>") {
-		t.Error("body: missing <title>httpcatch</title>")
-	}
-	if !strings.Contains(s, "/static/app.css") {
-		t.Error("body: missing /static/app.css reference")
-	}
-	if !strings.Contains(s, "/static/app.js") {
-		t.Error("body: missing /static/app.js reference")
+	if loc := resp.Header.Get("Location"); loc != "/ui/requests" {
+		t.Errorf("Location: got %q want /ui/requests", loc)
 	}
 }
 
@@ -269,12 +257,12 @@ func TestIndexHTML_StructuralIDs(t *testing.T) {
 	base, client := newUIServer(t, testAdminToken)
 	cookie := sessionCookieFor(t, base, testAdminToken, client)
 
-	req, _ := http.NewRequest(http.MethodGet, base+"/", nil)
+	req, _ := http.NewRequest(http.MethodGet, base+"/ui/requests", nil)
 	req.Header.Set("Accept", "text/html")
 	req.AddCookie(cookie)
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("GET /: %v", err)
+		t.Fatalf("GET /ui/requests: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -297,7 +285,7 @@ func TestIndexHTML_StructuralIDs(t *testing.T) {
 	}
 	for _, id := range required {
 		if !ids[id] {
-			t.Errorf("index.html: missing element with id=%q", id)
+			t.Errorf("layout: missing element with id=%q", id)
 		}
 	}
 

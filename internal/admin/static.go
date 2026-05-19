@@ -88,18 +88,3 @@ func staticHandler(etags map[string]string) http.HandlerFunc {
 	}
 }
 
-// indexHandler serves the embedded index.html shell page. The page is gated by
-// auth middleware before this handler is reached.
-func indexHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		data, err := fs.ReadFile(uiFS, "ui/index.html")
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
-	}
-}

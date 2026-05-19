@@ -1,0 +1,92 @@
+{{define "body"}}
+{{if .Error}}<div class="inline-error" role="alert">{{.Error}}</div>{{end}}
+
+<section class="filter-section">
+  <form method="GET" action="/ui/requests" class="filter-form">
+    <div class="filter-row">
+      <label for="f-service">Service</label>
+      <select id="f-service" name="service">
+        <option value="">All</option>
+        {{range .Services}}
+        <option value="{{.}}"{{if eq . $.Query.Service}} selected{{end}}>{{.}}</option>
+        {{end}}
+      </select>
+
+      <label for="f-method">Method</label>
+      <select id="f-method" name="method">
+        <option value="">All</option>
+        {{range .Methods}}
+        <option value="{{.}}"{{if eq . $.Query.Method}} selected{{end}}>{{.}}</option>
+        {{end}}
+      </select>
+
+      <label for="f-status">Status</label>
+      <input id="f-status" name="status" type="text" value="{{.Query.StatusRaw}}" placeholder="200 or 2xx">
+
+      <label for="f-path">Path</label>
+      <input id="f-path" name="path" type="text" value="{{.Query.Path}}" placeholder="/api/…">
+    </div>
+    <div class="filter-row">
+      <label for="f-since">Since</label>
+      <input id="f-since" name="since" type="text" value="{{.Query.SinceRaw}}" placeholder="2006-01-02T15:04:05Z">
+
+      <label for="f-until">Until</label>
+      <input id="f-until" name="until" type="text" value="{{.Query.UntilRaw}}" placeholder="2006-01-02T15:04:05Z">
+
+      <button type="submit" class="btn-filter">Filter</button>
+      <a href="/ui/requests" class="btn-reset">Reset</a>
+    </div>
+  </form>
+</section>
+
+<section class="requests-table-section">
+  <table class="requests-table">
+    <thead>
+      <tr>
+        <th>Timestamp</th>
+        <th>Kind</th>
+        <th>Service</th>
+        <th>Method</th>
+        <th>Path</th>
+        <th>Events</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr class="{{if ne .Kind "request"}}row-orphan{{end}}">
+        <td><a href="/ui/requests/{{.ID}}" class="row-link">{{.Timestamp.Format "2006-01-02 15:04:05"}}</a></td>
+        <td>
+          {{if eq .Kind "request"}}
+          <span class="badge badge-neutral">request</span>
+          {{else if eq .Kind "orphan_response"}}
+          <span class="badge badge-orphan" role="status">orphan_response</span>
+          {{else if eq .Kind "orphan_outbound"}}
+          <span class="badge badge-orphan" role="status">orphan_outbound</span>
+          {{else}}
+          <span class="badge badge-neutral">{{.Kind}}</span>
+          {{end}}
+        </td>
+        <td><a href="/ui/requests/{{.ID}}" class="row-link">{{.Service}}</a></td>
+        <td><a href="/ui/requests/{{.ID}}" class="row-link">{{.Method}}</a></td>
+        <td><a href="/ui/requests/{{.ID}}" class="row-link">{{.Path}}</a></td>
+        <td><a href="/ui/requests/{{.ID}}" class="row-link">{{if .EventCountText}}{{.EventCountText}}{{else}}&mdash;{{end}}</a></td>
+        <td><a href="/ui/requests/{{.ID}}" class="row-link">{{.StatusText}}</a></td>
+      </tr>
+      {{else}}
+      <tr><td colspan="7" class="empty-state">No records found.</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+
+<nav class="pagination" aria-label="Pagination">
+  <span class="page-link page-link-disabled" aria-disabled="true">Previous</span>
+
+  {{if .NextURL}}
+  <a href="{{.NextURL}}" class="page-link">Next</a>
+  {{else}}
+  <span class="page-link page-link-disabled" aria-disabled="true">Next</span>
+  {{end}}
+</nav>
+{{end}}
