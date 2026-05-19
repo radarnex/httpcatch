@@ -9,28 +9,42 @@
 <body>
   <header class="topbar">
     <a href="/ui/requests" class="wordmark">httpcatch</a>
-    <span id="chip-service" class="chip chip-warn" hidden>service? <span data-count></span></span>
-    <span id="chip-correlation" class="chip chip-warn" hidden>correlation? <span data-count></span></span>
-    <span id="chip-version" class="chip"></span>
+    <span id="chip-unredacted" class="chip chip-danger" hidden title="Unredacted mode — no redaction rules are configured. Captured payloads are stored as-is.">
+      <span class="chip-icon" aria-hidden="true">🛡</span><span class="chip-text">unredacted</span>
+    </span>
+    <span id="chip-dropped" class="chip chip-warn" hidden title="Records dropped — capture queue is overflowing.">
+      <span class="chip-icon" aria-hidden="true">⚠</span><span class="chip-text">dropped</span> <span data-count></span>
+    </span>
+    <span id="chip-redaction-errors" class="chip chip-warn" hidden title="Redaction errors — check logs for unparseable JSON bodies.">
+      <span class="chip-icon" aria-hidden="true">⚠</span><span class="chip-text">redact err</span> <span data-count></span>
+    </span>
+    <span id="chip-service" class="chip chip-warn" hidden title="Captured requests where the service fallback chain bottomed out to 'unknown'.">
+      <span class="chip-icon" aria-hidden="true">?</span><span class="chip-text">service</span> <span data-count></span>
+    </span>
+    <span id="chip-correlation" class="chip chip-warn" hidden title="Captured requests with a synthesized correlation id (no traceparent or X-Request-ID).">
+      <span class="chip-icon" aria-hidden="true">?</span><span class="chip-text">correlation</span> <span data-count></span>
+    </span>
     <form action="/auth/logout" method="POST" class="logout-form">
       <button type="submit" class="logout-btn">Logout</button>
     </form>
   </header>
 
   <main>
-    <div id="banner-unredacted" class="banner banner-danger" role="alert" hidden>
-      Unredacted mode — no redaction rules are configured. Captured payloads are stored as-is.
-    </div>
-    <div id="banner-dropped" class="banner banner-warn" role="status" hidden>
-      <span data-count></span> records dropped — capture queue is overflowing.
-    </div>
-    <div id="banner-redaction-errors" class="banner banner-warn" role="status" hidden>
-      <span data-count></span> redaction errors — check logs for unparseable JSON bodies.
-    </div>
     {{block "body" .}}{{end}}
   </main>
 
   <footer id="buildinfo" class="buildinfo"></footer>
+
+  <aside id="detail-panel" class="detail-panel" hidden aria-label="Request detail">
+    <div class="detail-panel-header">
+      <button type="button" class="detail-panel-close" id="detail-panel-close" aria-label="Close">✕</button>
+      <a href="#" class="detail-panel-expand" id="detail-panel-expand" title="Open full page">⤢</a>
+    </div>
+    <div class="detail-panel-body" id="detail-panel-body">
+      <div class="detail-panel-loading">Loading…</div>
+    </div>
+  </aside>
+  <div id="detail-panel-scrim" class="detail-panel-scrim" hidden></div>
 
   <script src="/static/app.js" defer></script>
 </body>

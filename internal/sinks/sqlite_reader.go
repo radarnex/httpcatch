@@ -110,6 +110,10 @@ func (s *SQLiteSink) ReadRoots(ctx context.Context, q inspect.InspectQuery, limi
 		reqWhere = append(reqWhere, "cr.source_ip = ?")
 		reqArgs = append(reqArgs, q.SourceIP)
 	}
+	if q.Body != "" {
+		reqWhere = append(reqWhere, "cr.body LIKE ?")
+		reqArgs = append(reqArgs, "%"+q.Body+"%")
+	}
 
 	var reqHaving []string
 	var reqHavingArgs []any
@@ -148,10 +152,9 @@ func (s *SQLiteSink) ReadRoots(ctx context.Context, q inspect.InspectQuery, limi
 
 	// --- Orphan-events arm of the UNION ---
 	//
-	// method, path, source_ip, and has_events filters exclude orphan rows
-	// by definition — those fields belong to captured requests only.
-	// When any of those filters is set, we skip the orphan arm entirely.
-	includeOrphans := q.Method == "" && q.Path == "" && q.SourceIP == "" && q.HasEvents == nil
+	// Request-only filters exclude orphan rows by definition: those fields
+	// belong to captured requests only. When any is set, skip the orphan arm.
+	includeOrphans := !q.HasRequestOnlyFilter()
 
 	var orphanQuery string
 	var orphanArgs []any

@@ -2,11 +2,9 @@ package admin_test
 
 // Live-tail structural and smoke tests.
 //
-// Because there is no JS runtime in the Go test suite, these tests exercise:
-//   1. The structural HTML invariants the JS depends on (toggle hidden by
-//      default, data-timestamp on rows, live-tail-status div present).
-//   2. The JSON polling endpoint behaviour when called with a `since` parameter
-//      (verifying the no-JS path still works and the backend honours `since`).
+// 1. Structural HTML invariants the JS depends on (toggle/checkbox/status
+//    elements present and hidden, data-timestamp on rows).
+// 2. /requests JSON endpoint honours the since parameter.
 
 import (
 	"context"
@@ -41,7 +39,7 @@ func TestLiveTail_ToggleRenderedHiddenByDefault(t *testing.T) {
 	}
 	lbl := labels[0]
 	if !hasAttr(lbl, "hidden", "") {
-		t.Error("live-tail-toggle must have hidden attribute (JS removes it on init)")
+		t.Error("live-tail-toggle must have hidden attribute")
 	}
 }
 

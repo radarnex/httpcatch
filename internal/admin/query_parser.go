@@ -38,6 +38,7 @@ var knownQueryKeys = map[string]struct{}{
 	"correlation_id": {},
 	"source_ip":      {},
 	"has_events":     {},
+	"body":           {},
 }
 
 // parseFieldError is a parse-time validation failure for a single query parameter.
@@ -149,6 +150,10 @@ func parseInspectQuery(values url.Values) (inspect.InspectQuery, []parseFieldErr
 		q.SourceIP = s
 	}
 
+	if s := values.Get("body"); s != "" {
+		q.Body = s
+	}
+
 	// has_events
 	if s := values.Get("has_events"); s != "" {
 		switch s {
@@ -190,10 +195,7 @@ func parseStatusFilter(s string) (*inspect.StatusFilter, error) {
 // SQLite-only read (i.e. any filter that cannot be applied by MemoryReader).
 func hasNonTemporalFilter(q inspect.InspectQuery) bool {
 	return q.Service != "" ||
-		q.Method != "" ||
-		q.Status != nil ||
-		q.Path != "" ||
 		q.CorrelationID != "" ||
-		q.SourceIP != "" ||
-		q.HasEvents != nil
+		q.Status != nil ||
+		q.HasRequestOnlyFilter()
 }

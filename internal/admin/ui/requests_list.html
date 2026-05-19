@@ -2,47 +2,92 @@
 {{if .Error}}<div class="inline-error" role="alert">{{.Error}}</div>{{end}}
 
 <section class="filter-section">
-  <form method="GET" action="/ui/requests" class="filter-form">
-    <div class="filter-row">
-      <label for="f-service">Service</label>
-      <select id="f-service" name="service">
-        <option value="">All</option>
-        {{range .Services}}
-        <option value="{{.}}"{{if eq . $.Query.Service}} selected{{end}}>{{.}}</option>
-        {{end}}
-      </select>
+  <form method="GET" action="/ui/requests" class="filter-form" id="filter-form">
+    <div class="filter-row search-row">
+      <div class="search-box">
+        <span class="search-icon" aria-hidden="true">🔍</span>
+        <input type="text" id="search-input" class="search-input"
+               placeholder="service:foo  method:GET  status:5xx  path:/api  body:error  …"
+               value=""
+               autocomplete="off" spellcheck="false">
+        <button type="button" class="search-clear" id="search-clear" hidden aria-label="Clear search">✕</button>
+      </div>
 
-      <label for="f-method">Method</label>
-      <select id="f-method" name="method">
-        <option value="">All</option>
-        {{range .Methods}}
-        <option value="{{.}}"{{if eq . $.Query.Method}} selected{{end}}>{{.}}</option>
-        {{end}}
-      </select>
+      <div class="picker-host">
+        <div class="picker-trigger" id="picker-trigger" role="combobox" aria-expanded="false" aria-haspopup="dialog">
+          <span class="picker-trigger-icon" aria-hidden="true">⏱</span>
+          <input type="text" class="picker-trigger-input" id="picker-input"
+                 placeholder="Past 15 minutes"
+                 aria-label="Time range — type a shorthand like 3d or 15m"
+                 autocomplete="off"
+                 spellcheck="false">
+          <button type="button" class="picker-trigger-caret" id="picker-caret" aria-label="Open presets">▾</button>
+        </div>
 
-      <label for="f-status">Status</label>
-      <input id="f-status" name="status" type="text" value="{{.Query.StatusRaw}}" placeholder="200 or 2xx">
-
-      <label for="f-path">Path</label>
-      <input id="f-path" name="path" type="text" value="{{.Query.Path}}" placeholder="/api/…">
-    </div>
-    <div class="filter-row">
-      <label for="f-since">Since</label>
-      <input id="f-since" name="since" type="text" value="{{.Query.SinceRaw}}" placeholder="2006-01-02T15:04:05Z">
-
-      <label for="f-until">Until</label>
-      <input id="f-until" name="until" type="text" value="{{.Query.UntilRaw}}" placeholder="2006-01-02T15:04:05Z">
+        <div class="picker-popover" id="picker-popover" hidden role="dialog" aria-label="Time range presets">
+          <div class="picker-view picker-view-presets" id="picker-view-presets">
+            <ul class="picker-presets" role="listbox">
+              <li><button type="button" data-preset="live" class="preset-live"><span class="key-pill key-live">⚡ LIVE</span><span class="preset-name">Live tail</span></button></li>
+              <li><button type="button" data-preset="15m"><span class="key-pill">15m</span><span class="preset-name">Past 15 Minutes</span></button></li>
+              <li><button type="button" data-preset="1h"><span class="key-pill">1h</span><span class="preset-name">Past 1 Hour</span></button></li>
+              <li><button type="button" data-preset="4h"><span class="key-pill">4h</span><span class="preset-name">Past 4 Hours</span></button></li>
+              <li><button type="button" data-preset="1d"><span class="key-pill">1d</span><span class="preset-name">Past 1 Day</span></button></li>
+              <li><button type="button" data-preset="2d"><span class="key-pill">2d</span><span class="preset-name">Past 2 Days</span></button></li>
+              <li><button type="button" data-preset="3d"><span class="key-pill">3d</span><span class="preset-name">Past 3 Days</span></button></li>
+              <li><button type="button" data-preset="1w"><span class="key-pill">1w</span><span class="preset-name">Past 7 Days</span></button></li>
+              <li><button type="button" data-preset="15d"><span class="key-pill">15d</span><span class="preset-name">Past 15 Days</span></button></li>
+              <li><button type="button" data-preset="1mo"><span class="key-pill">1mo</span><span class="preset-name">Past 1 Month</span></button></li>
+            </ul>
+            <button type="button" class="picker-cal-link" id="picker-cal-link">
+              <span class="picker-cal-icon" aria-hidden="true">📅</span>
+              <span>Select from calendar…</span>
+            </button>
+          </div>
+          <div class="picker-view picker-view-calendar" id="picker-view-calendar" hidden>
+            <button type="button" class="picker-back" id="picker-back" aria-label="Back to presets">←</button>
+            <div class="picker-cal-fields">
+              <label class="cal-field">From <input type="datetime-local" id="picker-from"></label>
+              <label class="cal-field">To <input type="datetime-local" id="picker-to"></label>
+            </div>
+            <div class="cal-actions">
+              <button type="button" class="cal-apply" id="picker-apply">Apply</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <button type="submit" class="btn-filter">Filter</button>
       <a href="/ui/requests" class="btn-reset">Reset</a>
-
-      <label id="live-tail-toggle" class="live-tail-label" hidden>
-        <input type="checkbox" id="live-tail-checkbox" class="live-tail-checkbox">
-        Live tail
-      </label>
     </div>
+
+    {{/* Structured filter values are submitted via these hidden inputs.
+         The search box parses key:value tokens and writes them here on submit. */}}
+    <input type="hidden" name="service" id="f-service" value="{{.Query.Service}}">
+    <input type="hidden" name="method" id="f-method" value="{{.Query.Method}}">
+    <input type="hidden" name="status" id="f-status" value="{{.Query.StatusRaw}}">
+    <input type="hidden" name="path" id="f-path" value="{{.Query.Path}}">
+    <input type="hidden" name="body" id="f-body" value="{{.Query.Body}}">
+    <input type="hidden" name="correlation_id" id="f-correlation-id" value="">
+    <input type="hidden" name="source_ip" id="f-source-ip" value="">
+    <input type="hidden" name="since" id="f-since" value="{{.Query.SinceRaw}}">
+    <input type="hidden" name="until" id="f-until" value="{{.Query.UntilRaw}}">
+
+    {{/* The live-tail JS hooks these elements; the picker's LIVE preset is the
+         only entry point that toggles the checkbox. They never render visually. */}}
+    <label id="live-tail-toggle" class="live-tail-label" hidden>
+      <input type="checkbox" id="live-tail-checkbox" class="live-tail-checkbox">
+      Live tail
+    </label>
   </form>
   <div id="live-tail-status" class="live-tail-status" hidden></div>
+</section>
+
+<section class="histogram-section" id="histogram-section">
+  <div class="histogram-meta">
+    <span class="histogram-count" id="histogram-count">0 requests</span>
+    <span class="histogram-range" id="histogram-range"></span>
+  </div>
+  <canvas class="histogram-canvas" id="histogram-canvas" height="76" aria-label="Requests over time"></canvas>
 </section>
 
 <section class="requests-table-section">
@@ -60,7 +105,7 @@
     </thead>
     <tbody id="requests-tbody">
       {{range .Rows}}
-      <tr class="{{if ne .Kind "request"}}row-orphan{{end}}" data-timestamp="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}">
+      <tr class="{{if ne .Kind "request"}}row-orphan{{end}}" data-timestamp="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}" data-id="{{.ID}}">
         <td><a href="/ui/requests/{{.ID}}" class="row-link">{{.Timestamp.Format "2006-01-02 15:04:05"}}</a></td>
         <td>
           {{if eq .Kind "request"}}

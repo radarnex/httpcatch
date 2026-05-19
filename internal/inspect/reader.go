@@ -71,6 +71,22 @@ type InspectQuery struct {
 	CorrelationID string
 	SourceIP      string
 	HasEvents     *bool
+	// Body is a substring match against the captured request body. Empty means
+	// no filter. Body is unindexed in both backends, so this is a full scan;
+	// expect it to be slow on large stores.
+	Body string
+}
+
+// HasRequestOnlyFilter reports whether the query carries any filter whose
+// semantics only apply to CapturedRequest rows (method, path, source_ip,
+// has_events, body). Readers use this to decide whether to include orphan
+// event rows in the UNION arm of the result.
+func (q InspectQuery) HasRequestOnlyFilter() bool {
+	return q.Method != "" ||
+		q.Path != "" ||
+		q.SourceIP != "" ||
+		q.HasEvents != nil ||
+		q.Body != ""
 }
 
 // Reader is the read-side seam implemented by MemorySink and SQLiteSink.

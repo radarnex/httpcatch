@@ -1,7 +1,10 @@
 {{define "body"}}
 {{if .NotFound}}
+<a href="/ui/requests" class="back-link">← Back to requests</a>
 <div class="inline-error" role="alert">Record not found: {{.ID}}</div>
 {{else}}
+
+<a href="/ui/requests" class="back-link">← Back to requests</a>
 
 <section class="detail-section">
   <div class="detail-header">

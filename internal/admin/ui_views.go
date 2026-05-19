@@ -53,6 +53,7 @@ type listQueryView struct {
 	Service   string
 	Method    string
 	Path      string
+	Body      string
 	StatusRaw string
 	SinceRaw  string
 	UntilRaw  string
@@ -119,6 +120,7 @@ func requestListHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 			Service:   vals.Get("service"),
 			Method:    vals.Get("method"),
 			Path:      vals.Get("path"),
+			Body:      vals.Get("body"),
 			StatusRaw: vals.Get("status"),
 			SinceRaw:  vals.Get("since"),
 			UntilRaw:  vals.Get("until"),

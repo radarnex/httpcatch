@@ -1,6 +1,7 @@
 package sinks
 
 import (
+	"bytes"
 	"context"
 	"sort"
 	"time"
@@ -33,10 +34,12 @@ func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit 
 		}
 	}
 
-	// Determine whether orphan rows should be included. method, path,
-	// source_ip, and has_events are request-only filters; their presence
-	// excludes orphans by definition.
-	includeOrphans := q.Method == "" && q.Path == "" && q.SourceIP == "" && q.HasEvents == nil
+	includeOrphans := !q.HasRequestOnlyFilter()
+
+	var bodyNeedle []byte
+	if q.Body != "" {
+		bodyNeedle = []byte(q.Body)
+	}
 
 	// Emit a RootRow for each eligible record, applying field-level filters
 	// that do not depend on sort order. Service, correlation_id, and temporal
@@ -58,6 +61,9 @@ func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit 
 				continue
 			}
 			if q.CorrelationID != "" && v.CorrelationID != q.CorrelationID {
+				continue
+			}
+			if bodyNeedle != nil && !bytes.Contains(v.Body, bodyNeedle) {
 				continue
 			}
 			ec := 0 // event_count is unknown in memory; filled by SQLite join

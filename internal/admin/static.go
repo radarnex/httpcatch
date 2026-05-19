@@ -9,9 +9,10 @@ import (
 	"strings"
 )
 
-// allowedExtensions lists the file extensions served from /static/*. Entry
-// pages (index.html, login.html) are excluded because they are served via
-// their own authenticated or templated handlers.
+// allowedExtensions lists the file extensions served from /static/*. HTML
+// templates (login.html, layout.html, requests_*.html, events_*.html) are
+// excluded because they are served via their own authenticated or templated
+// handlers.
 var allowedExtensions = map[string]string{
 	".css":   "text/css; charset=utf-8",
 	".js":    "application/javascript; charset=utf-8",

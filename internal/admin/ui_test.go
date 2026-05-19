@@ -239,10 +239,9 @@ func findIDs(n *html.Node, ids map[string]bool) {
 	}
 }
 
-func TestIndexHTML_StructuralIDs(t *testing.T) {
+func TestLayout_StructuralIDs(t *testing.T) {
 	t.Parallel()
 
-	// Build a minimal server and retrieve index.html with a valid session.
 	cfg := config.AdminConfig{
 		Bind:          "127.0.0.1:0",
 		Token:         testAdminToken,
@@ -275,12 +274,11 @@ func TestIndexHTML_StructuralIDs(t *testing.T) {
 	findIDs(doc, ids)
 
 	required := []string{
-		"banner-unredacted",
-		"banner-dropped",
-		"banner-redaction-errors",
+		"chip-unredacted",
+		"chip-dropped",
+		"chip-redaction-errors",
 		"chip-service",
 		"chip-correlation",
-		"chip-version",
 		"buildinfo",
 	}
 	for _, id := range required {

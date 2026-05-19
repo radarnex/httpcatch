@@ -226,27 +226,6 @@ func TestUIRequests_FilterFormPresent(t *testing.T) {
 	}
 }
 
-func TestUIRequests_MethodDropdownContainsVerbs(t *testing.T) {
-	t.Parallel()
-
-	ts := newUIViewServer(t, admin.ReadSources{})
-	resp := getUIPage(t, ts, "/ui/requests")
-	defer resp.Body.Close()
-
-	doc := parseHTML(t, resp.Body)
-	options := findElements(doc, "option", "", "")
-	var methods []string
-	for _, opt := range options {
-		v := attrVal(opt, "value")
-		if v == "GET" || v == "POST" || v == "DELETE" {
-			methods = append(methods, v)
-		}
-	}
-	if len(methods) < 3 {
-		t.Error("method dropdown: expected at least GET, POST, DELETE options")
-	}
-}
-
 func TestUIRequests_FilterRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -264,17 +243,11 @@ func TestUIRequests_FilterRoundTrip(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
 
-	// The method dropdown must show POST as selected.
-	if !strings.Contains(s, `value="POST" selected`) && !strings.Contains(s, `value="POST"  selected`) {
-		t.Error("method POST not shown as selected in rendered HTML")
-	}
-	// The status text input value must round-trip.
-	if !strings.Contains(s, `value="200"`) {
-		t.Error("status value 200 not found in rendered HTML")
-	}
-	// The path text input value must round-trip.
-	if !strings.Contains(s, `value="/api"`) {
-		t.Error("path value /api not found in rendered HTML")
+	// Each filter value must round-trip into its hidden mirror input.
+	for _, want := range []string{`value="POST"`, `value="200"`, `value="/api"`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("filter value not found in rendered HTML: %s", want)
+		}
 	}
 }
 
@@ -493,7 +466,7 @@ func TestUIRequests_RowLinksToDetail(t *testing.T) {
 	}
 }
 
-func TestUIRequests_BannerElementsPresent(t *testing.T) {
+func TestUIRequests_WarningChipsPresent(t *testing.T) {
 	t.Parallel()
 
 	ts := newUIViewServer(t, admin.ReadSources{})
@@ -504,7 +477,7 @@ func TestUIRequests_BannerElementsPresent(t *testing.T) {
 	ids := make(map[string]bool)
 	findIDs(doc, ids)
 
-	for _, id := range []string{"banner-unredacted", "banner-dropped", "banner-redaction-errors", "chip-service", "chip-correlation", "buildinfo"} {
+	for _, id := range []string{"chip-unredacted", "chip-dropped", "chip-redaction-errors", "chip-service", "chip-correlation", "buildinfo"} {
 		if !ids[id] {
 			t.Errorf("layout element missing: id=%q", id)
 		}
