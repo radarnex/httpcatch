@@ -38,12 +38,36 @@ type DetailRecord struct {
 	Events []any `json:"events"`
 }
 
-// InspectQuery carries the parameters parsed from GET /requests. Additional
-// filter fields extend this type without changing the Reader interface
-// signature.
+// StatusFilter holds a parsed status filter — either an exact status code or a
+// class (1xx, 2xx, 3xx, 4xx, 5xx). Exactly one of Exact and Class is set.
+type StatusFilter struct {
+	// Exact is non-zero when the filter is an integer status code (e.g. 200).
+	Exact int
+	// Class is non-empty when the filter is a class string (e.g. "2xx"). When
+	// set, the matching range is [Class*100, Class*100+99].
+	Class string
+}
+
+// InspectQuery carries the parameters parsed from GET /requests. All filter
+// fields compose with AND semantics. Any non-temporal filter (Service, Method,
+// Status, Path, CorrelationID, SourceIP, HasEvents) forces SQLite-only reads.
 type InspectQuery struct {
+	// Pagination.
 	Limit  int
 	Cursor *Cursor
+
+	// Temporal filters — compatible with memory reads.
+	Since *time.Time
+	Until *time.Time
+
+	// Non-temporal filters — force SQLite-only reads.
+	Service       string
+	Method        string
+	Status        *StatusFilter
+	Path          string
+	CorrelationID string
+	SourceIP      string
+	HasEvents     *bool
 }
 
 // Reader is the read-side seam implemented by MemorySink and SQLiteSink.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/radarnex/httpcatch/internal/capture"
@@ -31,35 +32,96 @@ FROM captured_requests cr
 LEFT JOIN events e ON e.correlation_id = cr.correlation_id
 `
 
-const sqliteReadRootsGroupOrder = `
-GROUP BY cr.id
-ORDER BY cr.timestamp DESC, cr.id DESC
-LIMIT ?
-`
-
-const sqliteReadRootsCursorWhere = `
-WHERE (cr.timestamp < ? OR (cr.timestamp = ? AND cr.id < ?))
-`
-
 // ReadRoots returns captured-request rows from SQLite, sorted timestamp DESC,
 // id DESC, paginated via cursor, limited to limit+1 rows. The extra row
-// determines nextCursor.
-func (s *SQLiteSink) ReadRoots(ctx context.Context, _ inspect.InspectQuery, limit int, cursor *inspect.Cursor) ([]inspect.RootRow, *inspect.Cursor, error) {
-	var (
-		query string
-		args  []any
-	)
+// determines nextCursor. All filters in q are applied as AND clauses.
+func (s *SQLiteSink) ReadRoots(ctx context.Context, q inspect.InspectQuery, limit int, cursor *inspect.Cursor) ([]inspect.RootRow, *inspect.Cursor, error) {
 	fetch := limit + 1
+
+	var whereClauses []string
+	var args []any
+
+	// Cursor clause: rows strictly before the cursor position.
 	if cursor != nil {
 		nanos := cursor.Timestamp.UnixNano()
-		query = sqliteReadRootsBase + sqliteReadRootsCursorWhere + sqliteReadRootsGroupOrder
-		args = []any{nanos, nanos, cursor.ID, fetch}
-	} else {
-		query = sqliteReadRootsBase + sqliteReadRootsGroupOrder
-		args = []any{fetch}
+		whereClauses = append(whereClauses, "(cr.timestamp < ? OR (cr.timestamp = ? AND cr.id < ?))")
+		args = append(args, nanos, nanos, cursor.ID)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	// Temporal filters.
+	if q.Since != nil {
+		whereClauses = append(whereClauses, "cr.timestamp >= ?")
+		args = append(args, q.Since.UnixNano())
+	}
+	if q.Until != nil {
+		whereClauses = append(whereClauses, "cr.timestamp < ?")
+		args = append(args, q.Until.UnixNano())
+	}
+
+	// Non-temporal filters.
+	if q.Service != "" {
+		whereClauses = append(whereClauses, "cr.service = ?")
+		args = append(args, q.Service)
+	}
+	if q.Method != "" {
+		whereClauses = append(whereClauses, "cr.method = ?")
+		args = append(args, q.Method)
+	}
+	if q.Path != "" {
+		whereClauses = append(whereClauses, "cr.path LIKE ?")
+		args = append(args, q.Path+"%")
+	}
+	if q.CorrelationID != "" {
+		whereClauses = append(whereClauses, "cr.correlation_id = ?")
+		args = append(args, q.CorrelationID)
+	}
+	if q.SourceIP != "" {
+		whereClauses = append(whereClauses, "cr.source_ip = ?")
+		args = append(args, q.SourceIP)
+	}
+
+	// status filter: join against response events sharing the correlation_id.
+	// The HAVING clause is applied after GROUP BY.
+	var havingClauses []string
+	var havingArgs []any
+
+	if q.Status != nil {
+		if q.Status.Exact != 0 {
+			havingClauses = append(havingClauses, "MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) = ?")
+			havingArgs = append(havingArgs, q.Status.Exact)
+		} else {
+			// Class form: e.g. "2xx" → status BETWEEN 200 AND 299.
+			lo := int(q.Status.Class[0]-'0') * 100
+			hi := lo + 99
+			havingClauses = append(havingClauses,
+				"MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) BETWEEN ? AND ?")
+			havingArgs = append(havingArgs, lo, hi)
+		}
+	}
+
+	if q.HasEvents != nil {
+		if *q.HasEvents {
+			havingClauses = append(havingClauses, "COUNT(e.id) > 0")
+		} else {
+			havingClauses = append(havingClauses, "COUNT(e.id) = 0")
+		}
+	}
+
+	// Assemble the query.
+	query := sqliteReadRootsBase
+	if len(whereClauses) > 0 {
+		query += "\nWHERE " + strings.Join(whereClauses, "\n  AND ")
+	}
+	query += "\nGROUP BY cr.id"
+	if len(havingClauses) > 0 {
+		query += "\nHAVING " + strings.Join(havingClauses, "\n  AND ")
+	}
+	query += "\nORDER BY cr.timestamp DESC, cr.id DESC\nLIMIT ?"
+
+	allArgs := append(args, havingArgs...)
+	allArgs = append(allArgs, fetch)
+
+	rows, err := s.db.QueryContext(ctx, query, allArgs...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sqlite ReadRoots: %w", err)
 	}

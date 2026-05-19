@@ -13,7 +13,10 @@ import (
 // sorted timestamp DESC, id DESC, paginated by cursor and limited to limit+1
 // rows (the extra row determines nextCursor). Only CapturedRequest records are
 // returned; other variants are handled by later slices.
-func (s *MemorySink) ReadRoots(_ context.Context, _ inspect.InspectQuery, limit int, cursor *inspect.Cursor) ([]inspect.RootRow, *inspect.Cursor, error) {
+//
+// Temporal filters (since, until) are applied when set. Non-temporal filters
+// are not applied here — those queries are routed to SQLite-only by the handler.
+func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit int, cursor *inspect.Cursor) ([]inspect.RootRow, *inspect.Cursor, error) {
 	all := s.Recent(s.Len())
 
 	// Ensure stable sort by (timestamp DESC, id DESC). The ring traversal is
@@ -27,6 +30,22 @@ func (s *MemorySink) ReadRoots(_ context.Context, _ inspect.InspectQuery, limit 
 		}
 		return all[i].RecordID() > all[j].RecordID()
 	})
+
+	// Apply temporal filters.
+	if q.Since != nil || q.Until != nil {
+		filtered := all[:0]
+		for _, r := range all {
+			ts := r.RecordTimestamp()
+			if q.Since != nil && ts.Before(*q.Since) {
+				continue
+			}
+			if q.Until != nil && !ts.Before(*q.Until) {
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		all = filtered
+	}
 
 	// Apply cursor filter: only rows strictly before the cursor position.
 	if cursor != nil {

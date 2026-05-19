@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -33,13 +32,15 @@ type rootsResponse struct {
 // memReader and sqlReader may both be nil (stdout-only configuration).
 func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		limit, cursor, ok := parseRequestsParams(w, r)
-		if !ok {
+		q, fieldErrs := parseInspectQuery(r.URL.Query())
+		if len(fieldErrs) > 0 {
+			writeParseErrors(w, fieldErrs)
 			return
 		}
 
+		limit := q.Limit
+		cursor := q.Cursor
 		ctx := r.Context()
-		q := inspect.InspectQuery{Limit: limit, Cursor: cursor}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
@@ -52,12 +53,32 @@ func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 		}
 
 		var (
-			rows      []inspect.RootRow
-			nextCur   *inspect.Cursor
-			source    string
+			rows    []inspect.RootRow
+			nextCur *inspect.Cursor
+			source  string
 		)
 
-		if memReader != nil {
+		// Any non-temporal filter forces SQLite-only reads. Memory cannot apply
+		// joins (e.g. status via the events table) and filtered queries must not
+		// silently miss records that aged out of the ring buffer.
+		if hasNonTemporalFilter(q) || memReader == nil {
+			if sqlReader == nil {
+				// No SQLite available; return empty list (e.g. stdout-only with filters).
+				w.Header().Set("X-Httpcatch-Read-Source", readSourceNone)
+				w.WriteHeader(http.StatusOK)
+				writeRootsResponse(w, nil, nil)
+				return
+			}
+			sqlRows, sqlNext, err := sqlReader.ReadRoots(ctx, q, limit, cursor)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("sqlite read error: %v", err), http.StatusInternalServerError)
+				return
+			}
+			rows = sqlRows
+			nextCur = sqlNext
+			source = readSourceSQLite
+		} else {
+			// Memory-eligible path: temporal-only or no filters.
 			memRows, memNext, err := memReader.ReadRoots(ctx, q, limit, cursor)
 			if err != nil {
 				http.Error(w, fmt.Sprintf("memory read error: %v", err), http.StatusInternalServerError)
@@ -111,52 +132,12 @@ func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 					source = readSourceMemory
 				}
 			}
-		} else {
-			// SQLite only.
-			sqlRows, sqlNext, err := sqlReader.ReadRoots(ctx, q, limit, cursor)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("sqlite read error: %v", err), http.StatusInternalServerError)
-				return
-			}
-			rows = sqlRows
-			nextCur = sqlNext
-			source = readSourceSQLite
 		}
 
 		w.Header().Set("X-Httpcatch-Read-Source", source)
 		w.WriteHeader(http.StatusOK)
 		writeRootsResponse(w, rows, nextCur)
 	}
-}
-
-// parseRequestsParams parses and validates limit and cursor from the request
-// URL. Returns false (after writing a 400 response) on any validation failure.
-func parseRequestsParams(w http.ResponseWriter, r *http.Request) (limit int, cursor *inspect.Cursor, ok bool) {
-	limit = defaultLimit
-
-	if ls := r.URL.Query().Get("limit"); ls != "" {
-		v, err := strconv.Atoi(ls)
-		if err != nil {
-			writeFieldError(w, "limit", "must be an integer")
-			return 0, nil, false
-		}
-		if v < 1 || v > maxLimit {
-			writeFieldError(w, "limit", fmt.Sprintf("must be between 1 and %d", maxLimit))
-			return 0, nil, false
-		}
-		limit = v
-	}
-
-	if cs := r.URL.Query().Get("cursor"); cs != "" {
-		c, err := inspect.DecodeCursor(cs)
-		if err != nil {
-			writeFieldError(w, "cursor", err.Error())
-			return 0, nil, false
-		}
-		cursor = c
-	}
-
-	return limit, cursor, true
 }
 
 type fieldErrorResponse struct {
@@ -171,6 +152,12 @@ func writeFieldError(w http.ResponseWriter, field, msg string) {
 		Error: msg,
 		Field: field,
 	})
+}
+
+// writeParseErrors writes a 400 response with the first field error using the
+// established single-field envelope. The caller guarantees errs is non-empty.
+func writeParseErrors(w http.ResponseWriter, errs []parseFieldError) {
+	writeFieldError(w, errs[0].field, errs[0].message)
 }
 
 func writeRootsResponse(w http.ResponseWriter, rows []inspect.RootRow, nextCur *inspect.Cursor) {
