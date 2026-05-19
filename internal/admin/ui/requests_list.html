@@ -35,12 +35,18 @@
 
       <button type="submit" class="btn-filter">Filter</button>
       <a href="/ui/requests" class="btn-reset">Reset</a>
+
+      <label id="live-tail-toggle" class="live-tail-label" hidden>
+        <input type="checkbox" id="live-tail-checkbox" class="live-tail-checkbox">
+        Live tail
+      </label>
     </div>
   </form>
+  <div id="live-tail-status" class="live-tail-status" hidden></div>
 </section>
 
 <section class="requests-table-section">
-  <table class="requests-table">
+  <table class="requests-table" id="requests-table">
     <thead>
       <tr>
         <th>Timestamp</th>
@@ -52,9 +58,9 @@
         <th>Status</th>
       </tr>
     </thead>
-    <tbody>
+    <tbody id="requests-tbody">
       {{range .Rows}}
-      <tr class="{{if ne .Kind "request"}}row-orphan{{end}}">
+      <tr class="{{if ne .Kind "request"}}row-orphan{{end}}" data-timestamp="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}">
         <td><a href="/ui/requests/{{.ID}}" class="row-link">{{.Timestamp.Format "2006-01-02 15:04:05"}}</a></td>
         <td>
           {{if eq .Kind "request"}}
@@ -80,7 +86,7 @@
   </table>
 </section>
 
-<nav class="pagination" aria-label="Pagination">
+<nav class="pagination" id="pagination-nav" aria-label="Pagination">
   <span class="page-link page-link-disabled" aria-disabled="true">Previous</span>
 
   {{if .NextURL}}

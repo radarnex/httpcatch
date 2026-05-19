@@ -154,6 +154,7 @@ main {
   --half-bg: #f8f8f9;
   --truncation-bg: #fef9c3;
   --truncation-fg: #713f12;
+  --live-tail-highlight: #fde68a;
 }
 
 /* ── Inline error ────────────────────────────────────────────── */
@@ -360,9 +361,12 @@ main {
   background: var(--bg);
 }
 
-.page-link-disabled {
+.page-link-disabled,
+.page-link[aria-disabled="true"] {
   color: var(--fg-muted);
   cursor: default;
+  pointer-events: none;
+  opacity: .5;
 }
 
 /* ── Detail view ─────────────────────────────────────────────── */
@@ -575,3 +579,41 @@ main {
   font-style: italic;
   padding: .5rem 0;
 }
+
+/* ── Live tail ────────────────────────────────────────────────── */
+
+.live-tail-label {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  font-size: .8125rem;
+  color: var(--fg-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.live-tail-checkbox {
+  cursor: pointer;
+}
+
+.live-tail-status {
+  margin-top: .5rem;
+  padding: .375rem .75rem;
+  font-size: .8125rem;
+  background: var(--truncation-bg);
+  border: 1px solid #fde047;
+  border-radius: 6px;
+  color: var(--truncation-fg);
+  cursor: pointer;
+}
+
+.live-tail-new {
+  background-color: var(--live-tail-highlight);
+  animation: liveTailFade 1.5s ease-out forwards;
+}
+
+@keyframes liveTailFade {
+  from { background-color: var(--live-tail-highlight); }
+  to   { background-color: transparent; }
+}
+
