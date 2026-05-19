@@ -3,7 +3,7 @@ BIN_DIR := bin
 PKG     := ./cmd/httpcatch
 GO      ?= go
 
-.PHONY: help build test test-race vet fmt fmt-check tidy check run clean
+.PHONY: help build test test-race vet fmt fmt-check tidy check run clean docker-build docker-up docker-down docker-logs
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} \
@@ -40,3 +40,18 @@ run: build ## Build then run; pass flags via ARGS, e.g. make run ARGS="--config 
 
 clean: ## Remove build artifacts
 	rm -rf $(BIN_DIR)
+
+docker-build:
+	docker build \
+		--build-arg VERSION=$$(git rev-parse --short HEAD 2>/dev/null || echo dev) \
+		--build-arg BUILD_TIME=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+		-t httpcatch:dev .
+
+docker-up:
+	docker compose up -d --build
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f httpcatch

@@ -1,0 +1,21 @@
+services:
+  httpcatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: httpcatch:dev
+    container_name: httpcatch
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      HTTPCATCH_SINKS: "sqlite,memory"
+      HTTPCATCH_SQLITE_PATH: "/var/lib/httpcatch/httpcatch.db"
+      HTTPCATCH_ADMIN_BIND: "0.0.0.0:8081"
+      HTTPCATCH_ADMIN_TOKEN: "${HTTPCATCH_ADMIN_TOKEN:-devtoken}"
+    volumes:
+      - httpcatch-data:/var/lib/httpcatch
+    restart: unless-stopped
+
+volumes:
+  httpcatch-data:
