@@ -14,11 +14,13 @@ import (
 	"github.com/radarnex/httpcatch/internal/inspect"
 )
 
-// sqliteReadRoots is the base query joining captured_requests against events
-// for event_count/has_events/status. The WHERE clause is appended dynamically.
+// sqliteReadRootsBase is the captured-requests portion of the UNION query,
+// joining against events for event_count/has_events/status. The WHERE and
+// HAVING clauses are appended dynamically.
 const sqliteReadRootsBase = `
 SELECT
     cr.id,
+    'request'                                AS kind,
     cr.timestamp,
     cr.service,
     cr.method,
@@ -32,96 +34,198 @@ FROM captured_requests cr
 LEFT JOIN events e ON e.correlation_id = cr.correlation_id
 `
 
-// ReadRoots returns captured-request rows from SQLite, sorted timestamp DESC,
-// id DESC, paginated via cursor, limited to limit+1 rows. The extra row
-// determines nextCursor. All filters in q are applied as AND clauses.
+// sqliteOrphansBase is the orphan-events portion of the UNION query: events
+// whose correlation_id does not appear in captured_requests. The idx_events_correlation_id
+// index is used for the LEFT JOIN probe; EXPLAIN QUERY PLAN confirms it.
+//
+// Orphan rows carry the event's own fields. Method, path, source_ip,
+// event_count, and has_events are not applicable and are returned as NULL so
+// the row shape matches the captured-request portion of the UNION.
+const sqliteOrphansBase = `
+SELECT
+    e.id,
+    CASE e.type WHEN 'response' THEN 'orphan_response' ELSE 'orphan_outbound' END AS kind,
+    e.timestamp,
+    e.service,
+    NULL AS method,
+    NULL AS path,
+    e.correlation_id,
+    NULL AS source_ip,
+    NULL AS event_count,
+    NULL AS has_events,
+    CASE e.type WHEN 'response' THEN e.status ELSE NULL END AS status
+FROM events e
+LEFT JOIN captured_requests cr ON cr.correlation_id = e.correlation_id
+WHERE cr.id IS NULL
+`
+
+// ReadRoots returns captured-request and orphan-event rows from SQLite,
+// sorted timestamp DESC, id DESC, paginated via cursor, limited to limit+1
+// rows. The extra row determines nextCursor. All filters in q are applied to
+// the appropriate portion of the UNION.
+//
+// Filters that only apply to captured requests (method, path, source_ip,
+// has_events=true) exclude orphan rows by definition. has_events=false matches
+// captured requests with no correlated events — it does NOT mean orphan events.
+// status and correlation_id/service/since/until are applied to orphan rows
+// using the event's own fields.
 func (s *SQLiteSink) ReadRoots(ctx context.Context, q inspect.InspectQuery, limit int, cursor *inspect.Cursor) ([]inspect.RootRow, *inspect.Cursor, error) {
 	fetch := limit + 1
 
-	var whereClauses []string
-	var args []any
+	// --- Captured-requests arm of the UNION ---
 
-	// Cursor clause: rows strictly before the cursor position.
+	var reqWhere []string
+	var reqArgs []any
+
 	if cursor != nil {
 		nanos := cursor.Timestamp.UnixNano()
-		whereClauses = append(whereClauses, "(cr.timestamp < ? OR (cr.timestamp = ? AND cr.id < ?))")
-		args = append(args, nanos, nanos, cursor.ID)
+		reqWhere = append(reqWhere, "(cr.timestamp < ? OR (cr.timestamp = ? AND cr.id < ?))")
+		reqArgs = append(reqArgs, nanos, nanos, cursor.ID)
 	}
-
-	// Temporal filters.
 	if q.Since != nil {
-		whereClauses = append(whereClauses, "cr.timestamp >= ?")
-		args = append(args, q.Since.UnixNano())
+		reqWhere = append(reqWhere, "cr.timestamp >= ?")
+		reqArgs = append(reqArgs, q.Since.UnixNano())
 	}
 	if q.Until != nil {
-		whereClauses = append(whereClauses, "cr.timestamp < ?")
-		args = append(args, q.Until.UnixNano())
+		reqWhere = append(reqWhere, "cr.timestamp < ?")
+		reqArgs = append(reqArgs, q.Until.UnixNano())
 	}
-
-	// Non-temporal filters.
 	if q.Service != "" {
-		whereClauses = append(whereClauses, "cr.service = ?")
-		args = append(args, q.Service)
+		reqWhere = append(reqWhere, "cr.service = ?")
+		reqArgs = append(reqArgs, q.Service)
 	}
 	if q.Method != "" {
-		whereClauses = append(whereClauses, "cr.method = ?")
-		args = append(args, q.Method)
+		reqWhere = append(reqWhere, "cr.method = ?")
+		reqArgs = append(reqArgs, q.Method)
 	}
 	if q.Path != "" {
-		whereClauses = append(whereClauses, "cr.path LIKE ?")
-		args = append(args, q.Path+"%")
+		reqWhere = append(reqWhere, "cr.path LIKE ?")
+		reqArgs = append(reqArgs, q.Path+"%")
 	}
 	if q.CorrelationID != "" {
-		whereClauses = append(whereClauses, "cr.correlation_id = ?")
-		args = append(args, q.CorrelationID)
+		reqWhere = append(reqWhere, "cr.correlation_id = ?")
+		reqArgs = append(reqArgs, q.CorrelationID)
 	}
 	if q.SourceIP != "" {
-		whereClauses = append(whereClauses, "cr.source_ip = ?")
-		args = append(args, q.SourceIP)
+		reqWhere = append(reqWhere, "cr.source_ip = ?")
+		reqArgs = append(reqArgs, q.SourceIP)
 	}
 
-	// status filter: join against response events sharing the correlation_id.
-	// The HAVING clause is applied after GROUP BY.
-	var havingClauses []string
-	var havingArgs []any
+	var reqHaving []string
+	var reqHavingArgs []any
 
 	if q.Status != nil {
 		if q.Status.Exact != 0 {
-			havingClauses = append(havingClauses, "MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) = ?")
-			havingArgs = append(havingArgs, q.Status.Exact)
+			reqHaving = append(reqHaving, "MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) = ?")
+			reqHavingArgs = append(reqHavingArgs, q.Status.Exact)
 		} else {
-			// Class form: e.g. "2xx" → status BETWEEN 200 AND 299.
 			lo := int(q.Status.Class[0]-'0') * 100
 			hi := lo + 99
-			havingClauses = append(havingClauses,
+			reqHaving = append(reqHaving,
 				"MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) BETWEEN ? AND ?")
-			havingArgs = append(havingArgs, lo, hi)
+			reqHavingArgs = append(reqHavingArgs, lo, hi)
 		}
 	}
-
 	if q.HasEvents != nil {
 		if *q.HasEvents {
-			havingClauses = append(havingClauses, "COUNT(e.id) > 0")
+			reqHaving = append(reqHaving, "COUNT(e.id) > 0")
 		} else {
-			havingClauses = append(havingClauses, "COUNT(e.id) = 0")
+			// has_events=false: captured requests with no correlated events.
+			// This does NOT include orphan events; orphan rows are excluded entirely
+			// when has_events is set (see orphan arm below).
+			reqHaving = append(reqHaving, "COUNT(e.id) = 0")
 		}
 	}
 
-	// Assemble the query.
-	query := sqliteReadRootsBase
-	if len(whereClauses) > 0 {
-		query += "\nWHERE " + strings.Join(whereClauses, "\n  AND ")
+	reqQuery := sqliteReadRootsBase
+	if len(reqWhere) > 0 {
+		reqQuery += "\nWHERE " + strings.Join(reqWhere, "\n  AND ")
 	}
-	query += "\nGROUP BY cr.id"
-	if len(havingClauses) > 0 {
-		query += "\nHAVING " + strings.Join(havingClauses, "\n  AND ")
+	reqQuery += "\nGROUP BY cr.id"
+	if len(reqHaving) > 0 {
+		reqQuery += "\nHAVING " + strings.Join(reqHaving, "\n  AND ")
 	}
-	query += "\nORDER BY cr.timestamp DESC, cr.id DESC\nLIMIT ?"
 
-	allArgs := append(args, havingArgs...)
+	// --- Orphan-events arm of the UNION ---
+	//
+	// method, path, source_ip, and has_events filters exclude orphan rows
+	// by definition — those fields belong to captured requests only.
+	// When any of those filters is set, we skip the orphan arm entirely.
+	includeOrphans := q.Method == "" && q.Path == "" && q.SourceIP == "" && q.HasEvents == nil
+
+	var orphanQuery string
+	var orphanArgs []any
+
+	if includeOrphans {
+		var orphanWhere []string
+
+		if cursor != nil {
+			nanos := cursor.Timestamp.UnixNano()
+			orphanWhere = append(orphanWhere, "(e.timestamp < ? OR (e.timestamp = ? AND e.id < ?))")
+			orphanArgs = append(orphanArgs, nanos, nanos, cursor.ID)
+		}
+		if q.Since != nil {
+			orphanWhere = append(orphanWhere, "e.timestamp >= ?")
+			orphanArgs = append(orphanArgs, q.Since.UnixNano())
+		}
+		if q.Until != nil {
+			orphanWhere = append(orphanWhere, "e.timestamp < ?")
+			orphanArgs = append(orphanArgs, q.Until.UnixNano())
+		}
+		if q.Service != "" {
+			orphanWhere = append(orphanWhere, "e.service = ?")
+			orphanArgs = append(orphanArgs, q.Service)
+		}
+		if q.CorrelationID != "" {
+			orphanWhere = append(orphanWhere, "e.correlation_id = ?")
+			orphanArgs = append(orphanArgs, q.CorrelationID)
+		}
+		if q.Status != nil {
+			// status on orphan_response matches the event's own status field.
+			// Outbound orphans have NULL status and are excluded by any status filter.
+			if q.Status.Exact != 0 {
+				orphanWhere = append(orphanWhere, "e.type = 'response' AND e.status = ?")
+				orphanArgs = append(orphanArgs, q.Status.Exact)
+			} else {
+				lo := int(q.Status.Class[0]-'0') * 100
+				hi := lo + 99
+				orphanWhere = append(orphanWhere, "e.type = 'response' AND e.status BETWEEN ? AND ?")
+				orphanArgs = append(orphanArgs, lo, hi)
+			}
+		}
+
+		orphanQuery = sqliteOrphansBase
+		if len(orphanWhere) > 0 {
+			// sqliteOrphansBase already has "WHERE cr.id IS NULL"; additional
+			// filters are appended with AND.
+			orphanQuery += "  AND " + strings.Join(orphanWhere, "\n  AND ")
+		}
+	}
+
+	// --- Assemble UNION or single-arm query ---
+
+	var fullQuery string
+	var allArgs []any
+
+	if includeOrphans {
+		// Wrap the UNION in a subquery so the outer ORDER BY references the
+		// unambiguous column names emitted by the UNION arms.
+		fullQuery = "SELECT * FROM (\n" + reqQuery + "\nUNION ALL\n" + orphanQuery + "\n)\nORDER BY timestamp DESC, id DESC"
+		// Args: req-where + req-having + orphan-where + LIMIT
+		allArgs = append(allArgs, reqArgs...)
+		allArgs = append(allArgs, reqHavingArgs...)
+		allArgs = append(allArgs, orphanArgs...)
+	} else {
+		// Not a UNION: ORDER BY must qualify the table alias to avoid ambiguity
+		// with the events table joined in sqliteReadRootsBase.
+		fullQuery = reqQuery + "\nORDER BY cr.timestamp DESC, cr.id DESC"
+		allArgs = append(allArgs, reqArgs...)
+		allArgs = append(allArgs, reqHavingArgs...)
+	}
+	fullQuery += "\nLIMIT ?"
 	allArgs = append(allArgs, fetch)
 
-	rows, err := s.db.QueryContext(ctx, query, allArgs...)
+	rows, err := s.db.QueryContext(ctx, fullQuery, allArgs...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sqlite ReadRoots: %w", err)
 	}
@@ -130,27 +234,44 @@ func (s *SQLiteSink) ReadRoots(ctx context.Context, q inspect.InspectQuery, limi
 	var result []inspect.RootRow
 	for rows.Next() {
 		var (
-			id, service, method, path, corrID, sourceIP string
-			tsNanos                                     int64
-			eventCount                                  int
-			hasEventsInt                                int
-			statusVal                                   sql.NullInt64
+			id, kind, corrID string
+			service          string
+			tsNanos          int64
+			methodVal        sql.NullString
+			pathVal          sql.NullString
+			sourceIPVal      sql.NullString
+			eventCountVal    sql.NullInt64
+			hasEventsVal     sql.NullInt64
+			statusVal        sql.NullInt64
 		)
-		if err := rows.Scan(&id, &tsNanos, &service, &method, &path, &corrID, &sourceIP,
-			&eventCount, &hasEventsInt, &statusVal); err != nil {
+		if err := rows.Scan(&id, &kind, &tsNanos, &service,
+			&methodVal, &pathVal, &corrID, &sourceIPVal,
+			&eventCountVal, &hasEventsVal, &statusVal); err != nil {
 			return nil, nil, fmt.Errorf("sqlite ReadRoots scan: %w", err)
 		}
 		row := inspect.RootRow{
 			ID:            id,
-			Kind:          "request",
+			Kind:          kind,
 			Timestamp:     time.Unix(0, tsNanos).UTC(),
 			Service:       service,
-			Method:        method,
-			Path:          path,
 			CorrelationID: corrID,
-			SourceIP:      sourceIP,
-			EventCount:    eventCount,
-			HasEvents:     hasEventsInt != 0,
+		}
+		if methodVal.Valid {
+			row.Method = methodVal.String
+		}
+		if pathVal.Valid {
+			row.Path = pathVal.String
+		}
+		if sourceIPVal.Valid {
+			row.SourceIP = sourceIPVal.String
+		}
+		if eventCountVal.Valid {
+			v := int(eventCountVal.Int64)
+			row.EventCount = &v
+		}
+		if hasEventsVal.Valid {
+			v := hasEventsVal.Int64 != 0
+			row.HasEvents = &v
 		}
 		if statusVal.Valid {
 			v := int(statusVal.Int64)
@@ -493,6 +614,32 @@ func scanEventRow(scan func(...any) error) (capture.Record, error) {
 	default:
 		return nil, fmt.Errorf("unknown event type %q for id %s", evtType, id)
 	}
+}
+
+// OrphanCounts returns the count of orphan response events and orphan outbound
+// events in the events table — events whose correlation_id does not appear in
+// captured_requests. Computed at call time via the LEFT JOIN; this is a gauge
+// sampled on each /metrics scrape.
+func (s *SQLiteSink) OrphanCounts(ctx context.Context) (response, outbound int, err error) {
+	const q = `
+SELECT
+    SUM(CASE WHEN e.type = 'response' THEN 1 ELSE 0 END),
+    SUM(CASE WHEN e.type = 'outbound' THEN 1 ELSE 0 END)
+FROM events e
+LEFT JOIN captured_requests cr ON cr.correlation_id = e.correlation_id
+WHERE cr.id IS NULL`
+	row := s.db.QueryRowContext(ctx, q)
+	var respVal, outboundVal sql.NullInt64
+	if err := row.Scan(&respVal, &outboundVal); err != nil {
+		return 0, 0, fmt.Errorf("sqlite OrphanCounts: %w", err)
+	}
+	if respVal.Valid {
+		response = int(respVal.Int64)
+	}
+	if outboundVal.Valid {
+		outbound = int(outboundVal.Int64)
+	}
+	return response, outbound, nil
 }
 
 // ServicesSeen returns distinct services from captured_requests written at or

@@ -10,7 +10,8 @@ import (
 
 // MetricSources holds the counter accessors and the unredacted signal wired in
 // at construction time. Each field is a zero-argument function so handlers
-// read the live value on every request without caching.
+// read the live value on every request without caching. Nil fields are replaced
+// by safe zero-returning functions in normalize().
 type MetricSources struct {
 	DroppedTotal                    func() uint64
 	CapturedWithoutCorrelationTotal func() uint64
@@ -21,66 +22,50 @@ type MetricSources struct {
 	Unredacted func() bool
 
 	// Events API counters.
-	EventsIngestedResponseTotal          func() uint64
-	EventsIngestedOutboundTotal          func() uint64
-	EventsRejectedInvalidJSONTotal       func() uint64
-	EventsRejectedPayloadTooLargeTotal   func() uint64
-	EventsRejectedUnknownTypeTotal       func() uint64
-	EventsRejectedMissingTypeTotal       func() uint64
+	EventsIngestedResponseTotal             func() uint64
+	EventsIngestedOutboundTotal             func() uint64
+	EventsRejectedInvalidJSONTotal          func() uint64
+	EventsRejectedPayloadTooLargeTotal      func() uint64
+	EventsRejectedUnknownTypeTotal          func() uint64
+	EventsRejectedMissingTypeTotal          func() uint64
 	EventsRejectedMissingRequiredFieldTotal func() uint64
-	EventsRejectedEmptyBatchTotal        func() uint64
+	EventsRejectedEmptyBatchTotal           func() uint64
+
+	// OrphansResponse and OrphansOutbound are gauges sampled at scrape time.
+	// Each returns the current count of orphan events of the respective type
+	// visible in the configured store (memory or sqlite). A nil function is
+	// treated as returning 0.
+	OrphansResponse func() int
+	OrphansOutbound func() int
 }
 
-// metricSources is the package-internal form; identical shape, kept separate
-// so the exported struct can be composed freely without exposing internal naming.
-type metricSources struct {
-	droppedTotal                    func() uint64
-	capturedWithoutCorrelationTotal func() uint64
-	capturedWithoutServiceTotal     func() uint64
-	redactionErrorsTotal            func() uint64
-	unredacted                      func() bool
-
-	eventsIngestedResponseTotal          func() uint64
-	eventsIngestedOutboundTotal          func() uint64
-	eventsRejectedInvalidJSONTotal       func() uint64
-	eventsRejectedPayloadTooLargeTotal   func() uint64
-	eventsRejectedUnknownTypeTotal       func() uint64
-	eventsRejectedMissingTypeTotal       func() uint64
-	eventsRejectedMissingRequiredFieldTotal func() uint64
-	eventsRejectedEmptyBatchTotal        func() uint64
+// coalesce returns f if non-nil, otherwise a function that always returns zero.
+func coalesce[T any](f func() T) func() T {
+	if f != nil {
+		return f
+	}
+	var zero T
+	return func() T { return zero }
 }
 
-func zeroUint64() uint64 { return 0 }
-func falseBool() bool   { return false }
-
-func nilToZero(f func() uint64) func() uint64 {
-	if f == nil {
-		return zeroUint64
-	}
-	return f
-}
-
-func toInternal(s MetricSources) metricSources {
-	unredacted := s.Unredacted
-	if unredacted == nil {
-		unredacted = falseBool
-	}
-	return metricSources{
-		droppedTotal:                    nilToZero(s.DroppedTotal),
-		capturedWithoutCorrelationTotal: nilToZero(s.CapturedWithoutCorrelationTotal),
-		capturedWithoutServiceTotal:     nilToZero(s.CapturedWithoutServiceTotal),
-		redactionErrorsTotal:            nilToZero(s.RedactionErrorsTotal),
-		unredacted:                      unredacted,
-
-		eventsIngestedResponseTotal:          nilToZero(s.EventsIngestedResponseTotal),
-		eventsIngestedOutboundTotal:          nilToZero(s.EventsIngestedOutboundTotal),
-		eventsRejectedInvalidJSONTotal:       nilToZero(s.EventsRejectedInvalidJSONTotal),
-		eventsRejectedPayloadTooLargeTotal:   nilToZero(s.EventsRejectedPayloadTooLargeTotal),
-		eventsRejectedUnknownTypeTotal:       nilToZero(s.EventsRejectedUnknownTypeTotal),
-		eventsRejectedMissingTypeTotal:       nilToZero(s.EventsRejectedMissingTypeTotal),
-		eventsRejectedMissingRequiredFieldTotal: nilToZero(s.EventsRejectedMissingRequiredFieldTotal),
-		eventsRejectedEmptyBatchTotal:        nilToZero(s.EventsRejectedEmptyBatchTotal),
-	}
+// normalize replaces any nil function fields with safe zero-returning defaults
+// so that handlers never need nil checks.
+func (s *MetricSources) normalize() {
+	s.DroppedTotal = coalesce(s.DroppedTotal)
+	s.CapturedWithoutCorrelationTotal = coalesce(s.CapturedWithoutCorrelationTotal)
+	s.CapturedWithoutServiceTotal = coalesce(s.CapturedWithoutServiceTotal)
+	s.RedactionErrorsTotal = coalesce(s.RedactionErrorsTotal)
+	s.Unredacted = coalesce(s.Unredacted)
+	s.EventsIngestedResponseTotal = coalesce(s.EventsIngestedResponseTotal)
+	s.EventsIngestedOutboundTotal = coalesce(s.EventsIngestedOutboundTotal)
+	s.EventsRejectedInvalidJSONTotal = coalesce(s.EventsRejectedInvalidJSONTotal)
+	s.EventsRejectedPayloadTooLargeTotal = coalesce(s.EventsRejectedPayloadTooLargeTotal)
+	s.EventsRejectedUnknownTypeTotal = coalesce(s.EventsRejectedUnknownTypeTotal)
+	s.EventsRejectedMissingTypeTotal = coalesce(s.EventsRejectedMissingTypeTotal)
+	s.EventsRejectedMissingRequiredFieldTotal = coalesce(s.EventsRejectedMissingRequiredFieldTotal)
+	s.EventsRejectedEmptyBatchTotal = coalesce(s.EventsRejectedEmptyBatchTotal)
+	s.OrphansResponse = coalesce(s.OrphansResponse)
+	s.OrphansOutbound = coalesce(s.OrphansOutbound)
 }
 
 // labelEscaper applies Prometheus text exposition escaping to label values:
@@ -94,40 +79,46 @@ var labelEscaper = strings.NewReplacer(
 // metricsHandler returns an http.HandlerFunc that emits Prometheus text
 // exposition v0.0.4. The route is registered outside the auth middleware
 // group — it is unauthenticated by deliberate exception (see PRD user story 18).
-func metricsHandler(src metricSources) http.HandlerFunc {
+// src must have been passed through normalize() before this call.
+func metricsHandler(src MetricSources) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 
 		fmt.Fprintf(w, "# HELP httpcatch_dropped_total Total records dropped because the capture queue was full.\n")
 		fmt.Fprintf(w, "# TYPE httpcatch_dropped_total counter\n")
-		fmt.Fprintf(w, "httpcatch_dropped_total %d\n", src.droppedTotal())
+		fmt.Fprintf(w, "httpcatch_dropped_total %d\n", src.DroppedTotal())
 
 		fmt.Fprintf(w, "# HELP httpcatch_captured_without_correlation_total Total captured records with a synthesized correlation id (no traceparent or X-Request-ID).\n")
 		fmt.Fprintf(w, "# TYPE httpcatch_captured_without_correlation_total counter\n")
-		fmt.Fprintf(w, "httpcatch_captured_without_correlation_total %d\n", src.capturedWithoutCorrelationTotal())
+		fmt.Fprintf(w, "httpcatch_captured_without_correlation_total %d\n", src.CapturedWithoutCorrelationTotal())
 
 		fmt.Fprintf(w, "# HELP httpcatch_captured_without_service_total Total captured records with a fallback service derived from the Host header.\n")
 		fmt.Fprintf(w, "# TYPE httpcatch_captured_without_service_total counter\n")
-		fmt.Fprintf(w, "httpcatch_captured_without_service_total %d\n", src.capturedWithoutServiceTotal())
+		fmt.Fprintf(w, "httpcatch_captured_without_service_total %d\n", src.CapturedWithoutServiceTotal())
 
 		fmt.Fprintf(w, "# HELP httpcatch_redaction_errors_total Total best-effort redaction failures (counter ticks on unparseable JSON or sjson write failure).\n")
 		fmt.Fprintf(w, "# TYPE httpcatch_redaction_errors_total counter\n")
-		fmt.Fprintf(w, "httpcatch_redaction_errors_total %d\n", src.redactionErrorsTotal())
+		fmt.Fprintf(w, "httpcatch_redaction_errors_total %d\n", src.RedactionErrorsTotal())
 
 		fmt.Fprintf(w, "# HELP httpcatch_events_ingested_total Total events successfully enqueued via the Events API.\n")
 		fmt.Fprintf(w, "# TYPE httpcatch_events_ingested_total counter\n")
-		fmt.Fprintf(w, "httpcatch_events_ingested_total{type=\"response\"} %d\n", src.eventsIngestedResponseTotal())
-		fmt.Fprintf(w, "httpcatch_events_ingested_total{type=\"outbound\"} %d\n", src.eventsIngestedOutboundTotal())
+		fmt.Fprintf(w, "httpcatch_events_ingested_total{type=\"response\"} %d\n", src.EventsIngestedResponseTotal())
+		fmt.Fprintf(w, "httpcatch_events_ingested_total{type=\"outbound\"} %d\n", src.EventsIngestedOutboundTotal())
 
 		fmt.Fprintf(w, "# HELP httpcatch_events_rejected_total Total events rejected by the Events API, by reason.\n")
 		fmt.Fprintf(w, "# TYPE httpcatch_events_rejected_total counter\n")
-		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"invalid_json\"} %d\n", src.eventsRejectedInvalidJSONTotal())
-		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"payload_too_large\"} %d\n", src.eventsRejectedPayloadTooLargeTotal())
-		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"unknown_type\"} %d\n", src.eventsRejectedUnknownTypeTotal())
-		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"missing_type\"} %d\n", src.eventsRejectedMissingTypeTotal())
-		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"missing_required_field\"} %d\n", src.eventsRejectedMissingRequiredFieldTotal())
-		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"empty_batch\"} %d\n", src.eventsRejectedEmptyBatchTotal())
+		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"invalid_json\"} %d\n", src.EventsRejectedInvalidJSONTotal())
+		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"payload_too_large\"} %d\n", src.EventsRejectedPayloadTooLargeTotal())
+		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"unknown_type\"} %d\n", src.EventsRejectedUnknownTypeTotal())
+		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"missing_type\"} %d\n", src.EventsRejectedMissingTypeTotal())
+		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"missing_required_field\"} %d\n", src.EventsRejectedMissingRequiredFieldTotal())
+		fmt.Fprintf(w, "httpcatch_events_rejected_total{reason=\"empty_batch\"} %d\n", src.EventsRejectedEmptyBatchTotal())
+
+		fmt.Fprintf(w, "# HELP httpcatch_orphans_total Current count of orphan events (no matching captured request in the store), sampled at scrape time.\n")
+		fmt.Fprintf(w, "# TYPE httpcatch_orphans_total gauge\n")
+		fmt.Fprintf(w, "httpcatch_orphans_total{type=\"response\"} %d\n", src.OrphansResponse())
+		fmt.Fprintf(w, "httpcatch_orphans_total{type=\"outbound\"} %d\n", src.OrphansOutbound())
 
 		version := labelEscaper.Replace(buildinfo.Version)
 		buildTime := labelEscaper.Replace(buildinfo.BuildTime)

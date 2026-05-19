@@ -198,3 +198,36 @@ func TestMetrics_UnauthenticatedSuccess(t *testing.T) {
 		t.Errorf("invalid bearer: got %d want 200", resp2.StatusCode)
 	}
 }
+
+func TestMetrics_OrphansGauge(t *testing.T) {
+	t.Parallel()
+
+	src := admin.MetricSources{
+		OrphansResponse: func() int { return 3 },
+		OrphansOutbound: func() int { return 7 },
+	}
+	rec := getMetrics(t, src)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "httpcatch_orphans_total{type=\"response\"} 3") {
+		t.Errorf("orphans response gauge not found; body:\n%s", body)
+	}
+	if !strings.Contains(body, "httpcatch_orphans_total{type=\"outbound\"} 7") {
+		t.Errorf("orphans outbound gauge not found; body:\n%s", body)
+	}
+}
+
+func TestMetrics_OrphansGauge_NilFuncsDefaultToZero(t *testing.T) {
+	t.Parallel()
+
+	// OrphansResponse and OrphansOutbound both nil — must not panic and must emit 0.
+	rec := getMetrics(t, admin.MetricSources{})
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "httpcatch_orphans_total{type=\"response\"} 0") {
+		t.Errorf("orphans response gauge not found with nil func; body:\n%s", body)
+	}
+	if !strings.Contains(body, "httpcatch_orphans_total{type=\"outbound\"} 0") {
+		t.Errorf("orphans outbound gauge not found with nil func; body:\n%s", body)
+	}
+}

@@ -105,3 +105,29 @@ func (s *MemorySink) ByCorrelationID(correlationID string) capture.Record {
 	}
 	return s.buf[pos]
 }
+
+// OrphanCounts returns the count of orphan response events and orphan outbound
+// events currently visible in the ring buffer. An event is an orphan when no
+// CapturedRequest with the same correlation_id is present in the buffer.
+// Computed at call time over a snapshot — this is a gauge, not a counter.
+func (s *MemorySink) OrphanCounts() (response, outbound int) {
+	all := s.Recent(s.Len())
+	requestCorrs := make(map[string]struct{}, len(all))
+	for _, r := range all {
+		if _, ok := r.(*capture.CapturedRequest); ok {
+			requestCorrs[r.RecordCorrelationID()] = struct{}{}
+		}
+	}
+	for _, r := range all {
+		if _, hasReq := requestCorrs[r.RecordCorrelationID()]; hasReq {
+			continue
+		}
+		switch r.(type) {
+		case *capture.ResponseEvent:
+			response++
+		case *capture.OutboundEvent:
+			outbound++
+		}
+	}
+	return response, outbound
+}

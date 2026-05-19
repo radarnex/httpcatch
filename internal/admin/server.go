@@ -82,10 +82,11 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 	rs := serverOpts.Readers
 	es := serverOpts.Events
 
+	sources.normalize()
+
 	r := chi.NewRouter()
 	r.Get("/healthz", healthzHandler)
-	internal := toInternal(sources)
-	r.Get("/metrics", metricsHandler(internal))
+	r.Get("/metrics", metricsHandler(sources))
 	r.Get("/login", auth.loginPageHandler)
 	r.Post("/auth/login", auth.loginPostHandler)
 	r.Post("/auth/logout", auth.logoutHandler)
@@ -94,7 +95,7 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 	r.Group(func(r chi.Router) {
 		r.Use(Middleware(cfg.Token, store))
 		r.Get("/", indexHandler())
-		r.Get("/status", statusHandler(internal, internal.unredacted))
+		r.Get("/status", statusHandler(sources))
 		r.Get("/requests", requestsHandler(rs.Memory, rs.SQLite))
 		r.Get("/requests/{id}", requestDetailHandler(rs.Memory, rs.SQLite))
 	})

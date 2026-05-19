@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,11 +184,11 @@ func TestSQLiteReader_ReadRoots_RowShape(t *testing.T) {
 	if row.SourceIP != "10.0.0.1" {
 		t.Errorf("SourceIP: got %q want %q", row.SourceIP, "10.0.0.1")
 	}
-	if row.EventCount != 0 {
-		t.Errorf("EventCount: got %d want 0", row.EventCount)
+	if row.EventCount == nil || *row.EventCount != 0 {
+		t.Errorf("EventCount: expected pointer to 0, got %v", row.EventCount)
 	}
-	if row.HasEvents {
-		t.Error("HasEvents: expected false")
+	if row.HasEvents == nil || *row.HasEvents {
+		t.Error("HasEvents: expected pointer to false")
 	}
 	if row.Status != nil {
 		t.Errorf("Status: expected nil, got %v", *row.Status)
@@ -435,6 +436,297 @@ func TestSQLiteReader_ReadDetail_OutboundEvent(t *testing.T) {
 	}
 	if len(detail.Events) != 0 {
 		t.Errorf("Events: got %d want 0", len(detail.Events))
+	}
+}
+
+// orphanResponseEvent returns a ResponseEvent with no matching captured request
+// (an orphan). Used in orphan-detection tests.
+func orphanResponseEvent(id, corrID, service string, status int, ts time.Time) *capture.ResponseEvent {
+	return &capture.ResponseEvent{
+		ID:            id,
+		Timestamp:     ts,
+		CorrelationID: corrID,
+		Service:       service,
+		ServiceSource: "explicit",
+		Status:        status,
+		Headers:       map[string][]string{},
+		Body:          []byte{},
+	}
+}
+
+// orphanOutboundEvent returns an OutboundEvent with no matching captured request.
+func orphanOutboundEvent(id, corrID, service string, ts time.Time) *capture.OutboundEvent {
+	return &capture.OutboundEvent{
+		ID:            id,
+		Timestamp:     ts,
+		CorrelationID: corrID,
+		Service:       service,
+		ServiceSource: "explicit",
+		DurationMS:    1,
+		Request: capture.OutboundRequestHalf{
+			Method:  "GET",
+			Path:    "/out",
+			Headers: map[string][]string{},
+		},
+	}
+}
+
+func TestSQLiteReader_OrphanRows_AppearInReadRoots(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// Write a captured request with a correlated event — not an orphan.
+	req := sqliteRequest("req-1", base, "svc", "GET", "/", "corr-has-req", "x")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+	correlated := orphanResponseEvent("ev-correlated", "corr-has-req", "svc", 200, base.Add(time.Second))
+	if err := s.Write(ctx, correlated); err != nil {
+		t.Fatalf("Write correlated: %v", err)
+	}
+
+	// Write two orphan events: one response, one outbound.
+	orphResp := orphanResponseEvent("ev-orphan-resp", "corr-orphan-1", "svc", 503, base.Add(2*time.Second))
+	orphOut := orphanOutboundEvent("ev-orphan-out", "corr-orphan-2", "svc", base.Add(3*time.Second))
+	for _, ev := range []capture.Record{orphResp, orphOut} {
+		if err := s.Write(ctx, ev); err != nil {
+			t.Fatalf("Write orphan: %v", err)
+		}
+	}
+
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots: %v", err)
+	}
+
+	byID := make(map[string]inspect.RootRow)
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+
+	// Correlated event must NOT appear as orphan — only the request row is in the list.
+	if _, found := byID["ev-correlated"]; found {
+		t.Error("correlated event should not appear as orphan row")
+	}
+
+	// Request row must have kind=request.
+	if r, ok := byID["req-1"]; !ok || r.Kind != "request" {
+		t.Errorf("req-1 not found or wrong kind: %v", byID["req-1"])
+	}
+
+	// Orphan response must appear with kind=orphan_response.
+	if r, ok := byID["ev-orphan-resp"]; !ok {
+		t.Error("orphan response not found in ReadRoots")
+	} else {
+		if r.Kind != "orphan_response" {
+			t.Errorf("orphan response kind: got %q want orphan_response", r.Kind)
+		}
+		if r.Status == nil || *r.Status != 503 {
+			t.Errorf("orphan response status: got %v want 503", r.Status)
+		}
+		if r.EventCount != nil {
+			t.Errorf("orphan response event_count should be nil, got %v", r.EventCount)
+		}
+		if r.HasEvents != nil {
+			t.Errorf("orphan response has_events should be nil, got %v", r.HasEvents)
+		}
+	}
+
+	// Orphan outbound must appear with kind=orphan_outbound.
+	if r, ok := byID["ev-orphan-out"]; !ok {
+		t.Error("orphan outbound not found in ReadRoots")
+	} else if r.Kind != "orphan_outbound" {
+		t.Errorf("orphan outbound kind: got %q want orphan_outbound", r.Kind)
+	}
+}
+
+func TestSQLiteReader_OrphanReconciliation(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// Write an orphan response event.
+	orphResp := orphanResponseEvent("ev-orphan", "corr-late", "svc", 500, base)
+	if err := s.Write(ctx, orphResp); err != nil {
+		t.Fatalf("Write orphan: %v", err)
+	}
+
+	// Before reconciliation: should appear as orphan_response.
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots before reconciliation: %v", err)
+	}
+	var found bool
+	for _, r := range rows {
+		if r.ID == "ev-orphan" && r.Kind == "orphan_response" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("orphan not found before reconciliation")
+	}
+
+	// Now write the matching captured request (late arrival).
+	req := sqliteRequest("req-late", base.Add(time.Second), "svc", "POST", "/", "corr-late", "x")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write reconciling request: %v", err)
+	}
+
+	// After reconciliation: orphan row must be gone; request row must appear with event_count=1.
+	rows2, _, err := s.ReadRoots(ctx, inspect.InspectQuery{}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots after reconciliation: %v", err)
+	}
+	for _, r := range rows2 {
+		if r.ID == "ev-orphan" {
+			t.Errorf("orphan ev-orphan still present after reconciliation (kind=%s)", r.Kind)
+		}
+	}
+	var reqRow *inspect.RootRow
+	for _, r := range rows2 {
+		if r.ID == "req-late" {
+			rc := r
+			reqRow = &rc
+			break
+		}
+	}
+	if reqRow == nil {
+		t.Fatal("reconciled request not found in ReadRoots after reconciliation")
+	}
+	if reqRow.EventCount == nil || *reqRow.EventCount != 1 {
+		t.Errorf("reconciled request event_count: got %v want 1", reqRow.EventCount)
+	}
+}
+
+func TestSQLiteReader_OrphanFilters(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	orphResp := orphanResponseEvent("ev-resp", "corr-orphan", "my-svc", 500, base)
+	orphOut := orphanOutboundEvent("ev-out", "corr-orphan-out", "my-svc", base.Add(time.Second))
+	for _, ev := range []capture.Record{orphResp, orphOut} {
+		if err := s.Write(ctx, ev); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	// service filter applies to orphans on their own fields.
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Service: "my-svc"}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots service filter: %v", err)
+	}
+	ids := make(map[string]struct{})
+	for _, r := range rows {
+		ids[r.ID] = struct{}{}
+	}
+	if _, ok := ids["ev-resp"]; !ok {
+		t.Error("service filter: orphan response not returned")
+	}
+
+	// status filter applies to orphan_response on event's own status.
+	rows5xx, _, err := s.ReadRoots(ctx, inspect.InspectQuery{
+		Status: &inspect.StatusFilter{Class: "5xx"},
+	}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots status filter: %v", err)
+	}
+	found5xx := false
+	for _, r := range rows5xx {
+		if r.ID == "ev-resp" {
+			found5xx = true
+		}
+	}
+	if !found5xx {
+		t.Error("5xx status filter: orphan response not returned")
+	}
+
+	// method filter excludes orphan rows.
+	rowsMethod, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Method: "GET"}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots method filter: %v", err)
+	}
+	for _, r := range rowsMethod {
+		if r.Kind == "orphan_response" || r.Kind == "orphan_outbound" {
+			t.Errorf("method filter: orphan row should not appear; got kind=%s id=%s", r.Kind, r.ID)
+		}
+	}
+
+	// has_events=false matches captured requests with no events, NOT orphans.
+	hasEventsFalse := false
+	rowsNoEvents, _, err := s.ReadRoots(ctx, inspect.InspectQuery{HasEvents: &hasEventsFalse}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots has_events=false: %v", err)
+	}
+	for _, r := range rowsNoEvents {
+		if r.Kind == "orphan_response" || r.Kind == "orphan_outbound" {
+			t.Errorf("has_events=false: orphan row should not appear; got kind=%s id=%s", r.Kind, r.ID)
+		}
+	}
+}
+
+func TestSQLiteOrphan_ExplainQueryPlan(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// Insert a small number of events without matching requests so the planner
+	// has real data to work with.
+	for i := range 3 {
+		ev := orphanResponseEvent(fmt.Sprintf("ev%d", i), fmt.Sprintf("corr%d", i), "svc", 200, base.Add(time.Duration(i)*time.Second))
+		if err := s.Write(ctx, ev); err != nil {
+			t.Fatalf("Write ev%d: %v", i, err)
+		}
+	}
+
+	// Run EXPLAIN QUERY PLAN on the orphan LEFT JOIN. The planner must use the
+	// idx_events_correlation_id index on events to satisfy the LEFT JOIN probe
+	// against captured_requests. We look for "correlation_id" in the plan output.
+	rows, err := s.DB().QueryContext(ctx, `EXPLAIN QUERY PLAN
+SELECT e.id
+FROM events e
+LEFT JOIN captured_requests cr ON cr.correlation_id = e.correlation_id
+WHERE cr.id IS NULL`)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+
+	var planLines []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		planLines = append(planLines, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+
+	// The plan must reference the correlation_id index somewhere — either
+	// idx_captured_requests_correlation_id or idx_events_correlation_id.
+	foundCorrelationIdx := false
+	for _, line := range planLines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "correlation_id") {
+			foundCorrelationIdx = true
+			break
+		}
+	}
+	if !foundCorrelationIdx {
+		t.Errorf("EXPLAIN QUERY PLAN does not reference a correlation_id index; plan:\n%s",
+			strings.Join(planLines, "\n"))
 	}
 }
 

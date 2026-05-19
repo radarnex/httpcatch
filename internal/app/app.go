@@ -93,6 +93,20 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 
 	eventsCounters := admin.NewEventsCounters()
 
+	// Orphan gauge functions: sampled at scrape time. Memory is preferred when
+	// available (O(n) over the bounded ring). SQLite is used when memory is
+	// disabled — the gauge then reflects the full persistent store.
+	// Each closure calls OrphanCounts independently; the bounded ring size makes
+	// the two passes per scrape negligible.
+	var orphansResponse, orphansOutbound func() int
+	if memSink != nil {
+		orphansResponse = func() int { r, _ := memSink.OrphanCounts(); return r }
+		orphansOutbound = func() int { _, o := memSink.OrphanCounts(); return o }
+	} else if sqliteSink != nil {
+		orphansResponse = func() int { r, _, _ := sqliteSink.OrphanCounts(context.Background()); return r }
+		orphansOutbound = func() int { _, o, _ := sqliteSink.OrphanCounts(context.Background()); return o }
+	}
+
 	adminSrv, err := admin.New(cfg.Admin, logger, admin.MetricSources{
 		DroppedTotal:                    q.DroppedTotal,
 		CapturedWithoutCorrelationTotal: counters.CapturedWithoutCorrelationTotal,
@@ -108,6 +122,9 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		EventsRejectedMissingTypeTotal:       eventsCounters.EventsRejectedMissingTypeTotal,
 		EventsRejectedMissingRequiredFieldTotal: eventsCounters.EventsRejectedMissingRequiredFieldTotal,
 		EventsRejectedEmptyBatchTotal:        eventsCounters.EventsRejectedEmptyBatchTotal,
+
+		OrphansResponse: orphansResponse,
+		OrphansOutbound: orphansOutbound,
 	}, admin.ServerOptions{
 		Readers: readers,
 		Events: admin.EventsSources{

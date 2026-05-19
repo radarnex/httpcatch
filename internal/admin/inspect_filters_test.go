@@ -685,6 +685,101 @@ func TestRequests_Dedup_TemporalFilter_MemoryAndSQLite(t *testing.T) {
 	}
 }
 
+func TestRequests_OrphanRows_AppearInList(t *testing.T) {
+	t.Parallel()
+
+	s := filterTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// Write a captured request — not an orphan.
+	req := filterBaseRequest("r1", "svc", "GET", "/", "corr-req", "x", base)
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+
+	// Write an orphan response event (no matching captured request).
+	orphan := &capture.ResponseEvent{
+		ID: "ev-orphan", Timestamp: base.Add(time.Second),
+		CorrelationID: "corr-orphan", Service: "svc", ServiceSource: "explicit",
+		Status: 503, Headers: map[string][]string{}, Body: []byte{},
+	}
+	if err := s.Write(ctx, orphan); err != nil {
+		t.Fatalf("Write orphan: %v", err)
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
+	_, body := getRequestsWithQuery(t, ts, "")
+	ids := recordIDs(body.Records)
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 records (req + orphan), got %d: %v", len(ids), ids)
+	}
+
+	// Verify the orphan row has kind=orphan_response.
+	var orphanRow map[string]any
+	for _, r := range body.Records {
+		if r["id"] == "ev-orphan" {
+			orphanRow = r
+			break
+		}
+	}
+	if orphanRow == nil {
+		t.Fatal("orphan row not found")
+	}
+	if orphanRow["kind"] != "orphan_response" {
+		t.Errorf("orphan kind: got %v want orphan_response", orphanRow["kind"])
+	}
+	// event_count and has_events must be null.
+	if v, ok := orphanRow["event_count"]; ok && v != nil {
+		t.Errorf("orphan event_count should be null, got %v", v)
+	}
+	if v, ok := orphanRow["has_events"]; ok && v != nil {
+		t.Errorf("orphan has_events should be null, got %v", v)
+	}
+}
+
+func TestRequests_OrphanStatus_Filter(t *testing.T) {
+	t.Parallel()
+
+	s := filterTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// Write an orphan response event with status 503.
+	orphan := &capture.ResponseEvent{
+		ID: "ev-orphan-503", Timestamp: base,
+		CorrelationID: "corr-503", Service: "svc", ServiceSource: "explicit",
+		Status: 503, Headers: map[string][]string{}, Body: []byte{},
+	}
+	if err := s.Write(ctx, orphan); err != nil {
+		t.Fatalf("Write orphan: %v", err)
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
+
+	// status=5xx should include the orphan_response.
+	_, body := getRequestsWithQuery(t, ts, "status=5xx")
+	ids := recordIDs(body.Records)
+	found := false
+	for _, id := range ids {
+		if id == "ev-orphan-503" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("orphan response not returned by status=5xx filter; got %v", ids)
+	}
+
+	// status=2xx should NOT include the orphan.
+	_, body2xx := getRequestsWithQuery(t, ts, "status=2xx")
+	for _, r := range body2xx.Records {
+		if r["id"] == "ev-orphan-503" {
+			t.Error("orphan response should not appear in status=2xx filter")
+		}
+	}
+}
+
 func TestRequests_ServicesSeen_AlphabeticalOrder(t *testing.T) {
 	t.Parallel()
 

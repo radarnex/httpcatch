@@ -193,11 +193,11 @@ func TestMemoryReader_ReadRoots_RowShape(t *testing.T) {
 	if row.SourceIP != "10.0.0.1" {
 		t.Errorf("SourceIP: got %q want %q", row.SourceIP, "10.0.0.1")
 	}
-	if row.EventCount != 0 {
-		t.Errorf("EventCount: got %d want 0", row.EventCount)
+	if row.EventCount == nil || *row.EventCount != 0 {
+		t.Errorf("EventCount: expected pointer to 0, got %v", row.EventCount)
 	}
-	if row.HasEvents {
-		t.Error("HasEvents: expected false")
+	if row.HasEvents == nil || *row.HasEvents {
+		t.Error("HasEvents: expected pointer to false")
 	}
 	if row.Status != nil {
 		t.Errorf("Status: expected nil, got %v", *row.Status)
@@ -514,4 +514,205 @@ func reverseStrings(ss []string) []string {
 		out[len(ss)-1-i] = s
 	}
 	return out
+}
+
+func TestMemoryReader_OrphanRows_AppearInReadRoots(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(20)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// Write a captured request with a correlated event (not an orphan).
+	req := makeRequest("req-1", base, "svc", "GET", "/", "corr-1", "x")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+	correlated := &capture.ResponseEvent{
+		ID: "ev-correlated", Timestamp: base.Add(time.Second),
+		CorrelationID: "corr-1", Service: "svc", ServiceSource: "x",
+		Status: 200, Headers: map[string][]string{}, Body: []byte{},
+	}
+	if err := s.Write(ctx, correlated); err != nil {
+		t.Fatalf("Write correlated: %v", err)
+	}
+
+	// Write two orphan events.
+	orphResp := &capture.ResponseEvent{
+		ID: "ev-orphan-resp", Timestamp: base.Add(2 * time.Second),
+		CorrelationID: "corr-orphan-1", Service: "svc", ServiceSource: "x",
+		Status: 503, Headers: map[string][]string{}, Body: []byte{},
+	}
+	orphOut := &capture.OutboundEvent{
+		ID: "ev-orphan-out", Timestamp: base.Add(3 * time.Second),
+		CorrelationID: "corr-orphan-2", Service: "svc", ServiceSource: "x",
+		DurationMS: 1,
+		Request:    capture.OutboundRequestHalf{Method: "GET", Path: "/", Headers: map[string][]string{}},
+	}
+	if err := s.Write(ctx, orphResp); err != nil {
+		t.Fatalf("Write orphResp: %v", err)
+	}
+	if err := s.Write(ctx, orphOut); err != nil {
+		t.Fatalf("Write orphOut: %v", err)
+	}
+
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots: %v", err)
+	}
+
+	byID := make(map[string]inspect.RootRow)
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+
+	// Correlated event must NOT appear as orphan.
+	if _, found := byID["ev-correlated"]; found {
+		t.Error("correlated event should not appear as orphan row")
+	}
+
+	// Orphan response must appear with kind=orphan_response.
+	if r, ok := byID["ev-orphan-resp"]; !ok {
+		t.Error("orphan response not found")
+	} else {
+		if r.Kind != "orphan_response" {
+			t.Errorf("orphan response kind: got %q want orphan_response", r.Kind)
+		}
+		if r.Status == nil || *r.Status != 503 {
+			t.Errorf("orphan response status: got %v want 503", r.Status)
+		}
+		if r.EventCount != nil {
+			t.Errorf("orphan response event_count should be nil, got %v", r.EventCount)
+		}
+		if r.HasEvents != nil {
+			t.Errorf("orphan response has_events should be nil, got %v", r.HasEvents)
+		}
+	}
+
+	// Orphan outbound must appear with kind=orphan_outbound.
+	if r, ok := byID["ev-orphan-out"]; !ok {
+		t.Error("orphan outbound not found")
+	} else if r.Kind != "orphan_outbound" {
+		t.Errorf("orphan outbound kind: got %q want orphan_outbound", r.Kind)
+	}
+}
+
+func TestMemoryReader_OrphanReconciliation(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(20)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// Write orphan event first.
+	orphResp := &capture.ResponseEvent{
+		ID: "ev-orphan", Timestamp: base,
+		CorrelationID: "corr-late", Service: "svc", ServiceSource: "x",
+		Status: 500, Headers: map[string][]string{}, Body: []byte{},
+	}
+	if err := s.Write(ctx, orphResp); err != nil {
+		t.Fatalf("Write orphan: %v", err)
+	}
+
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots before reconciliation: %v", err)
+	}
+	found := false
+	for _, r := range rows {
+		if r.ID == "ev-orphan" && r.Kind == "orphan_response" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("orphan not found before reconciliation")
+	}
+
+	// Late-arriving request with same correlation_id reconciles the orphan.
+	req := makeRequest("req-late", base.Add(time.Second), "svc", "GET", "/", "corr-late", "x")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write request: %v", err)
+	}
+
+	rows2, _, err := s.ReadRoots(ctx, inspect.InspectQuery{}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots after reconciliation: %v", err)
+	}
+	for _, r := range rows2 {
+		if r.ID == "ev-orphan" {
+			t.Errorf("orphan still present after reconciliation (kind=%s)", r.Kind)
+		}
+	}
+}
+
+func TestMemoryReader_OrphanFilters_MethodExcludesOrphans(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(20)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	orphResp := &capture.ResponseEvent{
+		ID: "ev-orphan", Timestamp: base,
+		CorrelationID: "corr-orphan", Service: "svc", ServiceSource: "x",
+		Status: 200, Headers: map[string][]string{}, Body: []byte{},
+	}
+	if err := s.Write(ctx, orphResp); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// method filter: orphans must not appear when method is set.
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Method: "GET"}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots: %v", err)
+	}
+	for _, r := range rows {
+		if r.Kind == "orphan_response" || r.Kind == "orphan_outbound" {
+			t.Errorf("method filter: orphan row should not appear; kind=%s id=%s", r.Kind, r.ID)
+		}
+	}
+}
+
+func TestMemoryOrphanCounts(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(20)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// No orphans yet.
+	resp0, out0 := s.OrphanCounts()
+	if resp0 != 0 || out0 != 0 {
+		t.Errorf("empty: got resp=%d out=%d want 0 0", resp0, out0)
+	}
+
+	// Add one orphan response and one orphan outbound.
+	if err := s.Write(ctx, &capture.ResponseEvent{
+		ID: "ov-r", Timestamp: base, CorrelationID: "co1",
+		Service: "s", ServiceSource: "x", Status: 500,
+		Headers: map[string][]string{}, Body: []byte{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write(ctx, &capture.OutboundEvent{
+		ID: "ov-o", Timestamp: base.Add(time.Second), CorrelationID: "co2",
+		Service: "s", ServiceSource: "x", DurationMS: 1,
+		Request: capture.OutboundRequestHalf{Method: "GET", Path: "/", Headers: map[string][]string{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp1, out1 := s.OrphanCounts()
+	if resp1 != 1 || out1 != 1 {
+		t.Errorf("orphan counts: got resp=%d out=%d want 1 1", resp1, out1)
+	}
+
+	// Reconcile the response orphan by adding a matching request.
+	if err := s.Write(ctx, makeRequest("req-r", base.Add(2*time.Second), "s", "GET", "/", "co1", "x")); err != nil {
+		t.Fatal(err)
+	}
+	resp2, out2 := s.OrphanCounts()
+	if resp2 != 0 || out2 != 1 {
+		t.Errorf("after reconcile: got resp=%d out=%d want 0 1", resp2, out2)
+	}
 }

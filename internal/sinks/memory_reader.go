@@ -9,89 +9,170 @@ import (
 	"github.com/radarnex/httpcatch/internal/inspect"
 )
 
-// ReadRoots returns captured-request rows from the in-memory ring buffer,
-// sorted timestamp DESC, id DESC, paginated by cursor and limited to limit+1
-// rows (the extra row determines nextCursor). Only CapturedRequest records are
-// returned; other variants are handled by later slices.
+// ReadRoots returns captured-request and orphan-event rows from the in-memory
+// ring buffer, sorted timestamp DESC, id DESC, paginated by cursor and limited
+// to limit+1 rows (the extra row determines nextCursor).
 //
-// Temporal filters (since, until) are applied when set. Non-temporal filters
-// are not applied here — those queries are routed to SQLite-only by the handler.
+// Service, correlation_id, since, and until filters are applied during the emit
+// pass. Filters that only apply to captured requests (method, path, source_ip,
+// has_events) are routed to SQLite-only by the caller; when any of those is set,
+// orphans are omitted from the result.
+//
+// Orphan detection: a response or outbound event whose correlation_id has no
+// corresponding CapturedRequest in the ring buffer is an orphan. Two passes over
+// the snapshot: one to build the request-correlation set, one to emit rows.
 func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit int, cursor *inspect.Cursor) ([]inspect.RootRow, *inspect.Cursor, error) {
 	all := s.Recent(s.Len())
 
-	// Ensure stable sort by (timestamp DESC, id DESC). The ring traversal is
-	// newest-first by insertion order, but inserts can arrive out of wall-clock
-	// order, so an explicit sort is required for correctness.
-	sort.SliceStable(all, func(i, j int) bool {
-		ti := all[i].RecordTimestamp()
-		tj := all[j].RecordTimestamp()
+	// Build the set of correlation_ids that have at least one CapturedRequest
+	// in the buffer. Used for orphan detection.
+	requestCorrs := make(map[string]struct{}, len(all))
+	for _, r := range all {
+		if _, ok := r.(*capture.CapturedRequest); ok {
+			requestCorrs[r.RecordCorrelationID()] = struct{}{}
+		}
+	}
+
+	// Determine whether orphan rows should be included. method, path,
+	// source_ip, and has_events are request-only filters; their presence
+	// excludes orphans by definition.
+	includeOrphans := q.Method == "" && q.Path == "" && q.SourceIP == "" && q.HasEvents == nil
+
+	// Emit a RootRow for each eligible record, applying field-level filters
+	// that do not depend on sort order. Service, correlation_id, and temporal
+	// filters are applied here to avoid appending rows that will be dropped later.
+	var candidates []inspect.RootRow
+	for _, r := range all {
+		// Temporal filters apply to all record types on the record's own timestamp.
+		ts := r.RecordTimestamp()
+		if q.Since != nil && ts.Before(*q.Since) {
+			continue
+		}
+		if q.Until != nil && !ts.Before(*q.Until) {
+			continue
+		}
+
+		switch v := r.(type) {
+		case *capture.CapturedRequest:
+			if q.Service != "" && v.Service != q.Service {
+				continue
+			}
+			if q.CorrelationID != "" && v.CorrelationID != q.CorrelationID {
+				continue
+			}
+			ec := 0 // event_count is unknown in memory; filled by SQLite join
+			he := false
+			candidates = append(candidates, inspect.RootRow{
+				ID:            v.ID,
+				Kind:          "request",
+				Timestamp:     v.Timestamp,
+				Service:       v.Service,
+				Method:        v.Method,
+				Path:          v.Path,
+				CorrelationID: v.CorrelationID,
+				SourceIP:      v.SourceIP,
+				EventCount:    &ec,
+				HasEvents:     &he,
+			})
+		case *capture.ResponseEvent:
+			if !includeOrphans {
+				continue
+			}
+			if _, hasReq := requestCorrs[v.CorrelationID]; hasReq {
+				continue // correlated with a known request, not an orphan
+			}
+			if q.Service != "" && v.Service != q.Service {
+				continue
+			}
+			if q.CorrelationID != "" && v.CorrelationID != q.CorrelationID {
+				continue
+			}
+			// Apply status filter to orphan_response on the event's own status.
+			if q.Status != nil {
+				if q.Status.Exact != 0 && v.Status != q.Status.Exact {
+					continue
+				}
+				if q.Status.Class != "" {
+					lo := int(q.Status.Class[0]-'0') * 100
+					hi := lo + 99
+					if v.Status < lo || v.Status > hi {
+						continue
+					}
+				}
+			}
+			st := v.Status
+			candidates = append(candidates, inspect.RootRow{
+				ID:            v.ID,
+				Kind:          "orphan_response",
+				Timestamp:     v.Timestamp,
+				Service:       v.Service,
+				CorrelationID: v.CorrelationID,
+				Status:        &st,
+			})
+		case *capture.OutboundEvent:
+			if !includeOrphans {
+				continue
+			}
+			if _, hasReq := requestCorrs[v.CorrelationID]; hasReq {
+				continue
+			}
+			if q.Service != "" && v.Service != q.Service {
+				continue
+			}
+			if q.CorrelationID != "" && v.CorrelationID != q.CorrelationID {
+				continue
+			}
+			// status filter excludes outbound orphans (they have no status at the top level).
+			if q.Status != nil {
+				continue
+			}
+			candidates = append(candidates, inspect.RootRow{
+				ID:            v.ID,
+				Kind:          "orphan_outbound",
+				Timestamp:     v.Timestamp,
+				Service:       v.Service,
+				CorrelationID: v.CorrelationID,
+			})
+		}
+	}
+
+	// Ensure stable sort by (timestamp DESC, id DESC).
+	sort.SliceStable(candidates, func(i, j int) bool {
+		ti := candidates[i].Timestamp
+		tj := candidates[j].Timestamp
 		if !ti.Equal(tj) {
 			return ti.After(tj)
 		}
-		return all[i].RecordID() > all[j].RecordID()
+		return candidates[i].ID > candidates[j].ID
 	})
-
-	// Apply temporal filters.
-	if q.Since != nil || q.Until != nil {
-		filtered := all[:0]
-		for _, r := range all {
-			ts := r.RecordTimestamp()
-			if q.Since != nil && ts.Before(*q.Since) {
-				continue
-			}
-			if q.Until != nil && !ts.Before(*q.Until) {
-				continue
-			}
-			filtered = append(filtered, r)
-		}
-		all = filtered
-	}
 
 	// Apply cursor filter: only rows strictly before the cursor position.
 	if cursor != nil {
-		filtered := all[:0]
-		for _, r := range all {
-			ts := r.RecordTimestamp()
-			id := r.RecordID()
-			if ts.Before(cursor.Timestamp) || (ts.Equal(cursor.Timestamp) && id < cursor.ID) {
-				filtered = append(filtered, r)
+		filtered := candidates[:0]
+		for _, row := range candidates {
+			if row.Timestamp.Before(cursor.Timestamp) ||
+				(row.Timestamp.Equal(cursor.Timestamp) && row.ID < cursor.ID) {
+				filtered = append(filtered, row)
 			}
 		}
-		all = filtered
+		candidates = filtered
 	}
 
 	// Collect up to limit+1 rows.
-	take := min(limit+1, len(all))
-	page := all[:take]
+	take := min(limit+1, len(candidates))
+	page := candidates[:take]
 
 	var nextCursor *inspect.Cursor
 	if len(page) > limit {
 		last := page[limit-1]
 		nextCursor = &inspect.Cursor{
-			Timestamp: last.RecordTimestamp(),
-			ID:        last.RecordID(),
+			Timestamp: last.Timestamp,
+			ID:        last.ID,
 		}
 		page = page[:limit]
 	}
 
-	rows := make([]inspect.RootRow, 0, len(page))
-	for _, r := range page {
-		cr, ok := r.(*capture.CapturedRequest)
-		if !ok {
-			continue
-		}
-		rows = append(rows, inspect.RootRow{
-			ID:            cr.ID,
-			Kind:          "request",
-			Timestamp:     cr.Timestamp,
-			Service:       cr.Service,
-			Method:        cr.Method,
-			Path:          cr.Path,
-			CorrelationID: cr.CorrelationID,
-			SourceIP:      cr.SourceIP,
-		})
-	}
-	return rows, nextCursor, nil
+	return page, nextCursor, nil
 }
 
 // ReadDetail resolves the given id in the ring buffer. It first scans for the

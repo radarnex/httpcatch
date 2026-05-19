@@ -11,22 +11,25 @@ import (
 var ErrNotFound = errors.New("not found")
 
 // RootRow is one entry in the GET /requests list. Every captured-request row
-// carries kind "request". Orphan-event rows carry their own kind values.
-// The event_count/has_events/status columns are derived from a join against
-// the events table; they are zero/false/nil when no events have been written
-// for the correlated request.
+// carries kind "request". Orphan-event rows carry kind "orphan_response" or
+// "orphan_outbound".
+//
+// Fields that apply to captured-request rows only (EventCount, HasEvents,
+// Method, Path, SourceIP) are null/omitted on orphan rows — orphan rows carry
+// the event's own fields instead. Status is populated via the events join for
+// request rows and from the event's own status for orphan_response rows.
 type RootRow struct {
 	ID            string     `json:"id"`
 	Kind          string     `json:"kind"`
 	Timestamp     time.Time  `json:"timestamp"`
 	Service       string     `json:"service"`
-	Method        string     `json:"method"`
-	Path          string     `json:"path"`
+	Method        string     `json:"method,omitempty"`
+	Path          string     `json:"path,omitempty"`
 	CorrelationID string     `json:"correlation_id"`
-	SourceIP      string     `json:"source_ip"`
-	EventCount    int        `json:"event_count"`
-	HasEvents     bool       `json:"has_events"`
-	Status        *int       `json:"status"` // nullable; populated via events join
+	SourceIP      string     `json:"source_ip,omitempty"`
+	EventCount    *int       `json:"event_count"`  // null for orphan rows
+	HasEvents     *bool      `json:"has_events"`   // null for orphan rows
+	Status        *int       `json:"status"`       // nullable; populated via events join or event's own status
 }
 
 // DetailRecord is the return type of ReadDetail. Root is the record matched by

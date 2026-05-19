@@ -25,15 +25,15 @@ type statusCounters struct {
 // state as JSON. The UI polls this endpoint every 5 seconds to keep banners
 // and counters live. The endpoint is authenticated; auth failures are handled
 // by the surrounding middleware before this handler is reached.
-func statusHandler(src metricSources, unredacted func() bool) http.HandlerFunc {
+func statusHandler(src MetricSources) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		resp := statusResponse{
-			Unredacted: unredacted(),
+			Unredacted: src.Unredacted(),
 			Counters: statusCounters{
-				DroppedTotal:                    src.droppedTotal(),
-				CapturedWithoutCorrelationTotal: src.capturedWithoutCorrelationTotal(),
-				CapturedWithoutServiceTotal:     src.capturedWithoutServiceTotal(),
-				RedactionErrorsTotal:            src.redactionErrorsTotal(),
+				DroppedTotal:                    src.DroppedTotal(),
+				CapturedWithoutCorrelationTotal: src.CapturedWithoutCorrelationTotal(),
+				CapturedWithoutServiceTotal:     src.CapturedWithoutServiceTotal(),
+				RedactionErrorsTotal:            src.RedactionErrorsTotal(),
 			},
 			Version:   buildinfo.Version,
 			BuildTime: buildinfo.BuildTime,
