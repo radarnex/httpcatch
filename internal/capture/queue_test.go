@@ -65,7 +65,7 @@ func TestQueue_ConcurrentEnqueueAndDrops(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range perProd {
-				if q.Enqueue(&CapturedRecord{ID: "test"}) {
+				if q.Enqueue(&CapturedRequest{ID: "test"}) {
 					enqueued.Add(1)
 				}
 			}
@@ -105,19 +105,19 @@ func TestQueue_Enqueue_DropsAndCounter(t *testing.T) {
 	t.Parallel()
 
 	q := NewQueue(2)
-	if !q.Enqueue(&CapturedRecord{}) {
+	if !q.Enqueue(&CapturedRequest{}) {
 		t.Fatal("first enqueue should succeed")
 	}
-	if !q.Enqueue(&CapturedRecord{}) {
+	if !q.Enqueue(&CapturedRequest{}) {
 		t.Fatal("second enqueue should succeed")
 	}
-	if q.Enqueue(&CapturedRecord{}) {
+	if q.Enqueue(&CapturedRequest{}) {
 		t.Fatal("third enqueue should drop")
 	}
 	if got := q.DroppedTotal(); got != 1 {
 		t.Fatalf("dropped: got %d want 1", got)
 	}
-	if got := q.Enqueue(&CapturedRecord{}); got {
+	if got := q.Enqueue(&CapturedRequest{}); got {
 		t.Fatal("fourth enqueue should also drop")
 	}
 	if got := q.DroppedTotal(); got != 2 {
@@ -131,5 +131,35 @@ func TestQueue_CapacityFloorAtOne(t *testing.T) {
 	q := NewQueue(0)
 	if q.Capacity() != 1 {
 		t.Fatalf("capacity floor: got %d want 1", q.Capacity())
+	}
+}
+
+func TestQueue_AllVariantsEnqueueAndDequeue(t *testing.T) {
+	t.Parallel()
+
+	q := NewQueue(10)
+
+	variants := []Record{
+		&CapturedRequest{ID: "req-1", CorrelationID: "c1"},
+		&ResponseEvent{ID: "resp-1", CorrelationID: "c2"},
+		&OutboundEvent{ID: "out-1", CorrelationID: "c3"},
+	}
+
+	for _, v := range variants {
+		if !q.Enqueue(v) {
+			t.Fatalf("Enqueue %T: expected true", v)
+		}
+	}
+
+	if q.Len() != 3 {
+		t.Fatalf("Len: got %d want 3", q.Len())
+	}
+
+	wantKinds := []RecordKind{KindRequest, KindResponseEvent, KindOutboundEvent}
+	for i, wantKind := range wantKinds {
+		got := <-q.Receive()
+		if got.Kind() != wantKind {
+			t.Errorf("item %d: Kind got %q want %q", i, got.Kind(), wantKind)
+		}
 	}
 }

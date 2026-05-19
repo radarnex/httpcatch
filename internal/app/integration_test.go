@@ -116,19 +116,36 @@ func fire(t *testing.T, url, method string, body []byte, hdr http.Header) *http.
 	return resp
 }
 
-func decodeLines(s string) ([]capture.CapturedRecord, error) {
-	out := []capture.CapturedRecord{}
+func decodeLines(s string) ([]capture.CapturedRequest, error) {
+	out := []capture.CapturedRequest{}
 	for line := range strings.SplitSeq(strings.TrimRight(s, "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		var r capture.CapturedRecord
+		var r capture.CapturedRequest
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			return nil, fmt.Errorf("line %q: %w", line, err)
 		}
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// recentRequests converts the polymorphic Recent snapshot to a typed slice by
+// asserting each entry is a *CapturedRequest. Tests that only enqueue
+// CapturedRequest records can rely on this without a per-element branch.
+func recentRequests(t *testing.T, m *sinks.MemorySink, n int) []*capture.CapturedRequest {
+	t.Helper()
+	recs := m.Recent(n)
+	out := make([]*capture.CapturedRequest, len(recs))
+	for i, r := range recs {
+		cr, ok := r.(*capture.CapturedRequest)
+		if !ok {
+			t.Fatalf("recentRequests[%d]: got %T, want *capture.CapturedRequest", i, r)
+		}
+		out[i] = cr
+	}
+	return out
 }
 
 func waitFor(cond func() bool, timeout time.Duration) bool {
@@ -214,7 +231,7 @@ func TestIntegration_EndToEnd_BodyCapShape(t *testing.T) {
 		t.Fatalf("records: got %d want %d", len(records), len(cases))
 	}
 
-	byMarker := map[string]capture.CapturedRecord{}
+	byMarker := map[string]capture.CapturedRequest{}
 	for _, r := range records {
 		markers := r.Headers["X-Test-Marker"]
 		if len(markers) != 1 {
@@ -323,7 +340,7 @@ type slowSink struct {
 }
 
 func (s *slowSink) Name() string { return "slow-" + s.inner.Name() }
-func (s *slowSink) Write(ctx context.Context, r *capture.CapturedRecord) error {
+func (s *slowSink) Write(ctx context.Context, r capture.Record) error {
 	select {
 	case <-time.After(s.delay):
 	case <-ctx.Done():
@@ -386,7 +403,7 @@ func TestIntegration_DropSemantics(t *testing.T) {
 type failingSink struct{}
 
 func (failingSink) Name() string { return "failing" }
-func (failingSink) Write(context.Context, *capture.CapturedRecord) error {
+func (failingSink) Write(context.Context, capture.Record) error {
 	return fmt.Errorf("intentional sink failure")
 }
 
@@ -568,7 +585,7 @@ func TestIntegration_IdentifiersAndCounters(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	byMarker := map[string]capture.CapturedRecord{}
+	byMarker := map[string]capture.CapturedRequest{}
 	for _, r := range records {
 		ms := r.Headers["X-Test-Marker"]
 		if len(ms) != 1 {
@@ -763,7 +780,7 @@ func TestIntegration_MemoryAndStdout_FanOutAndEviction(t *testing.T) {
 		t.Fatalf("stdout records: got %d want %d", len(stdoutRecords), fired)
 	}
 
-	memRecords := a.Memory.Recent(fired)
+	memRecords := recentRequests(t, a.Memory, fired)
 	if len(memRecords) != capacity {
 		t.Fatalf("memory records: got %d want %d", len(memRecords), capacity)
 	}
@@ -776,7 +793,7 @@ func TestIntegration_MemoryAndStdout_FanOutAndEviction(t *testing.T) {
 		}
 	}
 
-	stdoutByID := make(map[string]capture.CapturedRecord, len(stdoutRecords))
+	stdoutByID := make(map[string]capture.CapturedRequest, len(stdoutRecords))
 	for _, r := range stdoutRecords {
 		stdoutByID[r.ID] = r
 	}
@@ -861,7 +878,7 @@ func TestIntegration_MemoryStdoutAndFailingSink_OneShotIsolation(t *testing.T) {
 	if len(stdoutRecords) != 1 {
 		t.Fatalf("stdout: got %d records want 1", len(stdoutRecords))
 	}
-	memRecords := a.Memory.Recent(1)
+	memRecords := recentRequests(t, a.Memory, 1)
 	if len(memRecords) != 1 {
 		t.Fatalf("memory: got %d records want 1", len(memRecords))
 	}
@@ -1023,16 +1040,16 @@ func TestIntegration_AllThreeSinks_Consistent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode stdout: %v", err)
 	}
-	memRecs := a.Memory.Recent(len(cases))
+	memRecs := recentRequests(t, a.Memory, len(cases))
 
-	stdoutByMarker := map[string]capture.CapturedRecord{}
+	stdoutByMarker := map[string]capture.CapturedRequest{}
 	for _, r := range stdoutRecs {
 		m := r.Headers["X-Test-Marker"]
 		if len(m) == 1 {
 			stdoutByMarker[m[0]] = r
 		}
 	}
-	memByMarker := map[string]capture.CapturedRecord{}
+	memByMarker := map[string]capture.CapturedRequest{}
 	for _, r := range memRecs {
 		m := r.Headers["X-Test-Marker"]
 		if len(m) == 1 {
@@ -1197,7 +1214,7 @@ func TestIntegration_HeaderRedaction(t *testing.T) {
 		t.Fatalf("stdout: got %d records want 2", len(stdoutRecords))
 	}
 
-	byMarker := map[string]capture.CapturedRecord{}
+	byMarker := map[string]capture.CapturedRequest{}
 	for _, r := range stdoutRecords {
 		ms := r.Headers["X-Marker"]
 		if len(ms) == 1 {
@@ -1228,8 +1245,8 @@ func TestIntegration_HeaderRedaction(t *testing.T) {
 	}
 
 	// Verify memory sink sees identical redaction as stdout.
-	memRecords := a.Memory.Recent(10)
-	memByMarker := map[string]*capture.CapturedRecord{}
+	memRecords := recentRequests(t, a.Memory, 10)
+	memByMarker := map[string]*capture.CapturedRequest{}
 	for _, r := range memRecords {
 		ms := r.Headers["X-Marker"]
 		if len(ms) == 1 {
@@ -1320,7 +1337,7 @@ func TestIntegration_HeaderAndQueryRedaction(t *testing.T) {
 		t.Errorf("query page: got %v, want [2]", vals)
 	}
 
-	memRecords := a.Memory.Recent(1)
+	memRecords := recentRequests(t, a.Memory, 1)
 	if len(memRecords) != 1 {
 		t.Fatalf("memory: got %d records want 1", len(memRecords))
 	}
@@ -1399,7 +1416,7 @@ func TestIntegration_JSONPathRedaction(t *testing.T) {
 		t.Errorf("query keep: got %v, want [2] (JSON-path rule must not touch query)", vals)
 	}
 
-	memRecords := a.Memory.Recent(1)
+	memRecords := recentRequests(t, a.Memory, 1)
 	if len(memRecords) != 1 {
 		t.Fatalf("memory: got %d records want 1", len(memRecords))
 	}
@@ -1482,7 +1499,7 @@ func TestIntegration_RegexRedaction(t *testing.T) {
 		t.Errorf("query page: got %v, want [2]", vals)
 	}
 
-	memRecords := a.Memory.Recent(1)
+	memRecords := recentRequests(t, a.Memory, 1)
 	if len(memRecords) != 1 {
 		t.Fatalf("memory: got %d records want 1", len(memRecords))
 	}
@@ -2082,6 +2099,178 @@ func TestIntegration_UIShell(t *testing.T) {
 	}
 	if ct := jsResp.Header.Get("Content-Type"); ct != "application/javascript; charset=utf-8" {
 		t.Errorf("GET /static/app.js Content-Type: got %q", ct)
+	}
+}
+
+// TestIntegration_AllRecordVariants_PipelineRoundTrip boots the full pipeline
+// with all three sinks enabled, enqueues one record of each variant directly,
+// drains the queue, and asserts each sink observed each variant in the correct
+// table (for SQLite) or slot (for memory).
+func TestIntegration_AllRecordVariants_PipelineRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "variants.db")
+
+	cfg := config.Defaults()
+	cfg.Workers = 1
+	cfg.QueueSize = 32
+	cfg.Sinks.Stdout = true
+	cfg.Sinks.Memory = true
+	cfg.Sinks.MemoryCapacity = 10
+	cfg.Sinks.SQLite = true
+	cfg.Sinks.SQLitePath = dbPath
+
+	var stdoutBuf syncBuffer
+	var logBuf bytes.Buffer
+	a, _, teardown := runPipeline(t, cfg, &stdoutBuf, &logBuf)
+	defer teardown()
+
+	corrID := "0af7651916cd43dd8448eb211c80319c"
+
+	reqRec := &capture.CapturedRequest{
+		ID:                "req-variant-1",
+		Timestamp:         time.Now().UTC(),
+		Method:            "GET",
+		Path:              "/items",
+		Query:             map[string][]string{},
+		Headers:           map[string][]string{"Content-Type": {"text/plain"}},
+		Cookies:           []capture.Cookie{},
+		Body:              []byte("req-body"),
+		BodyOriginalSize:  8,
+		ContentType:       "text/plain",
+		SourceIP:          "10.0.0.1",
+		Service:           "items",
+		ServiceSource:     capture.ServiceSourceHeader,
+		CorrelationID:     corrID,
+		CorrelationSource: capture.CorrelationSourceTraceparent,
+	}
+	respRec := &capture.ResponseEvent{
+		ID:                "resp-variant-1",
+		Timestamp:         time.Now().UTC(),
+		CorrelationID:     corrID,
+		CorrelationSource: capture.CorrelationSourceTraceparent,
+		Service:           "items",
+		ServiceSource:     capture.ServiceSourceHeader,
+		Status:            200,
+		Headers:           map[string][]string{"Content-Type": {"application/json"}},
+		Body:              []byte(`{"ok":true}`),
+		BodyOriginalSize:  11,
+		ContentType:       "application/json",
+		DurationMS:        10,
+	}
+	outRec := &capture.OutboundEvent{
+		ID:                "out-variant-1",
+		Timestamp:         time.Now().UTC(),
+		CorrelationID:     corrID,
+		CorrelationSource: capture.CorrelationSourceTraceparent,
+		Service:           "items",
+		ServiceSource:     capture.ServiceSourceHeader,
+		DurationMS:        5,
+		Request: capture.OutboundRequestHalf{
+			Method:           "POST",
+			Path:             "/payments",
+			Headers:          map[string][]string{"Content-Type": {"application/json"}},
+			Body:             []byte(`{"amount":1}`),
+			BodyOriginalSize: 12,
+			ContentType:      "application/json",
+		},
+		Response: &capture.OutboundResponseHalf{
+			Status:           201,
+			Headers:          map[string][]string{"X-Tx": {"txid"}},
+			Body:             []byte(`{"created":true}`),
+			BodyOriginalSize: 16,
+			ContentType:      "application/json",
+		},
+	}
+
+	a.Queue.Enqueue(reqRec)
+	a.Queue.Enqueue(respRec)
+	a.Queue.Enqueue(outRec)
+
+	if !waitFor(func() bool { return stdoutBuf.CountLines() >= 3 }, 10*time.Second) {
+		t.Fatalf("timed out waiting for 3 stdout lines; got %d", stdoutBuf.CountLines())
+	}
+
+	// Verify stdout emits a kind discriminator for each variant.
+	lines := strings.Split(strings.TrimRight(stdoutBuf.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("stdout: got %d lines want 3", len(lines))
+	}
+	kindsSeen := map[string]bool{}
+	for _, line := range lines {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			t.Fatalf("stdout line not valid JSON: %v", err)
+		}
+		var kind string
+		if err := json.Unmarshal(obj["kind"], &kind); err != nil {
+			t.Fatalf("kind field missing or invalid: %v", err)
+		}
+		kindsSeen[kind] = true
+	}
+	for _, want := range []string{"request", "response_event", "outbound_event"} {
+		if !kindsSeen[want] {
+			t.Errorf("stdout missing kind %q", want)
+		}
+	}
+
+	// Verify memory holds all three variants (by correlation_id O(1) index).
+	if got := a.Memory.ByCorrelationID(corrID); got == nil {
+		t.Error("ByCorrelationID: expected non-nil for correlation_id that was enqueued")
+	}
+	recent := a.Memory.Recent(10)
+	if len(recent) != 3 {
+		t.Fatalf("memory: got %d records want 3", len(recent))
+	}
+
+	// Verify SQLite: CapturedRequest goes to captured_requests, events go to events.
+	sqliteDB, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite for verification: %v", err)
+	}
+	t.Cleanup(func() { _ = sqliteDB.Close() })
+
+	var reqCount int
+	if err := sqliteDB.QueryRow("SELECT COUNT(*) FROM captured_requests WHERE id=?", reqRec.ID).Scan(&reqCount); err != nil {
+		t.Fatalf("count captured_requests: %v", err)
+	}
+	if reqCount != 1 {
+		t.Errorf("captured_requests: got %d rows for CapturedRequest, want 1", reqCount)
+	}
+
+	var respCount int
+	if err := sqliteDB.QueryRow("SELECT COUNT(*) FROM events WHERE id=? AND type='response'", respRec.ID).Scan(&respCount); err != nil {
+		t.Fatalf("count events (response): %v", err)
+	}
+	if respCount != 1 {
+		t.Errorf("events: got %d rows for ResponseEvent, want 1", respCount)
+	}
+
+	// ResponseEvent should have NULL request-half columns.
+	var reqMethod sql.NullString
+	if err := sqliteDB.QueryRow("SELECT request_method FROM events WHERE id=?", respRec.ID).Scan(&reqMethod); err != nil {
+		t.Fatalf("select request_method for ResponseEvent: %v", err)
+	}
+	if reqMethod.Valid {
+		t.Errorf("ResponseEvent request_method: expected NULL, got %q", reqMethod.String)
+	}
+
+	var outCount int
+	if err := sqliteDB.QueryRow("SELECT COUNT(*) FROM events WHERE id=? AND type='outbound'", outRec.ID).Scan(&outCount); err != nil {
+		t.Fatalf("count events (outbound): %v", err)
+	}
+	if outCount != 1 {
+		t.Errorf("events: got %d rows for OutboundEvent, want 1", outCount)
+	}
+
+	// OutboundEvent with non-nil response should have populated response columns.
+	var respStatus sql.NullInt64
+	if err := sqliteDB.QueryRow("SELECT response_status FROM events WHERE id=?", outRec.ID).Scan(&respStatus); err != nil {
+		t.Fatalf("select response_status for OutboundEvent: %v", err)
+	}
+	if !respStatus.Valid || respStatus.Int64 != 201 {
+		t.Errorf("OutboundEvent response_status: got %v, want 201", respStatus)
 	}
 }
 

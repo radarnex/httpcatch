@@ -18,8 +18,8 @@ import (
 	"github.com/radarnex/httpcatch/internal/capture"
 )
 
-func sampleRecord(id string) *capture.CapturedRecord {
-	return &capture.CapturedRecord{
+func sampleRecord(id string) *capture.CapturedRequest {
+	return &capture.CapturedRequest{
 		ID:        id,
 		Timestamp: time.Date(2026, 5, 18, 12, 34, 56, 789, time.UTC),
 		Method:    "POST",
@@ -110,6 +110,11 @@ func TestSQLiteSink_SchemaPragmasAndIndexes(t *testing.T) {
 		"idx_captured_requests_method",
 		"idx_captured_requests_path",
 		"idx_captured_requests_source_ip",
+		"idx_events_timestamp",
+		"idx_events_service",
+		"idx_events_correlation_id",
+		"idx_events_type",
+		"idx_events_status",
 	}
 	for _, idx := range wantIndexes {
 		var name string
@@ -165,6 +170,46 @@ func TestSQLiteSink_SchemaPragmasAndIndexes(t *testing.T) {
 			t.Errorf("missing column %q", col)
 		} else if got != typ {
 			t.Errorf("column %q type: got %q want %q", col, got, typ)
+		}
+	}
+}
+
+func TestSQLiteSink_EventsTableSchema(t *testing.T) {
+	t.Parallel()
+
+	_, path := openTestSink(t)
+	r := openReader(t, path)
+
+	rows, err := r.Query("PRAGMA table_info(events)")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(events): %v", err)
+	}
+	defer rows.Close()
+	gotCols := map[string]string{}
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			typ     string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		gotCols[name] = typ
+	}
+	wantCols := []string{
+		"id", "timestamp", "type", "correlation_id", "service", "service_source",
+		"status", "duration_ms", "request_method", "request_path", "request_headers",
+		"request_body", "request_body_truncated", "request_body_original_size",
+		"response_status", "response_headers", "response_body",
+		"response_body_truncated", "response_body_original_size",
+	}
+	for _, col := range wantCols {
+		if _, ok := gotCols[col]; !ok {
+			t.Errorf("missing events column %q", col)
 		}
 	}
 }
@@ -263,6 +308,203 @@ func TestSQLiteSink_RoundTrip(t *testing.T) {
 	}
 	if len(gotCookies) != 1 || gotCookies[0].Name != "sid" || gotCookies[0].Value != "abc" {
 		t.Errorf("cookies roundtrip mismatch: %v", gotCookies)
+	}
+}
+
+func TestSQLiteSink_ResponseEventRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	s, path := openTestSink(t)
+	r := openReader(t, path)
+
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	evt := &capture.ResponseEvent{
+		ID:                "resp-1",
+		Timestamp:         ts,
+		CorrelationID:     "corr-abc",
+		CorrelationSource: capture.CorrelationSourceTraceparent,
+		Service:           "users",
+		ServiceSource:     capture.ServiceSourceHeader,
+		Status:            201,
+		Headers:           map[string][]string{"Content-Type": {"application/json"}},
+		Body:              []byte(`{"created":true}`),
+		BodyTruncated:     false,
+		BodyOriginalSize:  16,
+		ContentType:       "application/json",
+		DurationMS:        55,
+	}
+
+	if err := s.Write(context.Background(), evt); err != nil {
+		t.Fatalf("Write ResponseEvent: %v", err)
+	}
+
+	var (
+		id, evtType, corrID, service string
+		statusVal                    sql.NullInt64
+		durationMS                   int64
+		reqMethod, reqPath           sql.NullString
+		reqHeaders, respHeaders      sql.NullString
+		respBody                     []byte
+	)
+	err := r.QueryRow(`SELECT id, type, correlation_id, service, status, duration_ms,
+		request_method, request_path, request_headers, response_headers, response_body
+		FROM events WHERE id=?`, evt.ID,
+	).Scan(&id, &evtType, &corrID, &service, &statusVal, &durationMS,
+		&reqMethod, &reqPath, &reqHeaders, &respHeaders, &respBody)
+	if err != nil {
+		t.Fatalf("SELECT event: %v", err)
+	}
+
+	if evtType != "response" {
+		t.Errorf("type: got %q want %q", evtType, "response")
+	}
+	if corrID != "corr-abc" {
+		t.Errorf("correlation_id: got %q", corrID)
+	}
+	if !statusVal.Valid {
+		t.Error("status: expected non-NULL for response event")
+	} else if statusVal.Int64 != 201 {
+		t.Errorf("status: got %d want 201", statusVal.Int64)
+	}
+	if reqMethod.Valid {
+		t.Errorf("request_method: expected NULL for response event, got %q", reqMethod.String)
+	}
+	if reqPath.Valid {
+		t.Errorf("request_path: expected NULL for response event, got %q", reqPath.String)
+	}
+	if reqHeaders.Valid {
+		t.Errorf("request_headers: expected NULL for response event")
+	}
+	if !respHeaders.Valid {
+		t.Error("response_headers: expected non-NULL for response event")
+	}
+	if string(respBody) != string(evt.Body) {
+		t.Errorf("response_body: got %q want %q", respBody, evt.Body)
+	}
+	if durationMS != 55 {
+		t.Errorf("duration_ms: got %d want 55", durationMS)
+	}
+	_ = id
+}
+
+func TestSQLiteSink_OutboundEventRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	s, path := openTestSink(t)
+	r := openReader(t, path)
+
+	ts := time.Date(2026, 5, 18, 13, 0, 0, 0, time.UTC)
+	evt := &capture.OutboundEvent{
+		ID:                "out-1",
+		Timestamp:         ts,
+		CorrelationID:     "corr-xyz",
+		CorrelationSource: capture.CorrelationSourceTraceparent,
+		Service:           "orders",
+		ServiceSource:     capture.ServiceSourceHeader,
+		DurationMS:        38,
+		Request: capture.OutboundRequestHalf{
+			Method:           "POST",
+			Path:             "/payments",
+			Headers:          map[string][]string{"Content-Type": {"application/json"}},
+			Body:             []byte(`{"amount":100}`),
+			BodyTruncated:    false,
+			BodyOriginalSize: 14,
+			ContentType:      "application/json",
+		},
+		Response: &capture.OutboundResponseHalf{
+			Status:           201,
+			Headers:          map[string][]string{"X-Tx": {"abc"}},
+			Body:             []byte(`{"ok":true}`),
+			BodyTruncated:    false,
+			BodyOriginalSize: 11,
+			ContentType:      "application/json",
+		},
+	}
+
+	if err := s.Write(context.Background(), evt); err != nil {
+		t.Fatalf("Write OutboundEvent: %v", err)
+	}
+
+	var (
+		id, evtType, corrID string
+		topStatus           sql.NullInt64
+		durationMS          int64
+		reqMethod, reqPath  string
+		reqHeaders          string
+		respStatus          sql.NullInt64
+		respHeaders         sql.NullString
+		respBody            []byte
+	)
+	err := r.QueryRow(`SELECT id, type, correlation_id, status, duration_ms,
+		request_method, request_path, request_headers,
+		response_status, response_headers, response_body
+		FROM events WHERE id=?`, evt.ID,
+	).Scan(&id, &evtType, &corrID, &topStatus, &durationMS,
+		&reqMethod, &reqPath, &reqHeaders,
+		&respStatus, &respHeaders, &respBody)
+	if err != nil {
+		t.Fatalf("SELECT outbound event: %v", err)
+	}
+
+	if evtType != "outbound" {
+		t.Errorf("type: got %q want %q", evtType, "outbound")
+	}
+	if topStatus.Valid {
+		t.Errorf("top-level status: expected NULL for outbound event, got %d", topStatus.Int64)
+	}
+	if reqMethod != "POST" {
+		t.Errorf("request_method: got %q want POST", reqMethod)
+	}
+	if reqPath != "/payments" {
+		t.Errorf("request_path: got %q", reqPath)
+	}
+	if !respStatus.Valid {
+		t.Error("response_status: expected non-NULL when response is present")
+	} else if respStatus.Int64 != 201 {
+		t.Errorf("response_status: got %d want 201", respStatus.Int64)
+	}
+	if string(respBody) != string(evt.Response.Body) {
+		t.Errorf("response_body: got %q want %q", respBody, evt.Response.Body)
+	}
+	_ = durationMS
+}
+
+func TestSQLiteSink_OutboundEventNullResponse(t *testing.T) {
+	t.Parallel()
+
+	s, path := openTestSink(t)
+	r := openReader(t, path)
+
+	evt := &capture.OutboundEvent{
+		ID:            "out-null",
+		Timestamp:     time.Now().UTC(),
+		CorrelationID: "corr-null",
+		Service:       "orders",
+		ServiceSource: capture.ServiceSourceHeader,
+		DurationMS:    5,
+		Request: capture.OutboundRequestHalf{
+			Method: "GET",
+			Path:   "/status",
+		},
+		Response: nil,
+	}
+
+	if err := s.Write(context.Background(), evt); err != nil {
+		t.Fatalf("Write OutboundEvent (null response): %v", err)
+	}
+
+	var respStatus sql.NullInt64
+	var respHeaders sql.NullString
+	err := r.QueryRow(`SELECT response_status, response_headers FROM events WHERE id=?`, evt.ID,
+	).Scan(&respStatus, &respHeaders)
+	if err != nil {
+		t.Fatalf("SELECT: %v", err)
+	}
+	if respStatus.Valid {
+		t.Errorf("response_status: expected NULL when response is nil, got %d", respStatus.Int64)
+	}
+	if respHeaders.Valid {
+		t.Errorf("response_headers: expected NULL when response is nil, got %q", respHeaders.String)
 	}
 }
 

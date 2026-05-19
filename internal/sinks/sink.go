@@ -9,5 +9,5 @@ import (
 // Sink implementations must be safe for concurrent Write from the worker pool.
 type Sink interface {
 	Name() string
-	Write(ctx context.Context, r *capture.CapturedRecord) error
+	Write(ctx context.Context, r capture.Record) error
 }

@@ -29,7 +29,7 @@ const (
 // diffRecords compares two records field-by-field and returns one entry per
 // modified field. Pure function: no I/O. Output is sorted by Path so callers
 // can rely on byte-stable rendering.
-func diffRecords(before, after *capture.CapturedRecord) []DiffEntry {
+func diffRecords(before, after *capture.CapturedRequest) []DiffEntry {
 	var entries []DiffEntry
 
 	if before.Path != after.Path {

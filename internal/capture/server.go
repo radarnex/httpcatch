@@ -43,7 +43,7 @@ func captureHandler(opts HandlerOptions) http.HandlerFunc {
 	}
 }
 
-func buildRecord(r *http.Request, body []byte, originalSize int, truncated bool, counters *Counters, serviceHeader string) *CapturedRecord {
+func buildRecord(r *http.Request, body []byte, originalSize int, truncated bool, counters *Counters, serviceHeader string) *CapturedRequest {
 	reqCookies := r.Cookies()
 	cookies := make([]Cookie, 0, len(reqCookies))
 	for _, c := range reqCookies {
@@ -73,7 +73,7 @@ func buildRecord(r *http.Request, body []byte, originalSize int, truncated bool,
 		counters.incWithoutCorrelation()
 	}
 
-	return &CapturedRecord{
+	return &CapturedRequest{
 		ID:                uuid.NewString(),
 		Timestamp:         time.Now().UTC(),
 		Method:            r.Method,

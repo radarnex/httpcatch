@@ -16,7 +16,7 @@ import (
 
 func emptyEnv(string) string { return "" }
 
-func writeSample(t *testing.T, dir string, rec capture.CapturedRecord) string {
+func writeSample(t *testing.T, dir string, rec capture.CapturedRequest) string {
 	t.Helper()
 	path := filepath.Join(dir, "sample.json")
 	data, err := json.Marshal(rec)
@@ -54,8 +54,8 @@ redaction:
       names: [session_id]
 `
 
-func recordTouchingEveryRule() capture.CapturedRecord {
-	return capture.CapturedRecord{
+func recordTouchingEveryRule() capture.CapturedRequest {
+	return capture.CapturedRequest{
 		ID:     "rec-1",
 		Method: "POST",
 		Path:   "/login",

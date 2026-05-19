@@ -138,17 +138,61 @@ func (r *Ruleset) IsUnredacted() bool {
 		len(r.cookies) == 0
 }
 
-// Redact applies all rule buckets in fixed order: cookie → header → query → JSON-path → regex.
-func (r *Ruleset) Redact(rec *capture.CapturedRecord) *capture.CapturedRecord {
+// Redact applies all rule buckets to whichever fields the variant carries.
+// Header rules apply to every headers map the variant holds; JSON-path rules
+// apply to every body the variant holds, content-type-gated per half. Cookie
+// and query rules only apply to CapturedRequest, which is the only variant
+// that carries those fields. Rule application order is fixed:
+// cookie → header → query → JSON-path → regex.
+func (r *Ruleset) Redact(rec capture.Record) capture.Record {
 	if r.IsUnredacted() {
 		return rec
 	}
-	out := shallowCopyRecord(rec)
+	switch v := rec.(type) {
+	case *capture.CapturedRequest:
+		return r.redactCapturedRequest(v)
+	case *capture.ResponseEvent:
+		return r.redactResponseEvent(v)
+	case *capture.OutboundEvent:
+		return r.redactOutboundEvent(v)
+	default:
+		return rec
+	}
+}
+
+func (r *Ruleset) redactCapturedRequest(rec *capture.CapturedRequest) *capture.CapturedRequest {
+	out := shallowCopyCapturedRequest(rec)
 	applyCookieRules(out, r.cookies)
-	applyHeaderRules(out, r.headers)
+	applyHeaderRulesMap(out.Headers, r.headers)
 	applyQueryRules(out, r.queryParams)
-	applyJSONPathRules(out, r.jsonPaths, &r.redactionErrors)
-	applyRegexRules(out, r.regex)
+	applyJSONPathRulesBody(&out.Body, out.ContentType, r.jsonPaths, &r.redactionErrors)
+	applyRegexRulesCaptured(out, r.regex)
+	return out
+}
+
+func (r *Ruleset) redactResponseEvent(rec *capture.ResponseEvent) *capture.ResponseEvent {
+	out := shallowCopyResponseEvent(rec)
+	applyHeaderRulesMap(out.Headers, r.headers)
+	applyJSONPathRulesBody(&out.Body, out.ContentType, r.jsonPaths, &r.redactionErrors)
+	applyRegexRulesBody(&out.Body, out.ContentType, r.regex)
+	applyRegexRulesHeaderMap(out.Headers, r.regex)
+	return out
+}
+
+func (r *Ruleset) redactOutboundEvent(rec *capture.OutboundEvent) *capture.OutboundEvent {
+	out := shallowCopyOutboundEvent(rec)
+	// Request half
+	applyHeaderRulesMap(out.Request.Headers, r.headers)
+	applyJSONPathRulesBody(&out.Request.Body, out.Request.ContentType, r.jsonPaths, &r.redactionErrors)
+	applyRegexRulesBody(&out.Request.Body, out.Request.ContentType, r.regex)
+	applyRegexRulesHeaderMap(out.Request.Headers, r.regex)
+	// Response half (only when present)
+	if out.Response != nil {
+		applyHeaderRulesMap(out.Response.Headers, r.headers)
+		applyJSONPathRulesBody(&out.Response.Body, out.Response.ContentType, r.jsonPaths, &r.redactionErrors)
+		applyRegexRulesBody(&out.Response.Body, out.Response.ContentType, r.regex)
+		applyRegexRulesHeaderMap(out.Response.Headers, r.regex)
+	}
 	return out
 }
 
@@ -161,7 +205,7 @@ func (r *Ruleset) Redact(rec *capture.CapturedRecord) *capture.CapturedRecord {
 // against future changes to the marker.
 var redactedBytes = []byte(Redacted)
 
-func applyRegexRules(out *capture.CapturedRecord, rules []regexRule) {
+func applyRegexRulesCaptured(out *capture.CapturedRequest, rules []regexRule) {
 	if len(rules) == 0 {
 		return
 	}
@@ -170,14 +214,33 @@ func applyRegexRules(out *capture.CapturedRecord, rules []regexRule) {
 		if bodyEligible {
 			out.Body = rule.pattern.ReplaceAll(out.Body, redactedBytes)
 		}
-		for _, vals := range out.Headers {
+		applyRegexRulesHeaderMap(out.Headers, []regexRule{rule})
+		for _, vals := range out.Query {
 			for i, v := range vals {
 				vals[i] = rule.pattern.ReplaceAllLiteralString(v, Redacted)
 			}
 		}
-		for _, vals := range out.Query {
-			for i, v := range vals {
+	}
+}
+
+func applyRegexRulesBody(body *[]byte, contentType string, rules []regexRule) {
+	if len(rules) == 0 || len(*body) == 0 || !isTextLikeContentType(contentType) {
+		return
+	}
+	for _, rule := range rules {
+		*body = rule.pattern.ReplaceAll(*body, redactedBytes)
+	}
+}
+
+func applyRegexRulesHeaderMap(headers map[string][]string, rules []regexRule) {
+	if len(rules) == 0 {
+		return
+	}
+	for _, vals := range headers {
+		for i, v := range vals {
+			for _, rule := range rules {
 				vals[i] = rule.pattern.ReplaceAllLiteralString(v, Redacted)
+				v = vals[i]
 			}
 		}
 	}
@@ -226,37 +289,35 @@ func parseMediaType(ct string) string {
 	return media
 }
 
-// applyJSONPathRules redacts values at each configured path when the record's
-// content-type is JSON. Failures are best-effort: on an unparseable body or a
-// failed write, errs is incremented and the body is left untouched so the
-// record can continue through fan-out.
-func applyJSONPathRules(out *capture.CapturedRecord, rules []string, errs *atomic.Uint64) {
+// applyJSONPathRulesBody redacts JSON-path values in a body slice when the
+// content-type is JSON. Failures are best-effort.
+func applyJSONPathRulesBody(body *[]byte, contentType string, rules []string, errs *atomic.Uint64) {
 	if len(rules) == 0 {
 		return
 	}
-	if !isJSONContentType(out.ContentType) {
+	if !isJSONContentType(contentType) {
 		return
 	}
-	if len(out.Body) == 0 {
+	if len(*body) == 0 {
 		return
 	}
-	if !gjson.ValidBytes(out.Body) {
+	if !gjson.ValidBytes(*body) {
 		errs.Add(1)
 		return
 	}
-	body := out.Body
+	b := *body
 	for _, path := range rules {
-		if !gjson.GetBytes(body, path).Exists() {
+		if !gjson.GetBytes(b, path).Exists() {
 			continue
 		}
-		next, err := sjson.SetBytes(body, path, Redacted)
+		next, err := sjson.SetBytes(b, path, Redacted)
 		if err != nil {
 			errs.Add(1)
 			continue
 		}
-		body = next
+		b = next
 	}
-	out.Body = body
+	*body = b
 }
 
 // isJSONContentType returns true when the media type is application/json or
@@ -273,7 +334,7 @@ func isJSONContentType(ct string) bool {
 	return strings.HasSuffix(media, "+json")
 }
 
-func applyQueryRules(out *capture.CapturedRecord, rules []string) {
+func applyQueryRules(out *capture.CapturedRequest, rules []string) {
 	for key, vals := range out.Query {
 		if slices.Contains(rules, key) {
 			for i := range vals {
@@ -283,8 +344,8 @@ func applyQueryRules(out *capture.CapturedRecord, rules []string) {
 	}
 }
 
-func applyHeaderRules(out *capture.CapturedRecord, rules []string) {
-	for key, vals := range out.Headers {
+func applyHeaderRulesMap(headers map[string][]string, rules []string) {
+	for key, vals := range headers {
 		if slices.Contains(rules, strings.ToLower(key)) {
 			for i := range vals {
 				vals[i] = Redacted
@@ -298,7 +359,7 @@ var (
 	setCookieHeaderKey = textproto.CanonicalMIMEHeaderKey("set-cookie")
 )
 
-func applyCookieRules(out *capture.CapturedRecord, rules []cookieRule) {
+func applyCookieRules(out *capture.CapturedRequest, rules []cookieRule) {
 	if len(rules) == 0 || out.Headers == nil {
 		return
 	}
@@ -501,13 +562,45 @@ func redactCookieSlice(in []capture.Cookie, rules []cookieRule) []capture.Cookie
 	return out
 }
 
-func shallowCopyRecord(rec *capture.CapturedRecord) *capture.CapturedRecord {
+func shallowCopyCapturedRequest(rec *capture.CapturedRequest) *capture.CapturedRequest {
 	out := *rec
 	out.Headers = copyStringSliceMap(rec.Headers)
 	out.Query = copyStringSliceMap(rec.Query)
 	if rec.Cookies != nil {
 		out.Cookies = make([]capture.Cookie, len(rec.Cookies))
 		copy(out.Cookies, rec.Cookies)
+	}
+	return &out
+}
+
+func shallowCopyResponseEvent(rec *capture.ResponseEvent) *capture.ResponseEvent {
+	out := *rec
+	out.Headers = copyStringSliceMap(rec.Headers)
+	if rec.Body != nil {
+		body := make([]byte, len(rec.Body))
+		copy(body, rec.Body)
+		out.Body = body
+	}
+	return &out
+}
+
+func shallowCopyOutboundEvent(rec *capture.OutboundEvent) *capture.OutboundEvent {
+	out := *rec
+	out.Request.Headers = copyStringSliceMap(rec.Request.Headers)
+	if rec.Request.Body != nil {
+		body := make([]byte, len(rec.Request.Body))
+		copy(body, rec.Request.Body)
+		out.Request.Body = body
+	}
+	if rec.Response != nil {
+		resp := *rec.Response
+		resp.Headers = copyStringSliceMap(rec.Response.Headers)
+		if rec.Response.Body != nil {
+			body := make([]byte, len(rec.Response.Body))
+			copy(body, rec.Response.Body)
+			resp.Body = body
+		}
+		out.Response = &resp
 	}
 	return &out
 }

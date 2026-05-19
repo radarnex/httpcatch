@@ -1,6 +1,6 @@
 // Package redactcmd implements the in-process handler for the
 // `httpcatch redact --test <sample-file>` dry-run subcommand. It loads the
-// configured ruleset, applies it to a JSON-encoded CapturedRecord read from
+// configured ruleset, applies it to a JSON-encoded CapturedRequest read from
 // disk, and writes a before/after diff to stdout. Nothing is persisted: no
 // sink is constructed, no SQLite file is opened, no startup logs reach the
 // operational sink.
@@ -25,7 +25,7 @@ import (
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, env func(string) string) int {
 	fs := flag.NewFlagSet("redact", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	samplePath := fs.String("test", "", "path to a JSON-encoded CapturedRecord to apply the ruleset against")
+	samplePath := fs.String("test", "", "path to a JSON-encoded CapturedRequest to apply the ruleset against")
 	configPath := fs.String("config", "", "path to YAML config file (optional; env overrides always apply)")
 
 	if err := fs.Parse(args); err != nil {
@@ -65,14 +65,19 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, env func(stri
 		return 1
 	}
 
-	var record capture.CapturedRecord
+	var record capture.CapturedRequest
 	if err := json.Unmarshal(data, &record); err != nil {
 		fmt.Fprintf(stderr, "redact: decode sample %q: %v\n", *samplePath, err)
 		return 1
 	}
 
 	before := cloneRecord(&record)
-	after := ruleset.Redact(&record)
+	afterRec := ruleset.Redact(&record)
+	after, ok := afterRec.(*capture.CapturedRequest)
+	if !ok {
+		fmt.Fprintf(stderr, "redact: unexpected record type %T after redaction\n", afterRec)
+		return 1
+	}
 
 	entries := diffRecords(before, after)
 	if err := renderDiff(entries, stdout); err != nil {
@@ -86,7 +91,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, env func(stri
 // performed by ruleset.Redact on the input record do not contaminate the
 // before-side of the diff. The capture.Record value itself is copied by
 // value; only the heap-shared substructures need fresh allocations.
-func cloneRecord(rec *capture.CapturedRecord) *capture.CapturedRecord {
+func cloneRecord(rec *capture.CapturedRequest) *capture.CapturedRequest {
 	out := *rec
 	out.Headers = cloneStringSliceMap(rec.Headers)
 	out.Query = cloneStringSliceMap(rec.Query)

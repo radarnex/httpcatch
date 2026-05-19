@@ -11,14 +11,14 @@ import (
 	"github.com/radarnex/httpcatch/internal/capture"
 )
 
-func TestStdoutSink_EmitsCanonicalJSONLine(t *testing.T) {
+func TestStdoutSink_EmitsRequestWithKind(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
 	sink := NewWriterSink(&buf)
 
 	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
-	rec := &capture.CapturedRecord{
+	rec := &capture.CapturedRequest{
 		ID:                "rec-1",
 		Timestamp:         ts,
 		Method:            "POST",
@@ -49,24 +49,90 @@ func TestStdoutSink_EmitsCanonicalJSONLine(t *testing.T) {
 		t.Fatalf("expected exactly one line, got %d", strings.Count(out, "\n"))
 	}
 
-	var decoded capture.CapturedRecord
+	var decoded map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(strings.TrimRight(out, "\n")), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v\nline: %s", err, out)
 	}
-	if decoded.ID != rec.ID || decoded.Method != rec.Method || decoded.Path != rec.Path {
-		t.Errorf("field mismatch: got %+v", decoded)
+	var kind string
+	if err := json.Unmarshal(decoded["kind"], &kind); err != nil {
+		t.Fatalf("unmarshal kind: %v", err)
 	}
-	if string(decoded.Body) != "hello" {
-		t.Errorf("body: got %q want %q", decoded.Body, "hello")
+	if kind != string(capture.KindRequest) {
+		t.Errorf("kind: got %q want %q", kind, capture.KindRequest)
 	}
-	if !decoded.Timestamp.Equal(ts) {
-		t.Errorf("timestamp: got %v want %v", decoded.Timestamp, ts)
+	var id string
+	if err := json.Unmarshal(decoded["id"], &id); err != nil {
+		t.Fatalf("unmarshal id: %v", err)
 	}
-	if decoded.ServiceSource != capture.ServiceSourceHeader {
-		t.Errorf("service_source: got %q want %q", decoded.ServiceSource, capture.ServiceSourceHeader)
+	if id != "rec-1" {
+		t.Errorf("id: got %q want %q", id, "rec-1")
 	}
-	if decoded.CorrelationSource != capture.CorrelationSourceTraceparent {
-		t.Errorf("correlation_source: got %q want %q", decoded.CorrelationSource, capture.CorrelationSourceTraceparent)
+}
+
+func TestStdoutSink_EmitsResponseEventWithKind(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	sink := NewWriterSink(&buf)
+
+	rec := &capture.ResponseEvent{
+		ID:            "evt-1",
+		Timestamp:     time.Now().UTC(),
+		CorrelationID: "corr-1",
+		Service:       "users",
+		ServiceSource: capture.ServiceSourceHeader,
+		Status:        200,
+		Headers:       map[string][]string{"Content-Type": {"application/json"}},
+		Body:          []byte(`{"ok":true}`),
+		DurationMS:    42,
+	}
+
+	if err := sink.Write(context.Background(), rec); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(strings.TrimRight(buf.String(), "\n")), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var kind string
+	_ = json.Unmarshal(decoded["kind"], &kind)
+	if kind != string(capture.KindResponseEvent) {
+		t.Errorf("kind: got %q want %q", kind, capture.KindResponseEvent)
+	}
+}
+
+func TestStdoutSink_EmitsOutboundEventWithKind(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	sink := NewWriterSink(&buf)
+
+	rec := &capture.OutboundEvent{
+		ID:            "out-1",
+		Timestamp:     time.Now().UTC(),
+		CorrelationID: "corr-1",
+		Service:       "users",
+		ServiceSource: capture.ServiceSourceHeader,
+		DurationMS:    10,
+		Request: capture.OutboundRequestHalf{
+			Method: "POST",
+			Path:   "/payments",
+		},
+	}
+
+	if err := sink.Write(context.Background(), rec); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(strings.TrimRight(buf.String(), "\n")), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var kind string
+	_ = json.Unmarshal(decoded["kind"], &kind)
+	if kind != string(capture.KindOutboundEvent) {
+		t.Errorf("kind: got %q want %q", kind, capture.KindOutboundEvent)
 	}
 }
 
@@ -80,7 +146,11 @@ func TestStdoutSink_ConcurrentWritesNotInterleaved(t *testing.T) {
 	done := make(chan struct{}, n)
 	for range n {
 		go func() {
-			_ = sink.Write(context.Background(), &capture.CapturedRecord{ID: "x", Method: "GET"})
+			_ = sink.Write(context.Background(), &capture.CapturedRequest{
+				ID:            "x",
+				Method:        "GET",
+				CorrelationID: "c",
+			})
 			done <- struct{}{}
 		}()
 	}
@@ -93,9 +163,12 @@ func TestStdoutSink_ConcurrentWritesNotInterleaved(t *testing.T) {
 		t.Fatalf("lines: got %d want %d", len(lines), n)
 	}
 	for i, line := range lines {
-		var r capture.CapturedRecord
+		var r map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			t.Fatalf("line %d not valid JSON: %v\n%s", i, err, line)
+		}
+		if _, ok := r["kind"]; !ok {
+			t.Errorf("line %d missing 'kind' field", i)
 		}
 	}
 }

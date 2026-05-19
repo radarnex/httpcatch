@@ -56,7 +56,7 @@ func (p *WorkerPool) run(ctx context.Context) {
 			if err := s.Write(ctx, redacted); err != nil {
 				p.logger.Error("sink write failed",
 					"sink", s.Name(),
-					"id", redacted.ID,
+					"id", redacted.RecordID(),
 					"err", err)
 			}
 		}

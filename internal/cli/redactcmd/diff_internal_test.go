@@ -10,10 +10,10 @@ import (
 
 func TestDiffRecords_HeaderChange(t *testing.T) {
 	t.Parallel()
-	before := &capture.CapturedRecord{
+	before := &capture.CapturedRequest{
 		Headers: map[string][]string{"Authorization": {"Bearer x"}},
 	}
-	after := &capture.CapturedRecord{
+	after := &capture.CapturedRequest{
 		Headers: map[string][]string{"Authorization": {"[REDACTED]"}},
 	}
 	got := diffRecords(before, after)
@@ -27,10 +27,10 @@ func TestDiffRecords_HeaderChange(t *testing.T) {
 
 func TestDiffRecords_CaseInsensitiveHeaderKey(t *testing.T) {
 	t.Parallel()
-	before := &capture.CapturedRecord{
+	before := &capture.CapturedRequest{
 		Headers: map[string][]string{"authorization": {"Bearer x"}},
 	}
-	after := &capture.CapturedRecord{
+	after := &capture.CapturedRequest{
 		Headers: map[string][]string{"authorization": {"[REDACTED]"}},
 	}
 	got := diffRecords(before, after)
@@ -44,10 +44,10 @@ func TestDiffRecords_CaseInsensitiveHeaderKey(t *testing.T) {
 
 func TestDiffRecords_HeaderRemoved(t *testing.T) {
 	t.Parallel()
-	before := &capture.CapturedRecord{
+	before := &capture.CapturedRequest{
 		Headers: map[string][]string{"Cookie": {"session=abc"}},
 	}
-	after := &capture.CapturedRecord{
+	after := &capture.CapturedRequest{
 		Headers: map[string][]string{},
 	}
 	got := diffRecords(before, after)
@@ -58,8 +58,8 @@ func TestDiffRecords_HeaderRemoved(t *testing.T) {
 
 func TestDiffRecords_HeaderAdded(t *testing.T) {
 	t.Parallel()
-	before := &capture.CapturedRecord{Headers: map[string][]string{}}
-	after := &capture.CapturedRecord{
+	before := &capture.CapturedRequest{Headers: map[string][]string{}}
+	after := &capture.CapturedRequest{
 		Headers: map[string][]string{"X-New": {"v"}},
 	}
 	got := diffRecords(before, after)
@@ -70,10 +70,10 @@ func TestDiffRecords_HeaderAdded(t *testing.T) {
 
 func TestDiffRecords_QueryChange(t *testing.T) {
 	t.Parallel()
-	before := &capture.CapturedRecord{
+	before := &capture.CapturedRequest{
 		Query: map[string][]string{"token": {"shhh"}},
 	}
-	after := &capture.CapturedRecord{
+	after := &capture.CapturedRequest{
 		Query: map[string][]string{"token": {"[REDACTED]"}},
 	}
 	got := diffRecords(before, after)
@@ -84,10 +84,10 @@ func TestDiffRecords_QueryChange(t *testing.T) {
 
 func TestDiffRecords_CookieRedacted(t *testing.T) {
 	t.Parallel()
-	before := &capture.CapturedRecord{
+	before := &capture.CapturedRequest{
 		Cookies: []capture.Cookie{{Name: "session", Value: "xyz"}},
 	}
-	after := &capture.CapturedRecord{
+	after := &capture.CapturedRequest{
 		Cookies: []capture.Cookie{{Name: "session", Value: "[REDACTED]"}},
 	}
 	got := diffRecords(before, after)
@@ -101,10 +101,10 @@ func TestDiffRecords_CookieRedacted(t *testing.T) {
 
 func TestDiffRecords_CookieStripped(t *testing.T) {
 	t.Parallel()
-	before := &capture.CapturedRecord{
+	before := &capture.CapturedRequest{
 		Cookies: []capture.Cookie{{Name: "track", Value: "xx"}},
 	}
-	after := &capture.CapturedRecord{Cookies: []capture.Cookie{}}
+	after := &capture.CapturedRequest{Cookies: []capture.Cookie{}}
 	got := diffRecords(before, after)
 	if len(got) != 1 || got[0].After != removedMarker {
 		t.Fatalf("entries: %+v", got)
@@ -113,8 +113,8 @@ func TestDiffRecords_CookieStripped(t *testing.T) {
 
 func TestDiffRecords_BodyDiff(t *testing.T) {
 	t.Parallel()
-	before := &capture.CapturedRecord{Body: []byte(`{"password":"pw"}`)}
-	after := &capture.CapturedRecord{Body: []byte(`{"password":"[REDACTED]"}`)}
+	before := &capture.CapturedRequest{Body: []byte(`{"password":"pw"}`)}
+	after := &capture.CapturedRequest{Body: []byte(`{"password":"[REDACTED]"}`)}
 	got := diffRecords(before, after)
 	if len(got) != 1 || got[0].Path != "body" {
 		t.Fatalf("entries: %+v", got)
@@ -129,8 +129,8 @@ func TestDiffRecords_BodyDiff(t *testing.T) {
 
 func TestDiffRecords_PathChange(t *testing.T) {
 	t.Parallel()
-	before := &capture.CapturedRecord{Path: "/old"}
-	after := &capture.CapturedRecord{Path: "/new"}
+	before := &capture.CapturedRequest{Path: "/old"}
+	after := &capture.CapturedRequest{Path: "/new"}
 	got := diffRecords(before, after)
 	if len(got) != 1 || got[0].Path != "path" {
 		t.Fatalf("entries: %+v", got)
@@ -139,7 +139,7 @@ func TestDiffRecords_PathChange(t *testing.T) {
 
 func TestDiffRecords_NoChanges(t *testing.T) {
 	t.Parallel()
-	rec := &capture.CapturedRecord{
+	rec := &capture.CapturedRequest{
 		Headers: map[string][]string{"A": {"b"}},
 		Query:   map[string][]string{"k": {"v"}},
 		Body:    []byte("hello"),
