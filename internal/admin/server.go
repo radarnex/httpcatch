@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/radarnex/httpcatch/internal/config"
+	"github.com/radarnex/httpcatch/internal/inspect"
 )
 
 // shutdownDrainTimeout is the maximum time given to in-flight requests when
@@ -27,10 +28,17 @@ type Server struct {
 	store  *SessionStore
 }
 
+// ReadSources holds the optional Reader implementations wired at app
+// composition time. Fields may be nil; the inspect handler degrades gracefully.
+type ReadSources struct {
+	Memory inspect.Reader
+	SQLite inspect.Reader
+}
+
 // New validates the bind policy and constructs a Server. An error is returned
 // immediately if the policy refuses the bind address, so app composition can
 // fail startup before any listener is created.
-func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources) (*Server, error) {
+func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, readers ...ReadSources) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -50,6 +58,11 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources) (*S
 
 	etags := buildEtags(uiFS)
 
+	var rs ReadSources
+	if len(readers) > 0 {
+		rs = readers[0]
+	}
+
 	r := chi.NewRouter()
 	r.Get("/healthz", healthzHandler)
 	internal := toInternal(sources)
@@ -63,6 +76,7 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources) (*S
 		r.Use(Middleware(cfg.Token, store))
 		r.Get("/", indexHandler())
 		r.Get("/status", statusHandler(internal, internal.unredacted))
+		r.Get("/requests", requestsHandler(rs.Memory, rs.SQLite))
 	})
 
 	return &Server{

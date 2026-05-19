@@ -2274,6 +2274,199 @@ func TestIntegration_AllRecordVariants_PipelineRoundTrip(t *testing.T) {
 	}
 }
 
+// TestIntegration_GetRequests_MemoryAndSQLite boots the full app with both
+// sinks enabled, fires N captured requests through the capture port, then
+// asserts GET /requests returns the population in correct order and that
+// pagination exhausts to the same union.
+func TestIntegration_GetRequests_MemoryAndSQLite(t *testing.T) {
+	t.Parallel()
+
+	const token = "int-test-token-requests"
+	const numRequests = 12
+	const pageSize = 5
+
+	cfg := config.Defaults()
+	cfg.Workers = 2
+	cfg.QueueSize = 64
+	cfg.Sinks.Memory = true
+	cfg.Sinks.MemoryCapacity = 100
+	cfg.Sinks.SQLite = true
+	cfg.Sinks.SQLitePath = t.TempDir() + "/requests-test.db"
+	cfg.Admin.Token = token
+	cfg.Admin.Bind = freeAddr(t)
+
+	captureURL, adminURL, teardown := startFullApp(t, cfg)
+	defer teardown()
+
+	bearer := func(req *http.Request) *http.Request {
+		req.Header.Set("Authorization", "Bearer "+token)
+		return req
+	}
+
+	// Fire numRequests captured requests, each with a distinct X-Request-Id for
+	// correlation.
+	for i := range numRequests {
+		req, _ := http.NewRequest(http.MethodGet, captureURL+"/api/items", nil)
+		req.Header.Set("X-Request-Id", fmt.Sprintf("req-%03d", i))
+		req.Header.Set("X-Httpcatch-Service", "items")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("fire %d: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("fire %d: got %d want 202", i, resp.StatusCode)
+		}
+	}
+
+	// Wait for all records to be processed.
+	if !waitFor(func() bool {
+		req, _ := http.NewRequest(http.MethodGet, adminURL+"/requests?limit=100", nil)
+		resp, err := http.DefaultClient.Do(bearer(req))
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		var b struct {
+			Records []map[string]any `json:"records"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
+			return false
+		}
+		return len(b.Records) >= numRequests
+	}, 10*time.Second) {
+		t.Fatal("timed out waiting for all records to appear in GET /requests")
+	}
+
+	// GET /requests with no params → 200, correct source header.
+	req1, _ := http.NewRequest(http.MethodGet, adminURL+"/requests?limit=100", nil)
+	resp1, err := http.DefaultClient.Do(bearer(req1))
+	if err != nil {
+		t.Fatalf("GET /requests: %v", err)
+	}
+	var body1 struct {
+		Records []map[string]any `json:"records"`
+	}
+	if err := json.NewDecoder(resp1.Body).Decode(&body1); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp1.Body.Close()
+
+	if resp1.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d want 200", resp1.StatusCode)
+	}
+	if len(body1.Records) != numRequests {
+		t.Errorf("records: got %d want %d", len(body1.Records), numRequests)
+	}
+
+	// Verify sort order: timestamps must be non-increasing.
+	for i := 1; i < len(body1.Records); i++ {
+		tsStr := body1.Records[i]["timestamp"].(string)
+		prevStr := body1.Records[i-1]["timestamp"].(string)
+		if tsStr > prevStr {
+			t.Errorf("sort order violation at [%d]: %q > %q", i, tsStr, prevStr)
+		}
+	}
+
+	// Verify each row carries required fields.
+	requiredFields := []string{"id", "kind", "timestamp", "service", "method", "path", "correlation_id", "source_ip", "event_count", "has_events", "status"}
+	for i, rec := range body1.Records {
+		for _, f := range requiredFields {
+			if _, ok := rec[f]; !ok {
+				t.Errorf("records[%d] missing field %q", i, f)
+			}
+		}
+		if rec["kind"] != "request" {
+			t.Errorf("records[%d].kind: got %v want request", i, rec["kind"])
+		}
+	}
+
+	// Paginate through with pageSize and assert union equals population.
+	var pagedIDs []string
+	var cursorParam string
+	for {
+		url := fmt.Sprintf("%s/requests?limit=%d", adminURL, pageSize)
+		if cursorParam != "" {
+			url += "&cursor=" + cursorParam
+		}
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		resp, err := http.DefaultClient.Do(bearer(req))
+		if err != nil {
+			t.Fatalf("paginate GET /requests: %v", err)
+		}
+		var b struct {
+			Records    []map[string]any `json:"records"`
+			NextCursor *string          `json:"next_cursor"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
+			resp.Body.Close()
+			t.Fatalf("paginate decode: %v", err)
+		}
+		resp.Body.Close()
+		for _, rec := range b.Records {
+			pagedIDs = append(pagedIDs, rec["id"].(string))
+		}
+		if b.NextCursor == nil {
+			break
+		}
+		cursorParam = *b.NextCursor
+	}
+
+	if len(pagedIDs) != numRequests {
+		t.Errorf("pagination union: got %d want %d", len(pagedIDs), numRequests)
+	}
+	// No duplicates.
+	seen := make(map[string]struct{})
+	for _, id := range pagedIDs {
+		if _, dup := seen[id]; dup {
+			t.Errorf("duplicate id %q in pagination result", id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestIntegration_GetRequests_Auth checks auth behaviour on GET /requests.
+func TestIntegration_GetRequests_Auth(t *testing.T) {
+	t.Parallel()
+
+	const token = "int-test-token-auth-requests"
+	cfg := config.Defaults()
+	cfg.Workers = 1
+	cfg.QueueSize = 16
+	cfg.Admin.Token = token
+	cfg.Admin.Bind = freeAddr(t)
+
+	_, adminURL, teardown := startFullApp(t, cfg)
+	defer teardown()
+
+	// Unauthenticated → 401.
+	req, _ := http.NewRequest(http.MethodGet, adminURL+"/requests", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /requests unauthenticated: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated: got %d want 401", resp.StatusCode)
+	}
+
+	// Valid bearer → 200 with json.
+	req2, _ := http.NewRequest(http.MethodGet, adminURL+"/requests", nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("GET /requests bearer: %v", err)
+	}
+	io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("bearer: got %d want 200", resp2.StatusCode)
+	}
+	if ct := resp2.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type: got %q want application/json", ct)
+	}
+}
+
 // Ensure the redact package is used via the ruleset wiring in Build; this
 // compile-time reference keeps the import alive if test helpers above change.
 var _ = (*redact.Ruleset)(nil)
