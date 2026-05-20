@@ -100,6 +100,7 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 		r.Get("/requests/{id}", requestDetailHandler(rs.Memory, rs.SQLite))
 		r.Get("/ui/requests", requestListHandler(rs.Memory, rs.SQLite))
 		r.Get("/ui/requests/{id}", requestDetailUIHandler(rs.Memory, rs.SQLite))
+		r.Get("/ui/services", servicesUIHandler(rs.Memory, rs.SQLite))
 	})
 
 	// POST /events uses bearer-only auth (no session cookie) to eliminate CSRF risk.

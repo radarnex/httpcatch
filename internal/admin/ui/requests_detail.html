@@ -1,157 +1,188 @@
 {{define "body"}}
 {{if .NotFound}}
-<a href="/ui/requests" class="back-link">← Back to requests</a>
+<div class="page-head">
+  <a href="/ui/requests" class="back-link">← Back to requests</a>
+  <h1>Record not found</h1>
+</div>
 <div class="inline-error" role="alert">Record not found: {{.ID}}</div>
 {{else}}
 
-<a href="/ui/requests" class="back-link">← Back to requests</a>
+<div class="page-head">
+  <a href="/ui/requests" class="back-link">← Back</a>
+  <span class="m-badge m-{{.Root.Method}}">{{.Root.Method}}</span>
+  <span class="mono" style="font-size:13px; color: var(--text-1); overflow:hidden; text-overflow:ellipsis;">{{.Root.Path}}</span>
+  <span class="grow"></span>
+  <button id="curl-copy-btn" class="btn btn-ghost" hidden
+    data-method="{{.Root.Method}}"
+    data-path="{{.Root.Path}}"
+    data-headers="{{.Root.HeadersJSON}}"
+    data-body="{{.Root.BodyBase64}}"
+    data-content-type="{{.Root.ContentType}}">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+    Copy as cURL
+  </button>
+</div>
 
-<section class="detail-section">
-  <div class="detail-header">
-    <h2 class="detail-title">
-      <span class="badge badge-neutral">{{.Root.Method}}</span>
-      {{.Root.Path}}
-    </h2>
-    <button id="curl-copy-btn" class="btn-copy-curl" hidden
-      data-method="{{.Root.Method}}"
-      data-path="{{.Root.Path}}"
-      data-headers="{{.Root.HeadersJSON}}"
-      data-body="{{.Root.BodyBase64}}"
-      data-content-type="{{.Root.ContentType}}">
-      Copy as cURL
-    </button>
-  </div>
+<div class="drawer-tabs" id="detail-tabs" role="tablist">
+  <button type="button" class="drawer-tab on" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+  <button type="button" class="drawer-tab" role="tab" data-tab="request" aria-selected="false">Request <span class="tab-badge">{{len .Root.Headers}}</span></button>
+  <button type="button" class="drawer-tab" role="tab" data-tab="response" aria-selected="false">Response</button>
+  <button type="button" class="drawer-tab" role="tab" data-tab="raw" aria-selected="false">Raw</button>
+</div>
 
-  <dl class="detail-fields">
-    <dt>Timestamp</dt>
-    <dd>{{.Root.Timestamp.Format "2006-01-02T15:04:05.000Z07:00"}}</dd>
+<div class="drawer-body" style="height: auto; overflow: visible;">
 
-    <dt>Service</dt>
-    <dd>{{.Root.Service}} <span class="field-source">({{.Root.ServiceSource}})</span></dd>
+  <section class="tab-section on" data-tab="overview">
+    <dl class="meta-grid">
+      <dt>Timestamp</dt>
+      <dd>{{.Root.Timestamp.Format "2006-01-02T15:04:05.000Z07:00"}}</dd>
+      <dt>Service</dt>
+      <dd>{{.Root.Service}}<span class="field-source">{{.Root.ServiceSource}}</span></dd>
+      <dt>Source IP</dt>
+      <dd>{{.Root.SourceIP}}</dd>
+      <dt>Correlation ID</dt>
+      <dd>{{.Root.CorrelationID}}<span class="field-source">{{.Root.CorrelationSource}}</span></dd>
+    </dl>
+  </section>
 
-    <dt>Source IP</dt>
-    <dd>{{.Root.SourceIP}}</dd>
+  <section class="tab-section" data-tab="request" hidden>
+    <div class="section-h">Headers <span class="count">{{len .Root.Headers}}</span></div>
+    <table class="kv-table">
+      <tbody>
+        {{range $name, $values := .Root.Headers}}
+        {{range $values}}
+        <tr><td class="k">{{$name}}</td><td class="v">{{.}}</td></tr>
+        {{end}}
+        {{end}}
+      </tbody>
+    </table>
 
-    <dt>Correlation ID</dt>
-    <dd>{{.Root.CorrelationID}} <span class="field-source">({{.Root.CorrelationSource}})</span></dd>
-  </dl>
-
-  <h3 class="subsection-title">Request Headers</h3>
-  <table class="headers-table">
-    <tbody>
-      {{range $name, $values := .Root.Headers}}
-      {{range $values}}
-      <tr>
-        <th>{{$name}}</th>
-        <td>{{.}}</td>
-      </tr>
-      {{end}}
-      {{end}}
-    </tbody>
-  </table>
-
-  {{if .Root.Body}}
-  <h3 class="subsection-title">Body
-    {{if .Root.BodyTruncated}}
-    <span class="truncation-badge">truncated — original {{.Root.BodyOriginalSize}} bytes</span>
+    {{if .Root.Body}}
+    <div class="section-h">Body
+      {{if .Root.BodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.BodyOriginalSize}} bytes</span>{{end}}
+    </div>
+    <pre class="body-block{{if .Root.IsJSON}} body-json{{end}}">{{.Root.BodyText}}</pre>
+    {{else}}
+    <div class="section-h">Body</div>
+    <div class="no-correlated-records">No request body.</div>
     {{end}}
-  </h3>
-  <pre class="body-block{{if .Root.IsJSON}} body-json{{end}}">{{.Root.BodyText}}</pre>
-  {{end}}
-</section>
+  </section>
+
+  <section class="tab-section" data-tab="response" hidden>
+    {{with .FirstResponse}}
+    <div class="section-h">
+      Response <span class="event-status status-{{.StatusClass}}">{{.Status}}</span>
+      <span class="event-duration">{{.DurationMS}}ms</span>
+      <span class="grow"></span>
+      <span class="count">from correlated response event</span>
+    </div>
+    <table class="kv-table">
+      <tbody>
+        {{range $name, $values := .Headers}}
+        {{range $values}}
+        <tr><td class="k">{{$name}}</td><td class="v">{{.}}</td></tr>
+        {{end}}
+        {{end}}
+      </tbody>
+    </table>
+    {{if .Body}}
+    <div class="section-h">Body
+      {{if .BodyTruncated}}<span class="truncation-badge">truncated — original {{.BodyOriginalSize}} bytes</span>{{end}}
+    </div>
+    <pre class="body-block{{if .IsJSON}} body-json{{end}}">{{.BodyText}}</pre>
+    {{end}}
+    {{else}}
+    <div class="no-correlated-records">No correlated response event yet. The app middleware may not have posted a <code>type: response</code> event for this request.</div>
+    {{end}}
+  </section>
+
+  <section class="tab-section" data-tab="raw" hidden>
+    <div class="section-h">HTTP request</div>
+    <pre class="body-block">{{.Root.Method}} {{.Root.Path}} HTTP/1.1
+{{range $name, $values := .Root.Headers}}{{range $values}}{{$name}}: {{.}}
+{{end}}{{end}}
+{{.Root.BodyText}}</pre>
+  </section>
+
+</div>
 
 {{if .Events}}
-<section class="timeline-section">
-  <h2 class="section-title">Timeline</h2>
+<div style="padding: 0 16px 24px;">
+  <div class="section-h">Correlated events <span class="count">{{len .Events}}</span></div>
 
   {{range .Events}}
   {{if eq .Kind "response_event"}}
-  <div class="timeline-event event-response">
+  <div class="timeline-event">
     <div class="event-header">
       <span class="event-kind-label">Response</span>
       <span class="event-status status-{{.StatusClass}}">{{.Status}}</span>
       <span class="event-duration">{{.DurationMS}}ms</span>
       <span class="event-ts">{{.Timestamp.Format "15:04:05.000"}}</span>
     </div>
-    <table class="headers-table">
+    <table class="kv-table">
       <tbody>
         {{range $name, $values := .Headers}}
         {{range $values}}
-        <tr>
-          <th>{{$name}}</th>
-          <td>{{.}}</td>
-        </tr>
+        <tr><td class="k">{{$name}}</td><td class="v">{{.}}</td></tr>
         {{end}}
         {{end}}
       </tbody>
     </table>
     {{if .Body}}
     <div class="body-label">Body
-      {{if .BodyTruncated}}
-      <span class="truncation-badge">truncated — original {{.BodyOriginalSize}} bytes</span>
-      {{end}}
+      {{if .BodyTruncated}}<span class="truncation-badge">truncated — original {{.BodyOriginalSize}} bytes</span>{{end}}
     </div>
     <pre class="body-block{{if .IsJSON}} body-json{{end}}">{{.BodyText}}</pre>
     {{end}}
   </div>
 
   {{else if eq .Kind "outbound_event"}}
-  <div class="timeline-event event-outbound">
+  <div class="timeline-event">
     <div class="event-header">
       <span class="event-kind-label">Outbound</span>
       <span class="event-duration">{{.DurationMS}}ms</span>
       <span class="event-ts">{{.Timestamp.Format "15:04:05.000"}}</span>
     </div>
 
-    <div class="outbound-half outbound-request">
+    <div class="outbound-half">
       <div class="half-label">Request</div>
       <div class="half-method-path">
-        <span class="badge badge-neutral">{{.OutboundMethod}}</span>
-        {{.OutboundPath}}
+        <span class="m-badge m-{{.OutboundMethod}}">{{.OutboundMethod}}</span>
+        <span class="mono">{{.OutboundPath}}</span>
       </div>
-      <table class="headers-table">
+      <table class="kv-table">
         <tbody>
           {{range $name, $values := .OutboundRequestHeaders}}
           {{range $values}}
-          <tr>
-            <th>{{$name}}</th>
-            <td>{{.}}</td>
-          </tr>
+          <tr><td class="k">{{$name}}</td><td class="v">{{.}}</td></tr>
           {{end}}
           {{end}}
         </tbody>
       </table>
       {{if .OutboundRequestBody}}
       <div class="body-label">Body
-        {{if .OutboundRequestBodyTruncated}}
-        <span class="truncation-badge">truncated — original {{.OutboundRequestBodyOriginalSize}} bytes</span>
-        {{end}}
+        {{if .OutboundRequestBodyTruncated}}<span class="truncation-badge">truncated — original {{.OutboundRequestBodyOriginalSize}} bytes</span>{{end}}
       </div>
       <pre class="body-block{{if .OutboundRequestIsJSON}} body-json{{end}}">{{.OutboundRequestBodyText}}</pre>
       {{end}}
     </div>
 
-    <div class="outbound-half outbound-response">
+    <div class="outbound-half">
       <div class="half-label">Response</div>
       {{if .HasOutboundResponse}}
       <div class="event-status status-{{.OutboundStatusClass}}">{{.OutboundStatus}}</div>
-      <table class="headers-table">
+      <table class="kv-table">
         <tbody>
           {{range $name, $values := .OutboundResponseHeaders}}
           {{range $values}}
-          <tr>
-            <th>{{$name}}</th>
-            <td>{{.}}</td>
-          </tr>
+          <tr><td class="k">{{$name}}</td><td class="v">{{.}}</td></tr>
           {{end}}
           {{end}}
         </tbody>
       </table>
       {{if .OutboundResponseBody}}
       <div class="body-label">Body
-        {{if .OutboundResponseBodyTruncated}}
-        <span class="truncation-badge">truncated — original {{.OutboundResponseBodyOriginalSize}} bytes</span>
-        {{end}}
+        {{if .OutboundResponseBodyTruncated}}<span class="truncation-badge">truncated — original {{.OutboundResponseBodyOriginalSize}} bytes</span>{{end}}
       </div>
       <pre class="body-block{{if .OutboundResponseIsJSON}} body-json{{end}}">{{.OutboundResponseBodyText}}</pre>
       {{end}}
@@ -162,7 +193,7 @@
   </div>
   {{end}}
   {{end}}
-</section>
+</div>
 {{end}}
 
 {{end}}

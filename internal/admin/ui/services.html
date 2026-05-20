@@ -1,0 +1,23 @@
+{{define "body"}}
+<div class="page-head">
+  <span class="crumb">Services<span class="sep">/</span></span>
+  <h1>Services seen in the last 24h</h1>
+  <span class="grow"></span>
+  <span class="count" style="font-size:12px; color: var(--text-3);"><b style="color:var(--text-1);">{{len .Services}}</b> service{{if ne (len .Services) 1}}s{{end}}</span>
+</div>
+
+{{if .Error}}<div class="inline-error" role="alert">{{.Error}}</div>{{end}}
+
+{{if .Services}}
+<div class="services-grid">
+  {{range .Services}}
+  <a class="service-card" href="/ui/requests?service={{.}}">
+    <div class="svc-name"><span class="svc-chip"><span class="dot"></span>{{.}}</span></div>
+    <div class="svc-meta">view requests →</div>
+  </a>
+  {{end}}
+</div>
+{{else}}
+<div class="empty-state">No services captured in the last 24 hours.</div>
+{{end}}
+{{end}}

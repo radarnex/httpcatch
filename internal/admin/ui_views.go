@@ -35,6 +35,7 @@ var (
 	listTmpl        = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/requests_list.html"))
 	detailTmpl      = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/requests_detail.html"))
 	eventDetailTmpl = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/events_detail.html"))
+	servicesTmpl    = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/services.html"))
 )
 
 // rootRedirectHandler redirects the root URL to the request list.
@@ -72,6 +73,12 @@ func (r rowView) EventCountText() string {
 	return fmt.Sprintf("%d", *r.RootRow.EventCount)
 }
 
+// EventCountNonZero reports whether the row has at least one correlated event.
+// Used by the template to apply the "has" highlight class to the event pill.
+func (r rowView) EventCountNonZero() bool {
+	return r.RootRow.EventCount != nil && *r.RootRow.EventCount > 0
+}
+
 // StatusText returns the formatted status code or an empty string when unknown.
 func (r rowView) StatusText() string {
 	if r.RootRow.Status == nil {
@@ -80,8 +87,18 @@ func (r rowView) StatusText() string {
 	return fmt.Sprintf("%d", *r.RootRow.Status)
 }
 
+// StatusClassCSS returns the status class suffix used by the CSS `.s-{class}`
+// selectors (2xx, 3xx, 4xx, 5xx, or other). Empty string when status unknown.
+func (r rowView) StatusClassCSS() string {
+	if r.RootRow.Status == nil {
+		return ""
+	}
+	return httpStatusClass(*r.RootRow.Status)
+}
+
 // listPageData is the template data for GET /ui/requests.
 type listPageData struct {
+	Page     string
 	Error    string
 	Services []string
 	Methods  []string
@@ -99,6 +116,7 @@ func requestListHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 		ctx := r.Context()
 
 		data := listPageData{
+			Page:    "explorer",
 			Methods: httpMethods,
 		}
 
@@ -474,19 +492,32 @@ func (ev eventView) IsOutboundEvent() bool {
 // eventDetailPageData is the template data for GET /ui/requests/{id} when the
 // resolved root is a ResponseEvent or OutboundEvent rather than a CapturedRequest.
 type eventDetailPageData struct {
-	NotFound        bool
-	ID              string
-	Root            eventView
-	Events          []eventView
+	Page              string
+	NotFound          bool
+	ID                string
+	Root              eventView
+	Events            []eventView
 	HasRequestSibling bool
 }
 
 // detailPageData is the template data for GET /ui/requests/{id}.
 type detailPageData struct {
+	Page     string
 	NotFound bool
 	ID       string
 	Root     rootView
 	Events   []eventView
+}
+
+// FirstResponse returns the first ResponseEvent in Events, or nil when none.
+// Used by the Response tab in the detail template.
+func (d detailPageData) FirstResponse() *eventView {
+	for i, ev := range d.Events {
+		if ev.IsResponseEvent() {
+			return &d.Events[i]
+		}
+	}
+	return nil
 }
 
 // requestDetailUIHandler returns an http.HandlerFunc for GET /ui/requests/{id}.
@@ -515,7 +546,7 @@ func requestDetailUIHandler(memReader, sqlReader inspect.Reader) http.HandlerFun
 
 		switch root := detail.Root.(type) {
 		case *capture.CapturedRequest:
-			data := detailPageData{Root: rootView{root}}
+			data := detailPageData{Page: "detail", Root: rootView{root}}
 			for _, e := range detail.Events {
 				data.Events = append(data.Events, eventView{record: e})
 			}
@@ -533,6 +564,7 @@ func requestDetailUIHandler(memReader, sqlReader inspect.Reader) http.HandlerFun
 				}
 			}
 			data := eventDetailPageData{
+				Page:              "detail",
 				Root:              eventView{record: detail.Root},
 				Events:            siblings,
 				HasRequestSibling: hasReq,
@@ -548,9 +580,45 @@ func requestDetailUIHandler(memReader, sqlReader inspect.Reader) http.HandlerFun
 
 // renderDetailNotFound writes the 404 HTML page using the detail template.
 func renderDetailNotFound(w http.ResponseWriter, id string) {
-	data := detailPageData{NotFound: true, ID: id}
+	data := detailPageData{Page: "detail", NotFound: true, ID: id}
 	w.WriteHeader(http.StatusNotFound)
 	_ = detailTmpl.ExecuteTemplate(w, "layout", data)
+}
+
+// servicesPageData is the template data for GET /ui/services.
+type servicesPageData struct {
+	Page     string
+	Error    string
+	Services []string
+}
+
+// servicesUIHandler returns an http.HandlerFunc for GET /ui/services.
+// It lists the services seen by either reader over the last `servicesSince`
+// window, sorted alphabetically.
+func servicesUIHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		data := servicesPageData{Page: "services"}
+
+		rd := memReader
+		if rd == nil {
+			rd = sqlReader
+		}
+		if rd != nil {
+			since := time.Now().Add(-servicesSince)
+			svcs, err := rd.ServicesSeen(ctx, since)
+			if err != nil {
+				data.Error = fmt.Sprintf("read error: %v", err)
+			} else {
+				data.Services = svcs
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_ = servicesTmpl.ExecuteTemplate(w, "layout", data)
+	}
 }
 
 // httpStatusClass maps an HTTP status code to a CSS class suffix.

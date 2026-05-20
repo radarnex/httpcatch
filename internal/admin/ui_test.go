@@ -109,7 +109,7 @@ func TestStatic_AppCSS_Returns200WithHeaders(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "text/css; charset=utf-8" {
 		t.Errorf("Content-Type: got %q", ct)
 	}
-	if cc := resp.Header.Get("Cache-Control"); cc != "max-age=3600" {
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
 		t.Errorf("Cache-Control: got %q", cc)
 	}
 	if etag := resp.Header.Get("ETag"); etag == "" {
@@ -136,7 +136,7 @@ func TestStatic_AppJS_Returns200WithHeaders(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "application/javascript; charset=utf-8" {
 		t.Errorf("Content-Type: got %q", ct)
 	}
-	if cc := resp.Header.Get("Cache-Control"); cc != "max-age=3600" {
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
 		t.Errorf("Cache-Control: got %q", cc)
 	}
 	if etag := resp.Header.Get("ETag"); etag == "" {

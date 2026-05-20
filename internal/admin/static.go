@@ -42,10 +42,11 @@ func buildEtags(fsys fs.FS) map[string]string {
 }
 
 // staticHandler returns an http.HandlerFunc that serves embedded CSS/JS assets
-// from /static/*. Files are served with a 1-hour Cache-Control and a strong
-// ETag derived from their SHA-256 digest. It supports conditional GET via
-// If-None-Match. Only extensions listed in allowedExtensions are served; all
-// other paths return 404.
+// from /static/*. Files are served with a strong ETag derived from their
+// SHA-256 digest and Cache-Control: no-cache, so the browser revalidates on
+// every load and picks up new content after each binary upgrade without manual
+// cache-busting. It supports conditional GET via If-None-Match. Only extensions
+// listed in allowedExtensions are served; all other paths return 404.
 func staticHandler(etags map[string]string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// chi wildcard includes the leading slash, e.g. "/app.css"
@@ -82,7 +83,7 @@ func staticHandler(etags map[string]string) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", ct)
-		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("ETag", etag)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
