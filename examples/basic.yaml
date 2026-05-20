@@ -1,0 +1,21 @@
+capture_port: 8080
+
+# How many unprocessed requests can queue before the capture port starts
+# dropping. The default (1024) is fine for most workloads.
+queue_size: 1024
+
+# Maximum request/response body stored per record (bytes). 0 disables capture.
+body_cap: 1048576  # 1 MiB
+
+workers: 2
+
+sinks:
+  memory: true
+  memory_capacity: 1000  # most-recent records kept in RAM for the UI
+  sqlite: true
+  sqlite_path: ./httpcatch.db
+
+admin:
+  bind: 127.0.0.1:8081
+  token: changeme
+  session_ttl: 8h
