@@ -496,3 +496,58 @@ func TestLoad_AdminEnv_InvalidSessionSecure(t *testing.T) {
 		t.Errorf("error %q should mention the env var name", err.Error())
 	}
 }
+
+func TestLoad_LogFormat_Default(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load("", noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LogFormat != "text" {
+		t.Errorf("log_format: got %q want \"text\"", cfg.LogFormat)
+	}
+}
+
+func TestLoad_LogFormat_YAML(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(path, []byte("log_format: json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LogFormat != "json" {
+		t.Errorf("log_format: got %q want \"json\"", cfg.LogFormat)
+	}
+}
+
+func TestLoad_LogFormat_Env(t *testing.T) {
+	t.Parallel()
+
+	env := mapEnv(map[string]string{"HTTPCATCH_LOG_FORMAT": "json"})
+	cfg, err := Load("", env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LogFormat != "json" {
+		t.Errorf("log_format: got %q want \"json\"", cfg.LogFormat)
+	}
+}
+
+func TestLoad_LogFormat_Invalid(t *testing.T) {
+	t.Parallel()
+
+	env := mapEnv(map[string]string{"HTTPCATCH_LOG_FORMAT": "logfmt"})
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("expected error for invalid log_format, got nil")
+	}
+	if !strings.Contains(err.Error(), "log_format") {
+		t.Errorf("error %q should mention log_format", err.Error())
+	}
+}

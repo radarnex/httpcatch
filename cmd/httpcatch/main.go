@@ -59,7 +59,14 @@ func serve(args []string) error {
 		return err
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	var handler slog.Handler
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	if cfg.LogFormat == config.LogFormatJSON {
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	}
+	logger := slog.New(handler)
 
 	a, err := app.Build(cfg, logger, os.Stdout)
 	if err != nil {

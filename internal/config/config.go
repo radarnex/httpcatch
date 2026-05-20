@@ -22,6 +22,8 @@ const (
 	DefaultSQLitePath       = "./httpcatch.db"
 	DefaultAdminBind        = "127.0.0.1:8081"
 	DefaultAdminSessionTTL  = 24 * time.Hour
+	DefaultLogFormat        = "text"
+	LogFormatJSON           = "json"
 )
 
 type SinksConfig struct {
@@ -74,6 +76,7 @@ type Config struct {
 	MaxEventsPayload int             `yaml:"max_events_payload"`
 	Workers          int             `yaml:"workers"`
 	ServiceHeader    string          `yaml:"service_header"`
+	LogFormat        string          `yaml:"log_format"`
 	Sinks            SinksConfig     `yaml:"sinks"`
 	Redaction        RedactionConfig
 	Admin            AdminConfig
@@ -87,6 +90,7 @@ func Defaults() Config {
 		MaxEventsPayload: DefaultMaxEventsPayload,
 		Workers:          runtime.NumCPU(),
 		ServiceHeader:    DefaultServiceHeader,
+		LogFormat:        DefaultLogFormat,
 		Sinks: SinksConfig{
 			MemoryCapacity: DefaultMemoryCapacity,
 			SQLitePath:     DefaultSQLitePath,
@@ -183,6 +187,7 @@ type rawConfig struct {
 	MaxEventsPayload *int                `yaml:"max_events_payload"`
 	Workers          *int                `yaml:"workers"`
 	ServiceHeader    *string             `yaml:"service_header"`
+	LogFormat        *string             `yaml:"log_format"`
 	Sinks            rawSinks            `yaml:"sinks"`
 	Redaction        *rawRedactionConfig `yaml:"redaction"`
 	Admin            *rawAdminConfig     `yaml:"admin"`
@@ -233,6 +238,9 @@ func applyRaw(cfg *Config, raw rawConfig) error {
 	}
 	if raw.ServiceHeader != nil {
 		cfg.ServiceHeader = *raw.ServiceHeader
+	}
+	if raw.LogFormat != nil {
+		cfg.LogFormat = *raw.LogFormat
 	}
 	if raw.Sinks.Stdout != nil {
 		cfg.Sinks.Stdout = *raw.Sinks.Stdout
@@ -317,6 +325,9 @@ func applyEnv(cfg *Config, env func(string) string) error {
 	if v := env("HTTPCATCH_SERVICE_HEADER"); v != "" {
 		cfg.ServiceHeader = v
 	}
+	if v := env("HTTPCATCH_LOG_FORMAT"); v != "" {
+		cfg.LogFormat = v
+	}
 	if v := env("HTTPCATCH_SQLITE_PATH"); v != "" {
 		cfg.Sinks.SQLitePath = v
 	}
@@ -400,6 +411,9 @@ func (c Config) Validate() error {
 	}
 	if c.Sinks.SQLite && c.Sinks.SQLitePath == "" {
 		errs = append(errs, fmt.Errorf("sinks.sqlite_path: must be set when sinks.sqlite is true"))
+	}
+	if c.LogFormat != DefaultLogFormat && c.LogFormat != LogFormatJSON {
+		errs = append(errs, fmt.Errorf("log_format: must be %q or %q, got %q", DefaultLogFormat, LogFormatJSON, c.LogFormat))
 	}
 	return errors.Join(errs...)
 }

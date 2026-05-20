@@ -9,7 +9,12 @@ body_cap: 1048576  # 1 MiB
 
 workers: 2
 
+# Log output format: "text" (default, human-readable) or "json" (structured).
+# Can also be set via HTTPCATCH_LOG_FORMAT env var.
+# log_format: json
+
 sinks:
+  stdout: true
   memory: true
   memory_capacity: 1000  # most-recent records kept in RAM for the UI
   sqlite: true
