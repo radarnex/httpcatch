@@ -116,17 +116,24 @@ func fire(t *testing.T, url, method string, body []byte, hdr http.Header) *http.
 	return resp
 }
 
+// json.Unmarshal base64-decodes []byte fields; Body is plain text in stdout output.
+type stdoutRequest struct {
+	capture.CapturedRequest
+	Body string `json:"body"`
+}
+
 func decodeLines(s string) ([]capture.CapturedRequest, error) {
 	out := []capture.CapturedRequest{}
 	for line := range strings.SplitSeq(strings.TrimRight(s, "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		var r capture.CapturedRequest
+		var r stdoutRequest
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			return nil, fmt.Errorf("line %q: %w", line, err)
 		}
-		out = append(out, r)
+		r.CapturedRequest.Body = []byte(r.Body)
+		out = append(out, r.CapturedRequest)
 	}
 	return out, nil
 }

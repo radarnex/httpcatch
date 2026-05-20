@@ -55,7 +55,7 @@ type requestEnvelopeT struct {
 	Query             map[string][]string `json:"query"`
 	Headers           map[string][]string `json:"headers"`
 	Cookies           []capture.Cookie    `json:"cookies"`
-	Body              []byte              `json:"body"`
+	Body              string              `json:"body"`
 	BodyTruncated     bool                `json:"body_truncated"`
 	BodyOriginalSize  int                 `json:"body_original_size"`
 	ContentType       string              `json:"content_type"`
@@ -76,7 +76,7 @@ func requestEnvelope(r *capture.CapturedRequest) requestEnvelopeT {
 		Query:             r.Query,
 		Headers:           r.Headers,
 		Cookies:           r.Cookies,
-		Body:              r.Body,
+		Body:              string(r.Body),
 		BodyTruncated:     r.BodyTruncated,
 		BodyOriginalSize:  r.BodyOriginalSize,
 		ContentType:       r.ContentType,
@@ -99,7 +99,7 @@ type responseEnvelopeT struct {
 	ServiceSource     string              `json:"service_source"`
 	Status            int                 `json:"status"`
 	Headers           map[string][]string `json:"headers"`
-	Body              []byte              `json:"body"`
+	Body              string              `json:"body"`
 	BodyTruncated     bool                `json:"body_truncated"`
 	BodyOriginalSize  int                 `json:"body_original_size"`
 	ContentType       string              `json:"content_type"`
@@ -117,7 +117,7 @@ func responseEnvelope(r *capture.ResponseEvent) responseEnvelopeT {
 		ServiceSource:     r.ServiceSource,
 		Status:            r.Status,
 		Headers:           r.Headers,
-		Body:              r.Body,
+		Body:              string(r.Body),
 		BodyTruncated:     r.BodyTruncated,
 		BodyOriginalSize:  r.BodyOriginalSize,
 		ContentType:       r.ContentType,
@@ -125,22 +125,41 @@ func responseEnvelope(r *capture.ResponseEvent) responseEnvelopeT {
 	}
 }
 
+type outboundRequestHalfEnvT struct {
+	Method           string              `json:"method"`
+	Path             string              `json:"path"`
+	Headers          map[string][]string `json:"headers"`
+	Body             string              `json:"body"`
+	BodyTruncated    bool                `json:"body_truncated"`
+	BodyOriginalSize int                 `json:"body_original_size"`
+	ContentType      string              `json:"content_type"`
+}
+
+type outboundResponseHalfEnvT struct {
+	Status           int                 `json:"status"`
+	Headers          map[string][]string `json:"headers"`
+	Body             string              `json:"body"`
+	BodyTruncated    bool                `json:"body_truncated"`
+	BodyOriginalSize int                 `json:"body_original_size"`
+	ContentType      string              `json:"content_type"`
+}
+
 // outboundEnvelopeT is the stable JSON shape for the outbound_event variant.
 type outboundEnvelopeT struct {
-	Kind              capture.RecordKind           `json:"kind"`
-	ID                string                       `json:"id"`
-	Timestamp         time.Time                    `json:"timestamp"`
-	CorrelationID     string                       `json:"correlation_id"`
-	CorrelationSource string                       `json:"correlation_source"`
-	Service           string                       `json:"service"`
-	ServiceSource     string                       `json:"service_source"`
-	DurationMS        int64                        `json:"duration_ms"`
-	Request           capture.OutboundRequestHalf  `json:"request"`
-	Response          *capture.OutboundResponseHalf `json:"response"`
+	Kind              capture.RecordKind        `json:"kind"`
+	ID                string                    `json:"id"`
+	Timestamp         time.Time                 `json:"timestamp"`
+	CorrelationID     string                    `json:"correlation_id"`
+	CorrelationSource string                    `json:"correlation_source"`
+	Service           string                    `json:"service"`
+	ServiceSource     string                    `json:"service_source"`
+	DurationMS        int64                     `json:"duration_ms"`
+	Request           outboundRequestHalfEnvT   `json:"request"`
+	Response          *outboundResponseHalfEnvT `json:"response"`
 }
 
 func outboundEnvelope(r *capture.OutboundEvent) outboundEnvelopeT {
-	return outboundEnvelopeT{
+	env := outboundEnvelopeT{
 		Kind:              capture.KindOutboundEvent,
 		ID:                r.ID,
 		Timestamp:         r.Timestamp,
@@ -149,7 +168,25 @@ func outboundEnvelope(r *capture.OutboundEvent) outboundEnvelopeT {
 		Service:           r.Service,
 		ServiceSource:     r.ServiceSource,
 		DurationMS:        r.DurationMS,
-		Request:           r.Request,
-		Response:          r.Response,
+		Request: outboundRequestHalfEnvT{
+			Method:           r.Request.Method,
+			Path:             r.Request.Path,
+			Headers:          r.Request.Headers,
+			Body:             string(r.Request.Body),
+			BodyTruncated:    r.Request.BodyTruncated,
+			BodyOriginalSize: r.Request.BodyOriginalSize,
+			ContentType:      r.Request.ContentType,
+		},
 	}
+	if r.Response != nil {
+		env.Response = &outboundResponseHalfEnvT{
+			Status:           r.Response.Status,
+			Headers:          r.Response.Headers,
+			Body:             string(r.Response.Body),
+			BodyTruncated:    r.Response.BodyTruncated,
+			BodyOriginalSize: r.Response.BodyOriginalSize,
+			ContentType:      r.Response.ContentType,
+		}
+	}
+	return env
 }
