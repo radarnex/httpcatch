@@ -167,13 +167,21 @@ func (a *App) EmitStartupWarnings() {
 // shutdown of the other. On shutdown the queue is closed and the worker pool
 // is given shutdownDrainTimeout to drain; a stuck sink cannot wedge shutdown
 // forever.
+//
+// Sink writes use sinkCtx, which is decoupled from ctx so that records still
+// in the queue when SIGTERM arrives can be persisted by the drain phase. ctx
+// cancellation aborts the HTTP servers immediately; sinkCtx is cancelled only
+// after the drain completes (or its timeout elapses).
 func (a *App) Serve(ctx context.Context) error {
-	a.Workers.Start(ctx)
+	sinkCtx, cancelSinks := context.WithCancel(context.Background())
+	defer cancelSinks()
+
+	a.Workers.Start(sinkCtx)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", a.Cfg.CapturePort)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		a.shutdown()
+		a.shutdown(cancelSinks)
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	captureServer := &http.Server{Handler: a.Handler}
@@ -214,19 +222,28 @@ func (a *App) Serve(ctx context.Context) error {
 		_ = captureServer.Shutdown(shutCtx)
 		cancel()
 	}
-	a.shutdown()
+	a.shutdown(cancelSinks)
 	return serveErr
 }
 
-func (a *App) shutdown() {
+// shutdown closes the capture queue and waits up to shutdownDrainTimeout for
+// the worker pool to drain remaining records into sinks. sinkCtx stays alive
+// throughout the drain so ctx-aware sinks (notably SQLite via database/sql)
+// can complete writes that were queued before SIGTERM. On timeout, cancelSinks
+// aborts any in-flight write so workers exit before SQLite.Close runs;
+// surviving workers may race with sink Close but bounded shutdown is preferred
+// over wedging. On the clean-drain path Serve's deferred cancelSinks handles
+// cleanup.
+func (a *App) shutdown(cancelSinks context.CancelFunc) {
 	a.Queue.Close()
 	done := make(chan struct{})
 	go func() { a.Workers.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(shutdownDrainTimeout):
-		a.Logger.Warn("workers did not drain within timeout; exiting with possible record loss",
+		a.Logger.Warn("workers did not drain within timeout; aborting in-flight sink writes",
 			"timeout", shutdownDrainTimeout)
+		cancelSinks()
 	}
 	if a.SQLite != nil {
 		if err := a.SQLite.Close(); err != nil {

@@ -1702,6 +1702,67 @@ func TestIntegration_AdminPort_HealthzIgnoresBogusAuth(t *testing.T) {
 	}
 }
 
+// TestIntegration_ShutdownDrainsQueueToCtxAwareSink verifies that records
+// already in the capture queue when Serve's context is cancelled are still
+// written to ctx-aware sinks during shutdown drain. A slowSink delays each
+// write and returns ctx.Err() on cancellation; if workers received the
+// cancelled root ctx the drain would abort and records would be lost.
+func TestIntegration_ShutdownDrainsQueueToCtxAwareSink(t *testing.T) {
+	t.Parallel()
+
+	adminAddr := freeAddr(t)
+	captureAddr := freeAddr(t)
+
+	cfg := config.Defaults()
+	cfg.CapturePort = mustPort(t, captureAddr)
+	cfg.Admin.Bind = adminAddr
+	cfg.Workers = 1
+	cfg.QueueSize = 32
+
+	const records = 5
+	const perWriteDelay = 100 * time.Millisecond
+
+	memSink := sinks.NewMemorySink(100)
+	slow := &slowSink{inner: memSink, delay: perWriteDelay}
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard, slow)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Serve(ctx) }()
+
+	waitPort(t, captureAddr, 3*time.Second)
+
+	for i := range records {
+		body := fmt.Sprintf("payload-%d", i)
+		resp, err := http.Post("http://"+captureAddr+"/drain-test", "text/plain", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("capture POST %d: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("capture POST %d: got %d want 202", i, resp.StatusCode)
+		}
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return after context cancel")
+	}
+
+	got := memSink.Recent(records + 1)
+	if len(got) != records {
+		t.Fatalf("memory sink recorded %d records after shutdown drain; want %d (records enqueued before SIGTERM must survive drain)", len(got), records)
+	}
+}
+
 // mustPort extracts the port number from "host:port".
 func mustPort(t *testing.T, addr string) int {
 	t.Helper()

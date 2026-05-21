@@ -79,6 +79,9 @@ const sqlitePragmas = `
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA busy_timeout = 5000;
+PRAGMA temp_store = MEMORY;
+PRAGMA cache_size = -64000;
+PRAGMA mmap_size = 268435456;
 `
 
 const sqliteInsertRequest = `INSERT INTO captured_requests (
@@ -104,10 +107,11 @@ type SQLiteSink struct {
 	stmtEvent   *sql.Stmt
 }
 
-// NewSQLiteSink opens (or creates) the SQLite database at path, applies WAL
-// and synchronous=NORMAL pragmas, ensures the schema, and prepares the
-// insert statements. The configured directory must already exist and be
-// writable; startup fails otherwise.
+// NewSQLiteSink opens (or creates) the SQLite database at path, applies the
+// runtime pragmas (journal, synchronous, busy_timeout, temp_store, cache_size,
+// mmap_size), ensures the schema, and prepares the insert statements. The
+// configured directory must already exist and be writable; startup fails
+// otherwise.
 func NewSQLiteSink(path string) (*SQLiteSink, error) {
 	if path == "" {
 		return nil, fmt.Errorf("sqlite path is empty")

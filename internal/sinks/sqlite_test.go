@@ -102,6 +102,36 @@ func TestSQLiteSink_SchemaPragmasAndIndexes(t *testing.T) {
 		t.Errorf("synchronous: got %d want 1 (NORMAL)", sync)
 	}
 
+	// temp_store=MEMORY keeps sort/group/distinct spill in heap so the runtime
+	// has no dependency on a writable temp directory (containers with
+	// readOnlyRootFilesystem).
+	var tempStore int
+	if err := s.DB().QueryRow("PRAGMA temp_store").Scan(&tempStore); err != nil {
+		t.Fatalf("PRAGMA temp_store: %v", err)
+	}
+	// 2 == MEMORY per https://www.sqlite.org/pragma.html#pragma_temp_store
+	if tempStore != 2 {
+		t.Errorf("temp_store: got %d want 2 (MEMORY)", tempStore)
+	}
+
+	// cache_size is set in KB (negative). -64000 == 64 MiB page cache.
+	var cacheSize int
+	if err := s.DB().QueryRow("PRAGMA cache_size").Scan(&cacheSize); err != nil {
+		t.Fatalf("PRAGMA cache_size: %v", err)
+	}
+	if cacheSize != -64000 {
+		t.Errorf("cache_size: got %d want -64000", cacheSize)
+	}
+
+	// mmap_size is per-connection. 268435456 == 256 MiB.
+	var mmapSize int64
+	if err := s.DB().QueryRow("PRAGMA mmap_size").Scan(&mmapSize); err != nil {
+		t.Fatalf("PRAGMA mmap_size: %v", err)
+	}
+	if mmapSize != 268435456 {
+		t.Errorf("mmap_size: got %d want 268435456", mmapSize)
+	}
+
 	wantIndexes := []string{
 		"idx_captured_requests_timestamp",
 		"idx_captured_requests_service",
