@@ -12,6 +12,7 @@ import (
 
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/inspect"
+	"github.com/radarnex/httpcatch/internal/searchql"
 )
 
 // sqliteReadRootsBase is the captured-requests portion of the UNION query,
@@ -90,55 +91,17 @@ func (s *SQLiteSink) ReadRoots(ctx context.Context, q inspect.InspectQuery, limi
 		reqWhere = append(reqWhere, "cr.timestamp < ?")
 		reqArgs = append(reqArgs, q.Until.UnixNano())
 	}
-	if q.Service != "" {
-		reqWhere = append(reqWhere, "cr.service = ?")
-		reqArgs = append(reqArgs, q.Service)
-	}
-	if q.Method != "" {
-		reqWhere = append(reqWhere, "cr.method = ?")
-		reqArgs = append(reqArgs, q.Method)
-	}
-	if q.Path != "" {
-		reqWhere = append(reqWhere, "cr.path LIKE ?")
-		reqArgs = append(reqArgs, q.Path+"%")
-	}
-	if q.CorrelationID != "" {
-		reqWhere = append(reqWhere, "cr.correlation_id = ?")
-		reqArgs = append(reqArgs, q.CorrelationID)
-	}
-	if q.SourceIP != "" {
-		reqWhere = append(reqWhere, "cr.source_ip = ?")
-		reqArgs = append(reqArgs, q.SourceIP)
-	}
-	if q.Body != "" {
-		reqWhere = append(reqWhere, "cr.body LIKE ?")
-		reqArgs = append(reqArgs, "%"+q.Body+"%")
+	if termSQL, termArgs := searchql.CompileSQL(q.Query); termSQL != "" {
+		reqWhere = append(reqWhere, termSQL)
+		reqArgs = append(reqArgs, termArgs...)
 	}
 
 	var reqHaving []string
 	var reqHavingArgs []any
 
-	if q.Status != nil {
-		if q.Status.Exact != 0 {
-			reqHaving = append(reqHaving, "MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) = ?")
-			reqHavingArgs = append(reqHavingArgs, q.Status.Exact)
-		} else {
-			lo := int(q.Status.Class[0]-'0') * 100
-			hi := lo + 99
-			reqHaving = append(reqHaving,
-				"MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) BETWEEN ? AND ?")
-			reqHavingArgs = append(reqHavingArgs, lo, hi)
-		}
-	}
-	if q.HasEvents != nil {
-		if *q.HasEvents {
-			reqHaving = append(reqHaving, "COUNT(e.id) > 0")
-		} else {
-			// has_events=false: captured requests with no correlated events.
-			// This does NOT include orphan events; orphan rows are excluded entirely
-			// when has_events is set (see orphan arm below).
-			reqHaving = append(reqHaving, "COUNT(e.id) = 0")
-		}
+	if havingSQL, havingArgs := searchql.CompileSQLHaving(q.Query); havingSQL != "" {
+		reqHaving = append(reqHaving, havingSQL)
+		reqHavingArgs = append(reqHavingArgs, havingArgs...)
 	}
 
 	reqQuery := sqliteReadRootsBase
@@ -175,26 +138,9 @@ func (s *SQLiteSink) ReadRoots(ctx context.Context, q inspect.InspectQuery, limi
 			orphanWhere = append(orphanWhere, "e.timestamp < ?")
 			orphanArgs = append(orphanArgs, q.Until.UnixNano())
 		}
-		if q.Service != "" {
-			orphanWhere = append(orphanWhere, "e.service = ?")
-			orphanArgs = append(orphanArgs, q.Service)
-		}
-		if q.CorrelationID != "" {
-			orphanWhere = append(orphanWhere, "e.correlation_id = ?")
-			orphanArgs = append(orphanArgs, q.CorrelationID)
-		}
-		if q.Status != nil {
-			// status on orphan_response matches the event's own status field.
-			// Outbound orphans have NULL status and are excluded by any status filter.
-			if q.Status.Exact != 0 {
-				orphanWhere = append(orphanWhere, "e.type = 'response' AND e.status = ?")
-				orphanArgs = append(orphanArgs, q.Status.Exact)
-			} else {
-				lo := int(q.Status.Class[0]-'0') * 100
-				hi := lo + 99
-				orphanWhere = append(orphanWhere, "e.type = 'response' AND e.status BETWEEN ? AND ?")
-				orphanArgs = append(orphanArgs, lo, hi)
-			}
+		if orphanSQL, orphArgs := searchql.CompileSQLOrphans(q.Query); orphanSQL != "" {
+			orphanWhere = append(orphanWhere, orphanSQL)
+			orphanArgs = append(orphanArgs, orphArgs...)
 		}
 
 		orphanQuery = sqliteOrphansBase

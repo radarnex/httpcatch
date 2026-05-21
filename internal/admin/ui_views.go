@@ -16,6 +16,7 @@ import (
 
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/inspect"
+	"github.com/radarnex/httpcatch/internal/searchql"
 )
 
 // httpMethods is the ordered list of HTTP verbs shown in the method dropdown.
@@ -47,17 +48,95 @@ func rootRedirectHandler() http.HandlerFunc {
 	}
 }
 
-// listQueryView carries the raw filter strings as entered by the operator.
-// These are round-tripped from the URL into the form so the operator sees
-// the current filter state.
+// listQueryView carries the raw filter strings as entered by the operator,
+// round-tripped from the URL into the form so the operator sees the current
+// filter state. Q is the verbatim search query; Chips renders one entry per
+// parsed term and is empty when q failed to parse.
 type listQueryView struct {
-	Service   string
-	Method    string
-	Path      string
-	Body      string
-	StatusRaw string
-	SinceRaw  string
-	UntilRaw  string
+	Q        string
+	SinceRaw string
+	UntilRaw string
+	Chips    []chipView
+}
+
+// chipView is one server-rendered chip above the search input. Token is the
+// full reconstructed token text (including any leading `-`, wildcards, and
+// surrounding quotes) so the chip's `×` button can drop the exact substring
+// from the submitted `q`. Key and Value drive the chip's visual rendering;
+// Negated toggles the dim/minus styling. IsHeader marks `headers:` and
+// `header.<name>:` chips so the template can give them a distinct visual;
+// IsFreeform marks bare (no `key:`) terms so they render with an "any" pill
+// instead of the `key:` segment.
+type chipView struct {
+	Token      string
+	Key        string
+	Value      string
+	Negated    bool
+	IsHeader   bool
+	IsFreeform bool
+}
+
+// chipsFromQuery walks a parsed searchql.Query and produces the chip list for
+// server-side rendering. Status terms render using their original form (e.g.
+// "200" or "2xx"); quoted, wildcarded, and negated terms round-trip into both
+// the visible Value and the data-token round-trip string. Per-header terms
+// (Field == FieldHeader) carry the canonical name in the visible Key so the
+// chip reads `header.User-Agent` rather than just `header`.
+func chipsFromQuery(q searchql.Query) []chipView {
+	if len(q.Terms) == 0 {
+		return nil
+	}
+	chips := make([]chipView, 0, len(q.Terms))
+	for _, t := range q.Terms {
+		value := chipDisplayValue(t)
+		key := string(t.Field)
+		if t.Field == searchql.FieldHeader {
+			key = "header." + t.HeaderName
+		}
+		freeform := t.Field == ""
+		var token string
+		if freeform {
+			token = value
+		} else {
+			token = key + ":" + value
+		}
+		if t.Negated {
+			token = "-" + token
+		}
+		chips = append(chips, chipView{
+			Token:      token,
+			Key:        key,
+			Value:      value,
+			Negated:    t.Negated,
+			IsHeader:   t.Field == searchql.FieldHeaders || t.Field == searchql.FieldHeader,
+			IsFreeform: freeform,
+		})
+	}
+	return chips
+}
+
+// chipDisplayValue renders a term's value back to its surface form: status
+// terms use the original Exact/Class text; quoted values are wrapped in `"…"`
+// with `"` re-escaped; wildcarded values prepend or append `*` according to
+// the parsed shape; bare values pass through.
+func chipDisplayValue(t searchql.Term) string {
+	if t.StatusFilter != nil {
+		if t.StatusFilter.Exact != 0 {
+			return fmt.Sprintf("%d", t.StatusFilter.Exact)
+		}
+		return t.StatusFilter.Class
+	}
+	if t.QuotedLiteral {
+		return `"` + strings.ReplaceAll(t.Value, `"`, `\"`) + `"`
+	}
+	switch t.Wildcard {
+	case searchql.WildcardPrefix:
+		return t.Value + "*"
+	case searchql.WildcardSubstring:
+		return "*" + t.Value + "*"
+	default:
+		return t.Value
+	}
 }
 
 // rowView wraps a RootRow for the list template.
@@ -104,6 +183,10 @@ type listPageData struct {
 	Methods  []string
 	Query    listQueryView
 	Rows     []rowView
+	// UnindexedScan is true when the parsed query has the structural
+	// cost-class property — a leading wildcard against an indexed field. The
+	// template renders the amber warning banner under the search bar when set.
+	UnindexedScan bool
 	// NextURL is the full href for the Next pagination link. It uses
 	// template.URL so Go's html/template does not re-encode the query string.
 	// An empty value means there is no further page.
@@ -135,13 +218,9 @@ func requestListHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 		// Round-trip raw filter strings into the form.
 		vals := r.URL.Query()
 		data.Query = listQueryView{
-			Service:   vals.Get("service"),
-			Method:    vals.Get("method"),
-			Path:      vals.Get("path"),
-			Body:      vals.Get("body"),
-			StatusRaw: vals.Get("status"),
-			SinceRaw:  vals.Get("since"),
-			UntilRaw:  vals.Get("until"),
+			Q:        vals.Get("q"),
+			SinceRaw: vals.Get("since"),
+			UntilRaw: vals.Get("until"),
 		}
 
 		q, fieldErrs := parseInspectQuery(vals)
@@ -150,6 +229,8 @@ func requestListHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 			renderList(w, data, http.StatusOK)
 			return
 		}
+		data.Query.Chips = chipsFromQuery(q.Query)
+		data.UnindexedScan = q.Query.IsUnindexedScan()
 
 		rows, nextCur, _, err := gatherRoots(ctx, q, memReader, sqlReader)
 		if err != nil {

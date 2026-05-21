@@ -352,9 +352,9 @@ func TestIntegration_HeadlineE2E(t *testing.T) {
 		}
 	}
 
-	// --- Step 6: GET /requests?status=5xx → captured request visible via events join ---
+	// --- Step 6: GET /requests?q=status:5xx → captured request visible via events join ---
 
-	status5xxRecs := getRequestsList(t, adminURL, "status=5xx")
+	status5xxRecs := getRequestsList(t, adminURL, "q=status%3A5xx")
 	found5xx := false
 	for _, r := range status5xxRecs {
 		if r["id"] == capturedRequestID {
@@ -363,7 +363,7 @@ func TestIntegration_HeadlineE2E(t *testing.T) {
 		}
 	}
 	if !found5xx {
-		t.Errorf("captured request not found in status=5xx filter; got ids: %v", func() []string {
+		t.Errorf("captured request not found in q=status:5xx filter; got ids: %v", func() []string {
 			var ids []string
 			for _, r := range status5xxRecs {
 				ids = append(ids, r["id"].(string))
@@ -463,7 +463,7 @@ func TestIntegration_HeadlineE2E(t *testing.T) {
 
 	// Query by correlation_id to force SQLite path, which computes event_count
 	// via the events JOIN. The request row should show event_count >= 1.
-	sqliteRecs := getRequestsList(t, adminURL, "correlation_id="+orphanCorrID)
+	sqliteRecs := getRequestsList(t, adminURL, "q=correlation_id%3A"+orphanCorrID)
 	var reconciledReq map[string]any
 	for _, r := range sqliteRecs {
 		if r["kind"] == "request" {
@@ -472,7 +472,7 @@ func TestIntegration_HeadlineE2E(t *testing.T) {
 		}
 	}
 	if reconciledReq == nil {
-		t.Fatal("reconciled request not found in GET /requests?correlation_id=...")
+		t.Fatal("reconciled request not found in GET /requests?q=correlation_id:...")
 	}
 	ec, _ := reconciledReq["event_count"].(float64)
 	if int(ec) < 1 {

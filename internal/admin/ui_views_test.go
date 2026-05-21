@@ -216,12 +216,11 @@ func TestUIRequests_FilterFormPresent(t *testing.T) {
 		t.Error("filter form with action=/ui/requests not found")
 	}
 
-	// Confirm the service, method, status, path, since, until inputs exist.
-	for _, name := range []string{"service", "method", "status", "path", "since", "until"} {
-		found := findElements(doc, "select", "name", name)
+	// Confirm the q, since, until hidden inputs exist.
+	for _, name := range []string{"q", "since", "until"} {
 		foundInput := findElements(doc, "input", "name", name)
-		if len(found) == 0 && len(foundInput) == 0 {
-			t.Errorf("filter input/select with name=%q not found", name)
+		if len(foundInput) == 0 {
+			t.Errorf("filter input with name=%q not found", name)
 		}
 	}
 }
@@ -231,7 +230,8 @@ func TestUIRequests_FilterRoundTrip(t *testing.T) {
 
 	ts := newUIViewServer(t, admin.ReadSources{})
 
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests?method=POST&status=200&path=/api", nil)
+	q := "method:POST status:200 path:/api"
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests?q="+url.QueryEscape(q), nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "text/html")
 	resp, err := http.DefaultClient.Do(req)
@@ -243,11 +243,313 @@ func TestUIRequests_FilterRoundTrip(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
 
-	// Each filter value must round-trip into its hidden mirror input.
-	for _, want := range []string{`value="POST"`, `value="200"`, `value="/api"`} {
+	// The q hidden input must round-trip the verbatim query string.
+	if !strings.Contains(s, `value="`+q+`"`) {
+		t.Errorf("q value not round-tripped into hidden input; got HTML %q", truncate(s, 400))
+	}
+
+	// One chip is rendered per parsed term.
+	for _, want := range []string{`data-key="method"`, `data-key="status"`, `data-key="path"`} {
 		if !strings.Contains(s, want) {
-			t.Errorf("filter value not found in rendered HTML: %s", want)
+			t.Errorf("expected chip attribute %q in rendered HTML", want)
 		}
+	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func TestUIRequests_ChipsForWildcardQuotedNegated(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+
+	q := `-host:billing-api* path:"/signup/*" body:*login*`
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests?q="+url.QueryEscape(q), nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	req.Header.Set("Accept", "text/html")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+
+	// Negated chip carries the is-negated class and the leading-minus glyph.
+	if !strings.Contains(s, `class="qchip is-negated"`) {
+		t.Errorf("negated chip class not rendered; HTML: %q", truncate(s, 800))
+	}
+
+	// data-token rounds-trips the literal token text (including `-`, quotes,
+	// and `*`s) so chip removal can drop the exact substring from `q`.
+	for _, want := range []string{
+		`data-token="-host:billing-api*"`,
+		`data-token="path:&#34;/signup/*&#34;"`,
+		`data-token="body:*login*"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expected token %q in HTML", want)
+		}
+	}
+
+	// The visible chip value re-displays wildcards and quotes verbatim.
+	for _, want := range []string{
+		`data-value="billing-api*"`,
+		`data-value="&#34;/signup/*&#34;"`,
+		`data-value="*login*"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expected visible value %q in HTML", want)
+		}
+	}
+}
+
+func TestUIRequests_HeaderChips_Rendering(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+
+	// Mixed-case header name canonicalises to "User-Agent"; chip key reads
+	// "header.User-Agent" so the operator sees the field they targeted.
+	q := `headers:foo header.user-agent:client/0.3 -header.X-Trace-Id:abc`
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests?q="+url.QueryEscape(q), nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	req.Header.Set("Accept", "text/html")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+
+	// Header chips carry the is-header class so CSS can distinguish them.
+	if !strings.Contains(s, `class="qchip is-header"`) {
+		t.Error(`expected at least one "qchip is-header" rendering`)
+	}
+
+	// The named-header chip's key includes the canonicalised header name.
+	if !strings.Contains(s, `data-key="header.User-Agent"`) {
+		t.Errorf("expected canonical header key in chip; HTML: %q", truncate(s, 800))
+	}
+
+	// data-token re-emits the operator-typed-ish form (canonical name preserved
+	// so chip removal drops the equivalent token from `q`).
+	for _, want := range []string{
+		`data-token="headers:foo"`,
+		`data-token="header.User-Agent:client/0.3"`,
+		`data-token="-header.X-Trace-Id:abc"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expected data-token %q in HTML", want)
+		}
+	}
+
+	// The `H` pill marker appears for each header chip.
+	if !strings.Contains(s, `class="qhdr"`) {
+		t.Error(`expected "qhdr" pill marker on header chip`)
+	}
+}
+
+func TestUIRequests_HeaderPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+	resp := getUIPage(t, ts, "/ui/requests")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	want := "service:billing-api host:*.svc.local body:error -path:/health header.user-agent:client"
+	if !strings.Contains(s, want) {
+		t.Errorf("placeholder copy must match the locked example string %q", want)
+	}
+}
+
+func TestUIRequests_FreeformChips_Rendering(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+
+	q := `billing-api -orders service:foo`
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests?q="+url.QueryEscape(q), nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	req.Header.Set("Accept", "text/html")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+
+	// Freeform chip carries is-freeform class and the "any" pill.
+	if !strings.Contains(s, `class="qchip is-freeform"`) {
+		t.Errorf("freeform chip class not rendered; HTML: %q", truncate(s, 800))
+	}
+	if !strings.Contains(s, `class="qany"`) {
+		t.Error(`expected "qany" pill marker on freeform chip`)
+	}
+
+	// Negated freeform chip carries both is-freeform and is-negated.
+	if !strings.Contains(s, `class="qchip is-freeform is-negated"`) {
+		t.Errorf("negated freeform chip class not rendered; HTML: %q", truncate(s, 800))
+	}
+
+	// data-token round-trips the bare token (no key: prefix on freeform).
+	if !strings.Contains(s, `data-token="billing-api"`) {
+		t.Error(`expected data-token="billing-api" for freeform chip`)
+	}
+	if !strings.Contains(s, `data-token="-orders"`) {
+		t.Error(`expected data-token="-orders" for negated freeform chip`)
+	}
+
+	// Field-qualified chip stays unchanged.
+	if !strings.Contains(s, `data-token="service:foo"`) {
+		t.Error(`expected data-token="service:foo" for field-qualified chip`)
+	}
+}
+
+func TestUIRequests_ScanBanner_RendersForQualifyingQuery(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+	resp := getUIPage(t, ts, "/ui/requests?q="+url.QueryEscape("host:*api*"))
+	defer resp.Body.Close()
+
+	doc := parseHTML(t, resp.Body)
+	banners := findElements(doc, "div", "id", "scan-banner")
+	if len(banners) != 1 {
+		t.Fatalf("scan-banner: got %d elements want 1", len(banners))
+	}
+	banner := banners[0]
+	if hasAttr(banner, "hidden", "") {
+		t.Error("scan-banner: hidden attribute must be absent for a qualifying query")
+	}
+	text := innerText(banner)
+	if !strings.Contains(text, "Unindexed scan") {
+		t.Errorf("scan-banner text %q does not contain locked headline", text)
+	}
+	if !strings.Contains(text, "host/path/service") {
+		t.Errorf("scan-banner text %q does not mention indexed dimensions", text)
+	}
+	// The banner has no close button — operators cannot dismiss it.
+	if buttons := findElements(banner, "button", "", ""); len(buttons) != 0 {
+		t.Errorf("scan-banner: expected no buttons, got %d", len(buttons))
+	}
+}
+
+func TestUIRequests_ScanBanner_OmittedForNonQualifyingQuery(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+
+	cases := []string{
+		"",
+		"host:billing-api",
+		"host:billing-api*",
+		"body:*foo*",
+		"headers:foo",
+		"header.user-agent:foo",
+	}
+	for _, q := range cases {
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			path := "/ui/requests"
+			if q != "" {
+				path += "?q=" + url.QueryEscape(q)
+			}
+			resp := getUIPage(t, ts, path)
+			defer resp.Body.Close()
+			doc := parseHTML(t, resp.Body)
+			banners := findElements(doc, "div", "id", "scan-banner")
+			if len(banners) != 1 {
+				t.Fatalf("scan-banner: got %d elements want 1 (always in DOM, just hidden)", len(banners))
+			}
+			if !hasAttr(banners[0], "hidden", "") {
+				t.Errorf("scan-banner: expected hidden for non-qualifying query %q", q)
+			}
+		})
+	}
+}
+
+func TestUIRequests_ScanBanner_NegationStillQualifies(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+	resp := getUIPage(t, ts, "/ui/requests?q="+url.QueryEscape("-host:*foo*"))
+	defer resp.Body.Close()
+	doc := parseHTML(t, resp.Body)
+	banners := findElements(doc, "div", "id", "scan-banner")
+	if len(banners) != 1 || hasAttr(banners[0], "hidden", "") {
+		t.Error("scan-banner: expected visible for negated leading-wildcard query")
+	}
+}
+
+func TestUIRequests_OrHintElement_PresentHiddenByDefault(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+	resp := getUIPage(t, ts, "/ui/requests")
+	defer resp.Body.Close()
+	doc := parseHTML(t, resp.Body)
+	hints := findElements(doc, "div", "id", "or-hint")
+	if len(hints) != 1 {
+		t.Fatalf("or-hint: got %d elements want 1", len(hints))
+	}
+	if !hasAttr(hints[0], "hidden", "") {
+		t.Error("or-hint: must be hidden by default — JS toggles it from input events")
+	}
+	dismiss := findElements(hints[0], "button", "id", "or-hint-dismiss")
+	if len(dismiss) != 1 {
+		t.Error("or-hint: missing dismiss button")
+	}
+}
+
+func TestStatic_SearchQLJS_Served(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+	resp := getUIPage(t, ts, "/static/searchql.js")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/javascript") {
+		t.Errorf("Content-Type: got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, "parseQuery") {
+		t.Error("searchql.js: expected parseQuery export")
+	}
+	if !strings.Contains(s, "isUnindexedScan") {
+		t.Error("searchql.js: expected isUnindexedScan export")
+	}
+	if !strings.Contains(s, "shouldShowOrHint") {
+		t.Error("searchql.js: expected shouldShowOrHint export")
+	}
+}
+
+func TestLayout_LoadsSearchQLJS(t *testing.T) {
+	t.Parallel()
+
+	ts := newUIViewServer(t, admin.ReadSources{})
+	resp := getUIPage(t, ts, "/ui/requests")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, `src="/static/searchql.js"`) {
+		t.Error("layout must load /static/searchql.js before /static/app.js")
+	}
+	idxSql := strings.Index(s, `src="/static/searchql.js"`)
+	idxApp := strings.Index(s, `src="/static/app.js"`)
+	if idxSql < 0 || idxApp < 0 || idxSql > idxApp {
+		t.Errorf("searchql.js script tag must appear before app.js (sql=%d app=%d)", idxSql, idxApp)
 	}
 }
 
@@ -255,7 +557,7 @@ func TestUIRequests_InvalidFilter_InlineError(t *testing.T) {
 	t.Parallel()
 
 	ts := newUIViewServer(t, admin.ReadSources{})
-	resp := getUIPage(t, ts, "/ui/requests?method=INVALID_VERB")
+	resp := getUIPage(t, ts, "/ui/requests?q="+url.QueryEscape("method:INVALID_VERB"))
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
@@ -1248,24 +1550,24 @@ func TestUIViews_Integration(t *testing.T) {
 		t.Error("orphan detail: response looks like JSON, expected HTML")
 	}
 
-	// Step 4: test the filter by service.
-	filterResp := getUIPage(t, ts, "/ui/requests?service=web")
+	// Step 4: test the filter by service via the new q parameter.
+	filterResp := getUIPage(t, ts, "/ui/requests?q="+url.QueryEscape("service:web"))
 	if filterResp.StatusCode != http.StatusOK {
 		filterResp.Body.Close()
-		t.Fatalf("GET /ui/requests?service=web: status %d", filterResp.StatusCode)
+		t.Fatalf("GET /ui/requests?q=service:web: status %d", filterResp.StatusCode)
 	}
 	filterBody, _ := io.ReadAll(filterResp.Body)
 	filterResp.Body.Close()
 	fs := string(filterBody)
 
-	// The filtered page renders the filter form with service value.
-	if !strings.Contains(fs, `value="web"`) {
-		t.Error("filter: service=web not reflected in form")
+	// The filtered page renders one chip per parsed term.
+	if !strings.Contains(fs, `data-value="web"`) {
+		t.Error("filter: service:web chip not rendered")
 	}
 
 	// Step 5: the list page URL is the same shape as the JSON API.
-	u, _ := url.Parse(ts.URL + "/ui/requests?service=web&method=GET")
-	if u.Query().Get("service") != "web" || u.Query().Get("method") != "GET" {
-		t.Error("filter URL does not carry query parameters correctly")
+	u, _ := url.Parse(ts.URL + "/ui/requests?q=" + url.QueryEscape("service:web method:GET"))
+	if u.Query().Get("q") != "service:web method:GET" {
+		t.Errorf("filter URL does not carry q parameter correctly: got %q", u.Query().Get("q"))
 	}
 }

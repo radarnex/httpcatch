@@ -1,44 +1,26 @@
 package admin
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/radarnex/httpcatch/internal/inspect"
+	"github.com/radarnex/httpcatch/internal/searchql"
 )
 
-// canonicalHTTPMethods is the set of valid HTTP method names. Methods are
-// stored uppercase; the parser normalises the input before validating.
-var canonicalHTTPMethods = map[string]struct{}{
-	"GET":     {},
-	"HEAD":    {},
-	"POST":    {},
-	"PUT":     {},
-	"DELETE":  {},
-	"CONNECT": {},
-	"OPTIONS": {},
-	"TRACE":   {},
-	"PATCH":   {},
-}
-
 // knownQueryKeys lists every query parameter GET /requests accepts. Any key
-// not in this set triggers a 400.
+// not in this set triggers a 400. Field-level filters now ride on the single
+// `q` parameter and are parsed by the searchql package.
 var knownQueryKeys = map[string]struct{}{
-	"limit":          {},
-	"cursor":         {},
-	"since":          {},
-	"until":          {},
-	"service":        {},
-	"method":         {},
-	"status":         {},
-	"path":           {},
-	"correlation_id": {},
-	"source_ip":      {},
-	"has_events":     {},
-	"body":           {},
+	"limit":  {},
+	"cursor": {},
+	"since":  {},
+	"until":  {},
+	"q":      {},
+	"live":   {},
 }
 
 // parseFieldError is a parse-time validation failure for a single query parameter.
@@ -72,7 +54,6 @@ func parseInspectQuery(values url.Values) (inspect.InspectQuery, []parseFieldErr
 
 	q := inspect.InspectQuery{Limit: defaultLimit}
 
-	// limit
 	if ls := values.Get("limit"); ls != "" {
 		v, err := strconv.Atoi(ls)
 		if err != nil {
@@ -84,7 +65,6 @@ func parseInspectQuery(values url.Values) (inspect.InspectQuery, []parseFieldErr
 		}
 	}
 
-	// cursor
 	if cs := values.Get("cursor"); cs != "" {
 		c, err := inspect.DecodeCursor(cs)
 		if err != nil {
@@ -94,7 +74,6 @@ func parseInspectQuery(values url.Values) (inspect.InspectQuery, []parseFieldErr
 		}
 	}
 
-	// since
 	if s := values.Get("since"); s != "" {
 		t, err := time.Parse(time.RFC3339, s)
 		if err != nil {
@@ -104,7 +83,6 @@ func parseInspectQuery(values url.Values) (inspect.InspectQuery, []parseFieldErr
 		}
 	}
 
-	// until
 	if s := values.Get("until"); s != "" {
 		t, err := time.Parse(time.RFC3339, s)
 		if err != nil {
@@ -114,88 +92,25 @@ func parseInspectQuery(values url.Values) (inspect.InspectQuery, []parseFieldErr
 		}
 	}
 
-	if s := values.Get("service"); s != "" {
-		q.Service = s
-	}
-
-	// method
-	if s := values.Get("method"); s != "" {
-		upper := strings.ToUpper(s)
-		if _, ok := canonicalHTTPMethods[upper]; !ok {
-			errs = append(errs, parseFieldError{"method", fmt.Sprintf("unknown HTTP method %q", s)})
-		} else {
-			q.Method = upper
-		}
-	}
-
-	// status
-	if s := values.Get("status"); s != "" {
-		sf, err := parseStatusFilter(s)
+	if qs := values.Get("q"); qs != "" {
+		parsed, err := searchql.Parse(qs)
 		if err != nil {
-			errs = append(errs, parseFieldError{"status", err.Error()})
+			var pe *searchql.ParseError
+			if errors.As(err, &pe) {
+				errs = append(errs, parseFieldError{"q", pe.Error()})
+			} else {
+				errs = append(errs, parseFieldError{"q", err.Error()})
+			}
 		} else {
-			q.Status = sf
-		}
-	}
-
-	if s := values.Get("path"); s != "" {
-		q.Path = s
-	}
-
-	if s := values.Get("correlation_id"); s != "" {
-		q.CorrelationID = s
-	}
-
-	if s := values.Get("source_ip"); s != "" {
-		q.SourceIP = s
-	}
-
-	if s := values.Get("body"); s != "" {
-		q.Body = s
-	}
-
-	// has_events
-	if s := values.Get("has_events"); s != "" {
-		switch s {
-		case "true":
-			v := true
-			q.HasEvents = &v
-		case "false":
-			v := false
-			q.HasEvents = &v
-		default:
-			errs = append(errs, parseFieldError{"has_events", `must be "true" or "false"`})
+			q.Query = parsed
 		}
 	}
 
 	return q, errs
 }
 
-// parseStatusFilter parses a status string that is either an exact integer
-// (e.g. "200") or a class form (e.g. "2xx", "5xx"). Returns an error when
-// the string matches neither form.
-func parseStatusFilter(s string) (*inspect.StatusFilter, error) {
-	// Class form: digit followed by "xx", e.g. "2xx".
-	if len(s) == 3 && s[1] == 'x' && s[2] == 'x' {
-		d := s[0]
-		if d >= '1' && d <= '5' {
-			return &inspect.StatusFilter{Class: s}, nil
-		}
-	}
-
-	// Exact integer.
-	v, err := strconv.Atoi(s)
-	if err != nil || v < 100 || v > 599 {
-		return nil, fmt.Errorf("must be an integer status code (e.g. 200) or class form (e.g. 2xx, 5xx)")
-	}
-	return &inspect.StatusFilter{Exact: v}, nil
-}
-
 // hasNonTemporalFilter reports whether q carries any filter that forces a
 // SQLite-only read (i.e. any filter that cannot be applied by MemoryReader).
 func hasNonTemporalFilter(q inspect.InspectQuery) bool {
-	return q.Service != "" ||
-		q.CorrelationID != "" ||
-		q.Status != nil ||
-		q.HasRequestOnlyFilter()
+	return q.Query.HasNonTemporalTerm()
 }

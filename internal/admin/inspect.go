@@ -154,6 +154,9 @@ func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 		ctx := r.Context()
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
+		if q.Query.IsUnindexedScan() {
+			w.Header().Set("X-Httpcatch-Scan", "leading-wildcard-indexed")
+		}
 
 		rows, nextCur, source, err := gatherRoots(ctx, q, memReader, sqlReader)
 		if err != nil {

@@ -2,106 +2,34 @@ package admin
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
 
-// TestParseInspectQuery_ValidForms covers the happy path for every filter.
+// TestParseInspectQuery_ValidForms covers the happy path for each parameter.
 func TestParseInspectQuery_ValidForms(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name  string
-		query string
-		check func(t *testing.T, q interface{ service() string })
-	}{
-		{name: "empty", query: ""},
-	}
-	_ = tests // exercised via invalid forms below; valid forms checked per-field
-
-	// service
-	q, errs := parseInspectQuery(url.Values{"service": {"orders"}})
+	// q with a single field term
+	q, errs := parseInspectQuery(url.Values{"q": {"service:orders"}})
 	if len(errs) != 0 {
-		t.Fatalf("service: unexpected errors: %v", errs)
+		t.Fatalf("q service: unexpected errors: %v", errs)
 	}
-	if q.Service != "orders" {
-		t.Errorf("service: got %q want orders", q.Service)
+	if len(q.Query.Terms) != 1 {
+		t.Fatalf("q service: got %d terms want 1", len(q.Query.Terms))
 	}
-
-	// method — case-insensitive parse, stored uppercase
-	for _, raw := range []string{"get", "GET", "Get"} {
-		q, errs = parseInspectQuery(url.Values{"method": {raw}})
-		if len(errs) != 0 {
-			t.Fatalf("method %q: unexpected errors: %v", raw, errs)
-		}
-		if q.Method != "GET" {
-			t.Errorf("method %q: got %q want GET", raw, q.Method)
-		}
+	if got := q.Query.Terms[0]; got.Value != "orders" {
+		t.Errorf("q service term: got %+v", got)
 	}
 
-	// status exact
-	q, errs = parseInspectQuery(url.Values{"status": {"200"}})
+	// q with multiple AND'd terms
+	q, errs = parseInspectQuery(url.Values{"q": {"service:orders method:POST"}})
 	if len(errs) != 0 {
-		t.Fatalf("status 200: unexpected errors: %v", errs)
+		t.Fatalf("multi-term q: unexpected errors: %v", errs)
 	}
-	if q.Status == nil || q.Status.Exact != 200 {
-		t.Errorf("status 200: got %v", q.Status)
-	}
-
-	// status class
-	for _, cls := range []string{"1xx", "2xx", "3xx", "4xx", "5xx"} {
-		q, errs = parseInspectQuery(url.Values{"status": {cls}})
-		if len(errs) != 0 {
-			t.Fatalf("status %s: unexpected errors: %v", cls, errs)
-		}
-		if q.Status == nil || q.Status.Class != cls {
-			t.Errorf("status %s: got %v", cls, q.Status)
-		}
-	}
-
-	// path
-	q, errs = parseInspectQuery(url.Values{"path": {"/api/users"}})
-	if len(errs) != 0 {
-		t.Fatalf("path: unexpected errors: %v", errs)
-	}
-	if q.Path != "/api/users" {
-		t.Errorf("path: got %q want /api/users", q.Path)
-	}
-
-	// correlation_id
-	q, errs = parseInspectQuery(url.Values{"correlation_id": {"abc-123"}})
-	if len(errs) != 0 {
-		t.Fatalf("correlation_id: unexpected errors: %v", errs)
-	}
-	if q.CorrelationID != "abc-123" {
-		t.Errorf("correlation_id: got %q want abc-123", q.CorrelationID)
-	}
-
-	// source_ip
-	q, errs = parseInspectQuery(url.Values{"source_ip": {"10.0.0.1"}})
-	if len(errs) != 0 {
-		t.Fatalf("source_ip: unexpected errors: %v", errs)
-	}
-	if q.SourceIP != "10.0.0.1" {
-		t.Errorf("source_ip: got %q want 10.0.0.1", q.SourceIP)
-	}
-
-	// has_events true
-	q, errs = parseInspectQuery(url.Values{"has_events": {"true"}})
-	if len(errs) != 0 {
-		t.Fatalf("has_events true: unexpected errors: %v", errs)
-	}
-	if q.HasEvents == nil || !*q.HasEvents {
-		t.Errorf("has_events true: got %v", q.HasEvents)
-	}
-
-	// has_events false
-	q, errs = parseInspectQuery(url.Values{"has_events": {"false"}})
-	if len(errs) != 0 {
-		t.Fatalf("has_events false: unexpected errors: %v", errs)
-	}
-	if q.HasEvents == nil || *q.HasEvents {
-		t.Errorf("has_events false: got %v", q.HasEvents)
+	if len(q.Query.Terms) != 2 {
+		t.Fatalf("multi-term q: got %d terms want 2", len(q.Query.Terms))
 	}
 
 	// since
@@ -134,6 +62,15 @@ func TestParseInspectQuery_ValidForms(t *testing.T) {
 	if q.Limit != 25 {
 		t.Errorf("limit: got %d want 25", q.Limit)
 	}
+
+	// empty q is a valid no-op.
+	q, errs = parseInspectQuery(url.Values{"q": {""}})
+	if len(errs) != 0 {
+		t.Fatalf("empty q: unexpected errors: %v", errs)
+	}
+	if len(q.Query.Terms) != 0 {
+		t.Errorf("empty q: got %d terms want 0", len(q.Query.Terms))
+	}
 }
 
 // TestParseInspectQuery_InvalidForms covers every invalid form, table-driven.
@@ -141,14 +78,54 @@ func TestParseInspectQuery_InvalidForms(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		query      url.Values
-		wantField  string
+		name      string
+		query     url.Values
+		wantField string
 	}{
 		{
 			name:      "unknown key",
 			query:     url.Values{"foo": {"bar"}},
 			wantField: "foo",
+		},
+		{
+			name:      "old per-field key service is rejected",
+			query:     url.Values{"service": {"orders"}},
+			wantField: "service",
+		},
+		{
+			name:      "old per-field key method is rejected",
+			query:     url.Values{"method": {"GET"}},
+			wantField: "method",
+		},
+		{
+			name:      "old per-field key status is rejected",
+			query:     url.Values{"status": {"200"}},
+			wantField: "status",
+		},
+		{
+			name:      "old per-field key path is rejected",
+			query:     url.Values{"path": {"/api"}},
+			wantField: "path",
+		},
+		{
+			name:      "old per-field key body is rejected",
+			query:     url.Values{"body": {"x"}},
+			wantField: "body",
+		},
+		{
+			name:      "old per-field key correlation_id is rejected",
+			query:     url.Values{"correlation_id": {"x"}},
+			wantField: "correlation_id",
+		},
+		{
+			name:      "old per-field key source_ip is rejected",
+			query:     url.Values{"source_ip": {"x"}},
+			wantField: "source_ip",
+		},
+		{
+			name:      "old per-field key has_events is rejected",
+			query:     url.Values{"has_events": {"true"}},
+			wantField: "has_events",
 		},
 		{
 			name:      "limit not integer",
@@ -186,34 +163,24 @@ func TestParseInspectQuery_InvalidForms(t *testing.T) {
 			wantField: "until",
 		},
 		{
-			name:      "method unknown verb",
-			query:     url.Values{"method": {"FETCH"}},
-			wantField: "method",
+			name:      "q unknown key inside",
+			query:     url.Values{"q": {"foo:bar"}},
+			wantField: "q",
 		},
 		{
-			name:      "status not integer or class",
-			query:     url.Values{"status": {"ok"}},
-			wantField: "status",
+			name:      "q bad method",
+			query:     url.Values{"q": {"method:FETCH"}},
+			wantField: "q",
 		},
 		{
-			name:      "status out of range",
-			query:     url.Values{"status": {"99"}},
-			wantField: "status",
+			name:      "q bad status",
+			query:     url.Values{"q": {"status:notastatus"}},
+			wantField: "q",
 		},
 		{
-			name:      "status bad class digit",
-			query:     url.Values{"status": {"6xx"}},
-			wantField: "status",
-		},
-		{
-			name:      "has_events not bool",
-			query:     url.Values{"has_events": {"yes"}},
-			wantField: "has_events",
-		},
-		{
-			name:      "has_events integer",
-			query:     url.Values{"has_events": {"1"}},
-			wantField: "has_events",
+			name:      "q bad status class",
+			query:     url.Values{"q": {"status:6xx"}},
+			wantField: "q",
 		},
 	}
 
@@ -238,70 +205,23 @@ func TestParseInspectQuery_InvalidForms(t *testing.T) {
 	}
 }
 
-// TestParseStatusFilter covers the full range of valid and invalid status strings.
-func TestParseStatusFilter_Valid(t *testing.T) {
+// TestParseInspectQuery_QErrorNamesOffendingToken verifies the parse error
+// surfaces enough detail to point operators at the bad token.
+func TestParseInspectQuery_QErrorNamesOffendingToken(t *testing.T) {
 	t.Parallel()
-
-	exactCases := []struct {
-		input string
-		want  int
-	}{
-		{"200", 200},
-		{"404", 404},
-		{"500", 500},
-		{"100", 100},
-		{"599", 599},
+	_, errs := parseInspectQuery(url.Values{"q": {"service:orders bogus:foo"}})
+	if len(errs) == 0 {
+		t.Fatal("expected error for bogus token")
 	}
-	for _, tc := range exactCases {
-		t.Run("exact_"+tc.input, func(t *testing.T) {
-			t.Parallel()
-			sf, err := parseStatusFilter(tc.input)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if sf.Exact != tc.want {
-				t.Errorf("Exact: got %d want %d", sf.Exact, tc.want)
-			}
-			if sf.Class != "" {
-				t.Errorf("Class should be empty, got %q", sf.Class)
-			}
-		})
+	if errs[0].field != "q" {
+		t.Errorf("field: got %q want q", errs[0].field)
 	}
-
-	classCases := []string{"1xx", "2xx", "3xx", "4xx", "5xx"}
-	for _, cls := range classCases {
-		t.Run("class_"+cls, func(t *testing.T) {
-			t.Parallel()
-			sf, err := parseStatusFilter(cls)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if sf.Class != cls {
-				t.Errorf("Class: got %q want %q", sf.Class, cls)
-			}
-			if sf.Exact != 0 {
-				t.Errorf("Exact should be 0, got %d", sf.Exact)
-			}
-		})
+	if !strings.Contains(errs[0].message, "bogus:foo") {
+		t.Errorf("message should name offending token; got %q", errs[0].message)
 	}
 }
 
-func TestParseStatusFilter_Invalid(t *testing.T) {
-	t.Parallel()
-
-	invalid := []string{"ok", "200x", "6xx", "0xx", "99", "600", "abc", "", "2X", "2xX"}
-	for _, s := range invalid {
-		t.Run("invalid_"+s, func(t *testing.T) {
-			t.Parallel()
-			_, err := parseStatusFilter(s)
-			if err == nil {
-				t.Errorf("expected error for %q", s)
-			}
-		})
-	}
-}
-
-// TestHasNonTemporalFilter verifies the routing predicate.
+// TestHasNonTemporalFilter verifies the memory-vs-sqlite routing predicate.
 func TestHasNonTemporalFilter(t *testing.T) {
 	t.Parallel()
 
@@ -326,13 +246,14 @@ func TestHasNonTemporalFilter(t *testing.T) {
 	}
 
 	nonTemporal := []url.Values{
-		{"service": {"orders"}},
-		{"method": {"GET"}},
-		{"status": {"200"}},
-		{"path": {"/api"}},
-		{"correlation_id": {"abc"}},
-		{"source_ip": {"10.0.0.1"}},
-		{"has_events": {"true"}},
+		{"q": {"service:orders"}},
+		{"q": {"method:GET"}},
+		{"q": {"status:200"}},
+		{"q": {"path:/api"}},
+		{"q": {"correlation_id:abc"}},
+		{"q": {"source_ip:10.0.0.1"}},
+		{"q": {"body:foo"}},
+		{"q": {"host:example.com"}},
 	}
 	for _, vals := range nonTemporal {
 		q, _ := parseInspectQuery(vals)
@@ -341,3 +262,4 @@ func TestHasNonTemporalFilter(t *testing.T) {
 		}
 	}
 }
+

@@ -619,7 +619,7 @@ func TestSQLiteReader_OrphanFilters(t *testing.T) {
 	}
 
 	// service filter applies to orphans on their own fields.
-	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Service: "my-svc"}, 50, nil)
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Query: mustParseQuery(t, "service:my-svc")}, 50, nil)
 	if err != nil {
 		t.Fatalf("ReadRoots service filter: %v", err)
 	}
@@ -632,9 +632,7 @@ func TestSQLiteReader_OrphanFilters(t *testing.T) {
 	}
 
 	// status filter applies to orphan_response on event's own status.
-	rows5xx, _, err := s.ReadRoots(ctx, inspect.InspectQuery{
-		Status: &inspect.StatusFilter{Class: "5xx"},
-	}, 50, nil)
+	rows5xx, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Query: mustParseQuery(t, "status:5xx")}, 50, nil)
 	if err != nil {
 		t.Fatalf("ReadRoots status filter: %v", err)
 	}
@@ -649,25 +647,13 @@ func TestSQLiteReader_OrphanFilters(t *testing.T) {
 	}
 
 	// method filter excludes orphan rows.
-	rowsMethod, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Method: "GET"}, 50, nil)
+	rowsMethod, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Query: mustParseQuery(t, "method:GET")}, 50, nil)
 	if err != nil {
 		t.Fatalf("ReadRoots method filter: %v", err)
 	}
 	for _, r := range rowsMethod {
 		if r.Kind == "orphan_response" || r.Kind == "orphan_outbound" {
 			t.Errorf("method filter: orphan row should not appear; got kind=%s id=%s", r.Kind, r.ID)
-		}
-	}
-
-	// has_events=false matches captured requests with no events, NOT orphans.
-	hasEventsFalse := false
-	rowsNoEvents, _, err := s.ReadRoots(ctx, inspect.InspectQuery{HasEvents: &hasEventsFalse}, 50, nil)
-	if err != nil {
-		t.Fatalf("ReadRoots has_events=false: %v", err)
-	}
-	for _, r := range rowsNoEvents {
-		if r.Kind == "orphan_response" || r.Kind == "orphan_outbound" {
-			t.Errorf("has_events=false: orphan row should not appear; got kind=%s id=%s", r.Kind, r.ID)
 		}
 	}
 }

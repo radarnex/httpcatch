@@ -32,14 +32,10 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       </span>
 
-      {{if .Query.Service}}<span class="qchip" data-key="service" data-value="{{.Query.Service}}"><span class="qk">service</span><span class="qop">:</span><span class="qv">{{.Query.Service}}</span><button type="button" class="qx" data-chip-remove="service" aria-label="Remove">×</button></span>{{end}}
-      {{if .Query.Method}}<span class="qchip" data-key="method" data-value="{{.Query.Method}}"><span class="qk">method</span><span class="qop">:</span><span class="qv">{{.Query.Method}}</span><button type="button" class="qx" data-chip-remove="method" aria-label="Remove">×</button></span>{{end}}
-      {{if .Query.StatusRaw}}<span class="qchip" data-key="status" data-value="{{.Query.StatusRaw}}"><span class="qk">status</span><span class="qop">:</span><span class="qv">{{.Query.StatusRaw}}</span><button type="button" class="qx" data-chip-remove="status" aria-label="Remove">×</button></span>{{end}}
-      {{if .Query.Path}}<span class="qchip" data-key="path" data-value="{{.Query.Path}}"><span class="qk">path</span><span class="qop">:</span><span class="qv">{{.Query.Path}}</span><button type="button" class="qx" data-chip-remove="path" aria-label="Remove">×</button></span>{{end}}
-      {{if .Query.Body}}<span class="qchip" data-key="body" data-value="{{.Query.Body}}"><span class="qk">body</span><span class="qop">:</span><span class="qv">{{.Query.Body}}</span><button type="button" class="qx" data-chip-remove="body" aria-label="Remove">×</button></span>{{end}}
+      {{range .Query.Chips}}<span class="qchip{{if .IsFreeform}} is-freeform{{end}}{{if .IsHeader}} is-header{{end}}{{if .Negated}} is-negated{{end}}" data-key="{{.Key}}" data-value="{{.Value}}" data-token="{{.Token}}">{{if .Negated}}<span class="qneg" aria-label="negated">−</span>{{end}}{{if .IsHeader}}<span class="qhdr" aria-label="header" title="per-header search">H</span>{{end}}{{if .IsFreeform}}<span class="qany" aria-label="any field" title="match against any field">any</span>{{else}}<span class="qk">{{.Key}}</span><span class="qop">:</span>{{end}}<span class="qv">{{.Value}}</span><button type="button" class="qx" data-chip-remove="{{.Token}}" aria-label="Remove">×</button></span>{{end}}
 
       <input type="text" id="search-input" class="search-input"
-             placeholder="service:billing-api  method:POST  status:5xx  path:/api  body:error  …"
+             placeholder="service:billing-api host:*.svc.local body:error -path:/health header.user-agent:client"
              autocomplete="off" spellcheck="false">
       <button type="button" class="search-clear" id="search-clear" hidden aria-label="Clear search">×</button>
     </div>
@@ -54,7 +50,9 @@
                aria-label="Time range — type a shorthand like 3d or 15m"
                autocomplete="off"
                spellcheck="false">
-        <button type="button" class="picker-trigger-caret" id="picker-caret" aria-label="Open presets">▾</button>
+        <button type="button" class="picker-trigger-caret" id="picker-caret" aria-label="Open presets">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
       </div>
 
       <div class="picker-popover" id="picker-popover" hidden role="dialog" aria-label="Time range presets">
@@ -74,12 +72,29 @@
           <button type="button" class="picker-cal-link" id="picker-cal-link">Select from calendar…</button>
         </div>
         <div class="picker-view picker-view-calendar" id="picker-view-calendar" hidden>
-          <button type="button" class="picker-back" id="picker-back" aria-label="Back to presets">←</button>
-          <div class="picker-cal-fields">
-            <label class="cal-field">From <input type="datetime-local" id="picker-from"></label>
-            <label class="cal-field">To <input type="datetime-local" id="picker-to"></label>
+          <div class="cal-head">
+            <button type="button" class="picker-back" id="picker-back" aria-label="Back to presets">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+            </button>
+            <span class="cal-title" id="cal-title">May 2026</span>
+            <button type="button" class="cal-nav" id="cal-prev" aria-label="Previous month">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+            </button>
+            <button type="button" class="cal-nav" id="cal-next" aria-label="Next month">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
           </div>
+          <div class="cal-dow">
+            <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+          </div>
+          <div class="cal-grid" id="cal-grid" role="grid"></div>
+          <div class="cal-times">
+            <label class="cal-time-field">From <input type="time" id="cal-from-time" step="60" value="00:00"></label>
+            <label class="cal-time-field">To <input type="time" id="cal-to-time" step="60" value="23:59"></label>
+          </div>
+          <div class="cal-range-summary" id="cal-range-summary"></div>
           <div class="cal-actions">
+            <button type="button" class="btn btn-ghost" id="picker-cancel">Cancel</button>
             <button type="button" class="btn btn-primary" id="picker-apply">Apply</button>
           </div>
         </div>
@@ -90,15 +105,7 @@
     <a href="/ui/requests" class="btn btn-ghost">Reset</a>
   </div>
 
-  {{/* Structured filter values are submitted via these hidden inputs.
-       The search box parses key:value tokens and writes them here on submit. */}}
-  <input type="hidden" name="service" id="f-service" value="{{.Query.Service}}">
-  <input type="hidden" name="method" id="f-method" value="{{.Query.Method}}">
-  <input type="hidden" name="status" id="f-status" value="{{.Query.StatusRaw}}">
-  <input type="hidden" name="path" id="f-path" value="{{.Query.Path}}">
-  <input type="hidden" name="body" id="f-body" value="{{.Query.Body}}">
-  <input type="hidden" name="correlation_id" id="f-correlation-id" value="">
-  <input type="hidden" name="source_ip" id="f-source-ip" value="">
+  <input type="hidden" name="q" id="f-q" value="{{.Query.Q}}">
   <input type="hidden" name="since" id="f-since" value="{{.Query.SinceRaw}}">
   <input type="hidden" name="until" id="f-until" value="{{.Query.UntilRaw}}">
 
@@ -109,6 +116,16 @@
     Live tail
   </label>
 </form>
+<div id="scan-banner" class="scan-banner" role="status" {{if not .UnindexedScan}}hidden{{end}}>
+  <span class="scan-icon" aria-hidden="true">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 1 21h22L12 2Z"/><path d="M12 9v5"/><path d="M12 17.5h.01"/></svg>
+  </span>
+  <span class="scan-text"><b>Unindexed scan</b> — leading <code>*</code> on host/path/service skips the index. Narrow with a time range or <code>service:</code> for speed.</span>
+</div>
+<div id="or-hint" class="or-hint" role="status" hidden>
+  <span class="or-hint-text"><code>OR</code> is not a supported operator yet. Run each side as a separate saved view to compare.</span>
+  <button type="button" class="or-hint-dismiss" id="or-hint-dismiss" aria-label="Dismiss">×</button>
+</div>
 <div id="live-tail-status" class="live-tail-status" hidden></div>
 
 <div class="toolbar">

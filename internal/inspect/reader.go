@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/radarnex/httpcatch/internal/searchql"
 )
 
 // ErrNotFound is returned by ReadDetail when the requested id does not match
@@ -19,17 +21,17 @@ var ErrNotFound = errors.New("not found")
 // the event's own fields instead. Status is populated via the events join for
 // request rows and from the event's own status for orphan_response rows.
 type RootRow struct {
-	ID            string     `json:"id"`
-	Kind          string     `json:"kind"`
-	Timestamp     time.Time  `json:"timestamp"`
-	Service       string     `json:"service"`
-	Method        string     `json:"method,omitempty"`
-	Path          string     `json:"path,omitempty"`
-	CorrelationID string     `json:"correlation_id"`
-	SourceIP      string     `json:"source_ip,omitempty"`
-	EventCount    *int       `json:"event_count"`  // null for orphan rows
-	HasEvents     *bool      `json:"has_events"`   // null for orphan rows
-	Status        *int       `json:"status"`       // nullable; populated via events join or event's own status
+	ID            string    `json:"id"`
+	Kind          string    `json:"kind"`
+	Timestamp     time.Time `json:"timestamp"`
+	Service       string    `json:"service"`
+	Method        string    `json:"method,omitempty"`
+	Path          string    `json:"path,omitempty"`
+	CorrelationID string    `json:"correlation_id"`
+	SourceIP      string    `json:"source_ip,omitempty"`
+	EventCount    *int      `json:"event_count"` // null for orphan rows
+	HasEvents     *bool     `json:"has_events"`  // null for orphan rows
+	Status        *int      `json:"status"`      // nullable; populated via events join or event's own status
 }
 
 // DetailRecord is the return type of ReadDetail. Root is the record matched by
@@ -41,19 +43,9 @@ type DetailRecord struct {
 	Events []any `json:"events"`
 }
 
-// StatusFilter holds a parsed status filter — either an exact status code or a
-// class (1xx, 2xx, 3xx, 4xx, 5xx). Exactly one of Exact and Class is set.
-type StatusFilter struct {
-	// Exact is non-zero when the filter is an integer status code (e.g. 200).
-	Exact int
-	// Class is non-empty when the filter is a class string (e.g. "2xx"). When
-	// set, the matching range is [Class*100, Class*100+99].
-	Class string
-}
-
-// InspectQuery carries the parameters parsed from GET /requests. All filter
-// fields compose with AND semantics. Any non-temporal filter (Service, Method,
-// Status, Path, CorrelationID, SourceIP, HasEvents) forces SQLite-only reads.
+// InspectQuery carries the parameters parsed from GET /requests. Pagination
+// and time fields are structured. Field-level filters are carried as a
+// parsed searchql.Query and applied by the reader-specific compiler.
 type InspectQuery struct {
 	// Pagination.
 	Limit  int
@@ -63,30 +55,16 @@ type InspectQuery struct {
 	Since *time.Time
 	Until *time.Time
 
-	// Non-temporal filters — force SQLite-only reads.
-	Service       string
-	Method        string
-	Status        *StatusFilter
-	Path          string
-	CorrelationID string
-	SourceIP      string
-	HasEvents     *bool
-	// Body is a substring match against the captured request body. Empty means
-	// no filter. Body is unindexed in both backends, so this is a full scan;
-	// expect it to be slow on large stores.
-	Body string
+	// Query is the parsed search-language AST. An empty Query has no terms
+	// and imposes no field-level filter.
+	Query searchql.Query
 }
 
-// HasRequestOnlyFilter reports whether the query carries any filter whose
-// semantics only apply to CapturedRequest rows (method, path, source_ip,
-// has_events, body). Readers use this to decide whether to include orphan
-// event rows in the UNION arm of the result.
+// HasRequestOnlyFilter reports whether the query carries any term whose
+// semantics only apply to CapturedRequest rows. Readers use this to decide
+// whether to include orphan event rows in the UNION arm of the result.
 func (q InspectQuery) HasRequestOnlyFilter() bool {
-	return q.Method != "" ||
-		q.Path != "" ||
-		q.SourceIP != "" ||
-		q.HasEvents != nil ||
-		q.Body != ""
+	return q.Query.HasRequestOnlyTerm()
 }
 
 // Reader is the read-side seam implemented by MemorySink and SQLiteSink.

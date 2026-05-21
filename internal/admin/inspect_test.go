@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -469,6 +470,79 @@ func TestRequests_RowFieldsPresent(t *testing.T) {
 	}
 	if rec["status"] != nil {
 		t.Errorf("status: got %v want null", rec["status"])
+	}
+}
+
+// TestRequests_ScanHeader walks the case table for the unindexed-scan response
+// header. The handler must set X-Httpcatch-Scan: leading-wildcard-indexed iff
+// IsUnindexedScan() returns true for the parsed query; absent otherwise.
+func TestRequests_ScanHeader(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		q      string
+		expect bool
+	}{
+		{"freeform_substring", "*foo*", true},
+		{"freeform_leading_only", "*foo", true},
+		{"host_substring", "host:*api*", true},
+		{"service_leading_only", "service:*svc", true},
+		{"path_substring", "path:*signup*", true},
+		{"trailing_only_no_header", "billing-api*", false},
+		{"host_trailing_only_no_header", "host:billing-api*", false},
+		{"host_exact_no_header", "host:billing-api", false},
+		{"body_scanned_no_header", "body:*foo*", false},
+		{"headers_keyword_no_header", "headers:foo", false},
+		{"per_header_no_header", "header.user-agent:foo", false},
+		{"negated_substring_still_scans", "-host:*foo*", true},
+		{"multi_term_with_scan", "service:foo host:*api*", true},
+		{"multi_term_no_scan", "service:foo host:api*", false},
+		{"empty_query_no_header", "", false},
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var qp string
+			if tc.q != "" {
+				qp = "q=" + url.QueryEscape(tc.q)
+			}
+			resp := getRequests(t, ts, qp)
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status: got %d want 200", resp.StatusCode)
+			}
+			got := resp.Header.Get("X-Httpcatch-Scan")
+			if tc.expect {
+				if got != "leading-wildcard-indexed" {
+					t.Errorf("X-Httpcatch-Scan: got %q want %q", got, "leading-wildcard-indexed")
+				}
+			} else {
+				if got != "" {
+					t.Errorf("X-Httpcatch-Scan: got %q want empty", got)
+				}
+			}
+		})
+	}
+}
+
+// TestRequests_ScanHeader_ParseErrorAbsent ensures that the scan header is not
+// set on 400 responses — there is no parsed query to inspect.
+func TestRequests_ScanHeader_ParseErrorAbsent(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	resp := getRequests(t, ts, "q="+url.QueryEscape("unknown_key:foo"))
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Httpcatch-Scan"); got != "" {
+		t.Errorf("X-Httpcatch-Scan on 400: got %q want empty", got)
 	}
 }
 

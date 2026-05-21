@@ -590,6 +590,30 @@ function initCurlCopy(root) {
     return TIME_FMT.format(from) + " – " + TIME_FMT.format(to);
   }
 
+  // ── Calendar (month grid) ────────────────────────────────────────
+  var MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"];
+
+  function startOfDay(d) {
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  }
+  function sameDay(a, b) {
+    return a && b && a.getFullYear() === b.getFullYear() &&
+      a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  }
+  function combineDateAndTime(date, hhmm) {
+    var d = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+    if (typeof hhmm === "string" && /^\d{1,2}:\d{2}$/.test(hhmm)) {
+      var parts = hhmm.split(":");
+      d.setHours(parseInt(parts[0], 10) || 0, parseInt(parts[1], 10) || 0, 0, 0);
+    }
+    return d;
+  }
+  function formatRangeSummary(from, to) {
+    if (!from || !to) return "";
+    return TIME_FMT.format(from) + " – " + TIME_FMT.format(to);
+  }
+
   function wirePicker() {
     var trigger = document.getElementById("picker-trigger");
     var input = document.getElementById("picker-input");
@@ -599,6 +623,20 @@ function initCurlCopy(root) {
 
     var viewPresets = document.getElementById("picker-view-presets");
     var viewCal = document.getElementById("picker-view-calendar");
+
+    // Calendar state: month being viewed, selected range (start/end dates),
+    // and time strings ("HH:MM"). Range is built click-by-click: first click
+    // sets start and clears end; second click sets end (swapping if before
+    // start); a third click restarts the range from that day.
+    var calMonth = startOfDay(new Date());
+    calMonth.setDate(1);
+    var calStart = null;
+    var calEnd = null;
+    var fromTimeEl = document.getElementById("cal-from-time");
+    var toTimeEl = document.getElementById("cal-to-time");
+    var titleEl = document.getElementById("cal-title");
+    var gridEl = document.getElementById("cal-grid");
+    var summaryEl = document.getElementById("cal-range-summary");
 
     function openPopover() {
       popover.removeAttribute("hidden");
@@ -616,18 +654,102 @@ function initCurlCopy(root) {
     function showCalendar() {
       viewPresets.hidden = true;
       viewCal.hidden = false;
+      // Seed from any active range in the hidden since/until fields so the
+      // operator returns to where they left off.
       var since = document.getElementById("f-since");
       var until = document.getElementById("f-until");
-      var fromEl = document.getElementById("picker-from");
-      var toEl = document.getElementById("picker-to");
-      if (since && since.value && fromEl) {
-        var d = new Date(since.value);
-        if (!isNaN(d.getTime())) fromEl.value = toDatetimeLocal(d);
+      if (since && since.value && until && until.value) {
+        var s = new Date(since.value);
+        var u = new Date(until.value);
+        if (!isNaN(s.getTime()) && !isNaN(u.getTime())) {
+          calStart = startOfDay(s);
+          calEnd = startOfDay(u);
+          calMonth = new Date(s.getFullYear(), s.getMonth(), 1);
+          if (fromTimeEl) fromTimeEl.value = pad2(s.getHours()) + ":" + pad2(s.getMinutes());
+          if (toTimeEl) toTimeEl.value = pad2(u.getHours()) + ":" + pad2(u.getMinutes());
+        }
       }
-      if (until && until.value && toEl) {
-        var d2 = new Date(until.value);
-        if (!isNaN(d2.getTime())) toEl.value = toDatetimeLocal(d2);
+      renderCalendar();
+    }
+    function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+
+    function renderCalendar() {
+      if (!gridEl || !titleEl) return;
+      titleEl.textContent = MONTH_NAMES[calMonth.getMonth()] + " " + calMonth.getFullYear();
+      gridEl.innerHTML = "";
+      var firstDow = new Date(calMonth.getFullYear(), calMonth.getMonth(), 1).getDay();
+      var daysInMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 0).getDate();
+      var prevDaysInMonth = new Date(calMonth.getFullYear(), calMonth.getMonth(), 0).getDate();
+      var today = startOfDay(new Date());
+      var future = startOfDay(new Date());
+      future.setDate(future.getDate() + 1);
+
+      // Render 6 weeks (42 cells) to keep height stable across months.
+      for (var i = 0; i < 42; i++) {
+        var dayNum;
+        var cellMonth = calMonth.getMonth();
+        var cellYear = calMonth.getFullYear();
+        var outside = false;
+        if (i < firstDow) {
+          dayNum = prevDaysInMonth - (firstDow - i - 1);
+          cellMonth -= 1;
+          if (cellMonth < 0) { cellMonth = 11; cellYear -= 1; }
+          outside = true;
+        } else if (i >= firstDow + daysInMonth) {
+          dayNum = i - firstDow - daysInMonth + 1;
+          cellMonth += 1;
+          if (cellMonth > 11) { cellMonth = 0; cellYear += 1; }
+          outside = true;
+        } else {
+          dayNum = i - firstDow + 1;
+        }
+        var cellDate = new Date(cellYear, cellMonth, dayNum);
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "cal-cell";
+        btn.textContent = String(dayNum);
+        btn.setAttribute("role", "gridcell");
+        btn.setAttribute("data-date", cellDate.toISOString());
+        if (outside) btn.classList.add("is-outside");
+        if (cellDate.getTime() > future.getTime()) {
+          btn.classList.add("is-disabled");
+          btn.disabled = true;
+        }
+        if (sameDay(cellDate, today)) btn.classList.add("is-today");
+        if (calStart && sameDay(cellDate, calStart)) btn.classList.add("is-start");
+        if (calEnd && sameDay(cellDate, calEnd)) btn.classList.add("is-end");
+        if (calStart && calEnd && cellDate > calStart && cellDate < calEnd) {
+          btn.classList.add("in-range");
+        }
+        gridEl.appendChild(btn);
       }
+
+      if (summaryEl) {
+        if (calStart && calEnd) {
+          var from = combineDateAndTime(calStart, fromTimeEl && fromTimeEl.value);
+          var to = combineDateAndTime(calEnd, toTimeEl && toTimeEl.value);
+          summaryEl.textContent = formatRangeSummary(from, to);
+        } else if (calStart) {
+          summaryEl.textContent = TIME_FMT.format(combineDateAndTime(calStart, fromTimeEl && fromTimeEl.value)) + " – …";
+        } else {
+          summaryEl.textContent = "";
+        }
+      }
+    }
+
+    function handleCellClick(target) {
+      var iso = target.getAttribute("data-date");
+      if (!iso) return;
+      var d = startOfDay(new Date(iso));
+      if (!calStart || (calStart && calEnd)) {
+        calStart = d; calEnd = null;
+      } else if (d < calStart) {
+        calEnd = calStart;
+        calStart = d;
+      } else {
+        calEnd = d;
+      }
+      renderCalendar();
     }
 
     input.addEventListener("focus", function () {
@@ -678,13 +800,51 @@ function initCurlCopy(root) {
       });
     }
 
+    var prev = document.getElementById("cal-prev");
+    if (prev) {
+      prev.addEventListener("click", function (e) {
+        e.stopPropagation();
+        calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1);
+        renderCalendar();
+      });
+    }
+    var next = document.getElementById("cal-next");
+    if (next) {
+      next.addEventListener("click", function (e) {
+        e.stopPropagation();
+        calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1);
+        renderCalendar();
+      });
+    }
+
+    if (gridEl) {
+      gridEl.addEventListener("click", function (e) {
+        var btn = e.target.closest(".cal-cell");
+        if (!btn || btn.disabled) return;
+        e.stopPropagation();
+        handleCellClick(btn);
+      });
+    }
+    if (fromTimeEl) fromTimeEl.addEventListener("input", renderCalendar);
+    if (toTimeEl) toTimeEl.addEventListener("input", renderCalendar);
+
     var apply = document.getElementById("picker-apply");
-    var fromEl = document.getElementById("picker-from");
-    var toEl = document.getElementById("picker-to");
-    if (apply && fromEl && toEl) {
+    if (apply) {
       apply.addEventListener("click", function (e) {
         e.stopPropagation();
-        applyAbsolute(fromEl.value, toEl.value);
+        if (!calStart) return;
+        var endDate = calEnd || calStart;
+        var from = combineDateAndTime(calStart, fromTimeEl && fromTimeEl.value);
+        var to = combineDateAndTime(endDate, toTimeEl && toTimeEl.value);
+        if (to < from) { var tmp = from; from = to; to = tmp; }
+        applyAbsolute(from.toISOString(), to.toISOString());
+      });
+    }
+    var cancel = document.getElementById("picker-cancel");
+    if (cancel) {
+      cancel.addEventListener("click", function (e) {
+        e.stopPropagation();
+        showPresets();
       });
     }
 
@@ -1075,46 +1235,187 @@ function initCurlCopy(root) {
     return function (d) { return MONTH_ABBR[d.getMonth()] + " " + d.getDate(); };
   }
 
-  // ── Kibana-style search box ──────────────────────────────────────
-  var SEARCH_KEYS = ["service", "method", "status", "path", "body", "correlation_id", "source_ip"];
+  // ── Search box ───────────────────────────────────────────────────
+  // Committed chips live in `chipTerms[]`; the text input holds only the
+  // in-progress (uncommitted) token. A trailing space (or Enter) commits the
+  // parsed token(s) into chips and clears the input — the same model used by
+  // Datadog / Kibana / Loki filter bars. The hidden `f-q` mirrors
+  // chipsToString(chipTerms) + " " + input.value so non-JS submit works and
+  // refresh produces an identical state.
 
-  function parseSearch(s) {
-    var out = {};
-    SEARCH_KEYS.forEach(function (k) { out[k] = ""; });
-    if (!s) return out;
-    var freeText = [];
-    var tokens = s.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-    tokens.forEach(function (tok) {
-      var idx = tok.indexOf(":");
-      if (idx <= 0) { freeText.push(strip(tok)); return; }
-      var key = tok.slice(0, idx).toLowerCase();
-      var val = strip(tok.slice(idx + 1));
-      if (SEARCH_KEYS.indexOf(key) !== -1) out[key] = val;
-      else freeText.push(tok);
-    });
-    if (freeText.length && !out.body) out.body = freeText.join(" ").trim();
-    return out;
+  function escAttr(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+  function escText(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
   }
 
-  function strip(tok) {
-    if (tok.length >= 2 && tok.charAt(0) === '"' && tok.charAt(tok.length - 1) === '"') {
-      return tok.slice(1, -1);
+  function renderChip(c) {
+    var classes = "qchip";
+    if (c.isFreeform) classes += " is-freeform";
+    if (c.isHeader) classes += " is-header";
+    if (c.negated) classes += " is-negated";
+    var html = '<span class="' + classes + '"' +
+      ' data-key="' + escAttr(c.key) + '"' +
+      ' data-value="' + escAttr(c.value) + '"' +
+      ' data-token="' + escAttr(c.token) + '">';
+    if (c.negated) html += '<span class="qneg" aria-label="negated">−</span>';
+    if (c.isHeader) html += '<span class="qhdr" aria-label="header" title="per-header search">H</span>';
+    if (c.isFreeform) html += '<span class="qany" aria-label="any field" title="match against any field">any</span>';
+    else html += '<span class="qk">' + escText(c.key) + '</span><span class="qop">:</span>';
+    html += '<span class="qv">' + escText(c.value) + '</span>';
+    html += '<button type="button" class="qx" data-chip-remove="' + escAttr(c.token) + '" aria-label="Remove">×</button>';
+    html += '</span>';
+    return html;
+  }
+
+  function chipsToString(chipTerms) {
+    var sql = window.__searchql;
+    if (!sql || !chipTerms || !chipTerms.length) return "";
+    var parts = [];
+    for (var i = 0; i < chipTerms.length; i++) {
+      parts.push(sql.chipFromTerm(chipTerms[i]).token);
     }
-    return tok;
+    return parts.join(" ");
+  }
+
+  function combinedQuery(chipTerms, inputValue) {
+    var head = chipsToString(chipTerms);
+    var tail = (inputValue || "").trim();
+    if (head && tail) return head + " " + tail;
+    return head || tail;
+  }
+
+  var OR_HINT_DISMISSED_KEY = "httpcatch.orHintDismissed";
+  function orHintDismissed() {
+    try { return sessionStorage.getItem(OR_HINT_DISMISSED_KEY) === "1"; }
+    catch (e) { return false; }
+  }
+  function dismissOrHint() {
+    try { sessionStorage.setItem(OR_HINT_DISMISSED_KEY, "1"); } catch (e) {}
   }
 
   function wireSearch() {
     var input = document.getElementById("search-input");
     var clear = document.getElementById("search-clear");
     var form = document.getElementById("filter-form");
-    if (!input || !form) return;
+    var qHidden = document.getElementById("f-q");
+    var host = document.getElementById("query-input-host");
+    if (!input || !form || !qHidden) return;
 
-    // Active filters round-trip via the visible chips above the input.
-    // Leaving the bare input empty avoids duplicating each chip as text.
+    if (!window.__searchql) {
+      // Without the JS parser there's nothing more to wire — server-rendered
+      // chips remain visible and the form submits via the verbatim hidden q.
+      return;
+    }
+    var sql = window.__searchql;
+    var chipTerms = [];
+
+    function rerenderChips() {
+      var existing = host.querySelectorAll(".qchip");
+      for (var i = 0; i < existing.length; i++) existing[i].parentNode.removeChild(existing[i]);
+      if (!chipTerms.length) return;
+      var html = "";
+      for (var j = 0; j < chipTerms.length; j++) {
+        html += renderChip(sql.chipFromTerm(chipTerms[j]));
+      }
+      input.insertAdjacentHTML("beforebegin", html);
+    }
+
+    function syncBannerAndHint() {
+      var combined = sql.parseQuery(combinedQuery(chipTerms, input.value));
+      var banner = document.getElementById("scan-banner");
+      if (banner) {
+        if (sql.isUnindexedScan(combined)) banner.removeAttribute("hidden");
+        else banner.setAttribute("hidden", "");
+      }
+      var hint = document.getElementById("or-hint");
+      if (hint) {
+        var show = sql.shouldShowOrHint(combined) >= 0 && !orHintDismissed();
+        if (show) hint.removeAttribute("hidden");
+        else hint.setAttribute("hidden", "");
+      }
+    }
+
+    function syncHiddenQ() {
+      qHidden.value = combinedQuery(chipTerms, input.value);
+    }
+
+    function commitAll() {
+      var raw = input.value.trim();
+      if (!raw) { input.value = ""; return; }
+      var parsed = sql.parseQuery(raw);
+      if (parsed.error) return;
+      for (var i = 0; i < parsed.terms.length; i++) chipTerms.push(parsed.terms[i]);
+      input.value = "";
+      rerenderChips();
+    }
+
+    // Hydrate chip state from the server-rendered q. Server-rendered chips
+    // are replaced with the JS-managed set so the DOM and JS state agree.
+    if (qHidden.value) {
+      var hydrate = sql.parseQuery(qHidden.value);
+      if (!hydrate.error) {
+        chipTerms = hydrate.terms.slice();
+      }
+    }
+    input.value = "";
+    rerenderChips();
+    syncHiddenQ();
+    syncBannerAndHint();
     if (clear) clear.hidden = true;
 
     input.addEventListener("input", function () {
       if (clear) clear.hidden = input.value === "";
+      // Trailing space commits the parsed token(s) before the space and
+      // clears the input. Quoted strings with internal whitespace stay
+      // pending until the closing quote arrives (tokeniser bails on the
+      // unclosed quote, so commitAll() is a no-op until the value parses).
+      var raw = input.value;
+      var committed = false;
+      if (/\s$/.test(raw)) {
+        var head = raw.replace(/\s+$/, "");
+        if (head !== "") {
+          var parsed = sql.parseQuery(head);
+          if (!parsed.error) {
+            for (var i = 0; i < parsed.terms.length; i++) chipTerms.push(parsed.terms[i]);
+            input.value = "";
+            rerenderChips();
+            committed = true;
+            if (clear) clear.hidden = true;
+          }
+        } else {
+          input.value = "";
+        }
+      } else {
+        // Mid-typing: commit any tokens fully separated by whitespace,
+        // keep the still-being-typed last token in the input. Bail on
+        // parse error (e.g. partial `service:`) — user is still editing.
+        var parsedMid = sql.parseQuery(raw);
+        if (!parsedMid.error && parsedMid.terms.length >= 2) {
+          var tokens = sql.tokenize(raw).tokens || [];
+          if (tokens.length === parsedMid.terms.length) {
+            for (var k = 0; k < parsedMid.terms.length - 1; k++) chipTerms.push(parsedMid.terms[k]);
+            input.value = tokens[tokens.length - 1];
+            rerenderChips();
+            committed = true;
+          }
+        }
+      }
+      syncHiddenQ();
+      syncBannerAndHint();
+      if (committed) {
+        input.focus();
+        var len = input.value.length;
+        try { input.setSelectionRange(len, len); } catch (e) {}
+      }
     });
 
     if (clear) {
@@ -1122,63 +1423,128 @@ function initCurlCopy(root) {
         input.value = "";
         clear.hidden = true;
         input.focus();
+        syncHiddenQ();
+        syncBannerAndHint();
       });
     }
 
     input.addEventListener("keydown", function (e) {
-      if (e.key !== "Enter") return;
-      e.preventDefault();
-      flushSearchToMirrors();
-      submitForm();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commitAll();
+        syncHiddenQ();
+        submitForm();
+        return;
+      }
+      if (e.key === "Backspace" && input.value === "" && chipTerms.length > 0) {
+        e.preventDefault();
+        chipTerms.pop();
+        rerenderChips();
+        syncHiddenQ();
+        syncBannerAndHint();
+        input.focus();
+      }
     });
 
     form.addEventListener("submit", function () {
-      flushSearchToMirrors();
+      commitAll();
+      syncHiddenQ();
     });
 
-    // Chip remove buttons clear the corresponding hidden input and submit.
-    var host = document.getElementById("query-input-host");
-    if (host) {
-      host.addEventListener("click", function (e) {
-        var x = e.target.closest("[data-chip-remove]");
-        if (!x) return;
-        e.preventDefault();
-        var key = x.getAttribute("data-chip-remove");
-        var map = {
-          service: "f-service", method: "f-method", status: "f-status",
-          path: "f-path", body: "f-body",
-        };
-        var fid = map[key];
-        if (fid) setVal(fid, "");
-        submitForm();
-      });
-    }
+    host.addEventListener("click", function (e) {
+      var x = e.target.closest("[data-chip-remove]");
+      if (!x) return;
+      e.preventDefault();
+      var chip = x.closest(".qchip");
+      if (!chip || !chip.parentNode) return;
+      var siblings = chip.parentNode.querySelectorAll(".qchip");
+      var index = -1;
+      for (var i = 0; i < siblings.length; i++) {
+        if (siblings[i] === chip) { index = i; break; }
+      }
+      if (index < 0) return;
+      chipTerms.splice(index, 1);
+      rerenderChips();
+      syncHiddenQ();
+      syncBannerAndHint();
+      input.focus();
+    });
 
-    function flushSearchToMirrors() {
-      var parsed = parseSearch(input.value);
-      // Existing chips already round-trip via hidden inputs; only merge new
-      // key:value tokens the user typed into the bare input.
-      if (parsed.service) setVal("f-service", parsed.service);
-      if (parsed.method) setVal("f-method", parsed.method);
-      if (parsed.status) setVal("f-status", parsed.status);
-      if (parsed.path) setVal("f-path", parsed.path);
-      if (parsed.body) setVal("f-body", parsed.body);
-      if (parsed.correlation_id) setVal("f-correlation-id", parsed.correlation_id);
-      if (parsed.source_ip) setVal("f-source-ip", parsed.source_ip);
+    var hintDismiss = document.getElementById("or-hint-dismiss");
+    if (hintDismiss) {
+      hintDismiss.addEventListener("click", function () {
+        dismissOrHint();
+        var hint = document.getElementById("or-hint");
+        if (hint) hint.setAttribute("hidden", "");
+      });
     }
   }
 
-  function setVal(id, v) { var el = document.getElementById(id); if (el) el.value = v; }
-
   // ── Saved views (localStorage) ───────────────────────────────────
   var SAVED_KEY = "httpcatch.savedViews";
+
+  // PRE_CUTOVER_FIELD_KEYS lists the per-field URL parameters that the
+  // pre-q saved views used. Anything in this set or matching `header.<name>`
+  // gets folded into a single `q=` token on load.
+  var PRE_CUTOVER_FIELD_KEYS = {
+    service: 1, host: 1, path: 1, method: 1, status: 1, source_ip: 1,
+    correlation_id: 1, body: 1, headers: 1,
+  };
+  var TEMPORAL_PARAMS = ["since", "until", "limit", "live"];
+
+  function migrateSavedView(view) {
+    if (!view || typeof view !== "object" || typeof view.query !== "string") return null;
+    var params;
+    try { params = new URLSearchParams(view.query); }
+    catch (e) { return null; }
+
+    var hasOld = false;
+    var oldTokens = [];
+    var entries = [];
+    params.forEach(function (v, k) { entries.push([k, v]); });
+    for (var i = 0; i < entries.length; i++) {
+      var k = entries[i][0];
+      if (PRE_CUTOVER_FIELD_KEYS[k] || k.indexOf("header.") === 0) {
+        hasOld = true;
+        oldTokens.push(k + ":" + entries[i][1]);
+      }
+    }
+    if (!hasOld) return view;
+
+    var qExisting = params.get("q") || "";
+    var merged = (qExisting ? [qExisting] : []).concat(oldTokens).join(" ");
+    if (window.__searchql) {
+      var parsed = window.__searchql.parseQuery(merged);
+      if (parsed.error) {
+        console.warn("httpcatch: discarding unrecognisable saved view", view, parsed.error);
+        return null;
+      }
+    }
+    var next = new URLSearchParams();
+    for (var j = 0; j < TEMPORAL_PARAMS.length; j++) {
+      var tk = TEMPORAL_PARAMS[j];
+      if (params.get(tk)) next.set(tk, params.get(tk));
+    }
+    next.set("q", merged);
+    return { name: view.name, query: next.toString() };
+  }
 
   function loadSaved() {
     try {
       var raw = localStorage.getItem(SAVED_KEY);
       if (!raw) return [];
       var arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr : [];
+      if (!Array.isArray(arr)) return [];
+      var out = [];
+      var dirty = false;
+      for (var i = 0; i < arr.length; i++) {
+        var migrated = migrateSavedView(arr[i]);
+        if (!migrated) { dirty = true; continue; }
+        if (migrated !== arr[i]) dirty = true;
+        out.push(migrated);
+      }
+      if (dirty) storeSaved(out);
+      return out;
     } catch (e) { return []; }
   }
   function storeSaved(arr) {

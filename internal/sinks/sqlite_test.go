@@ -145,6 +145,7 @@ func TestSQLiteSink_SchemaPragmasAndIndexes(t *testing.T) {
 		"idx_events_correlation_id",
 		"idx_events_type",
 		"idx_events_status",
+		"idx_events_request_path",
 	}
 	for _, idx := range wantIndexes {
 		var name string

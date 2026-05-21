@@ -662,7 +662,7 @@ func TestMemoryReader_OrphanFilters_MethodExcludesOrphans(t *testing.T) {
 	}
 
 	// method filter: orphans must not appear when method is set.
-	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Method: "GET"}, 50, nil)
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{Query: mustParseQuery(t, "method:GET")}, 50, nil)
 	if err != nil {
 		t.Fatalf("ReadRoots: %v", err)
 	}

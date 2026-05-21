@@ -1,13 +1,14 @@
 package sinks
 
 import (
-	"bytes"
 	"context"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/inspect"
+	"github.com/radarnex/httpcatch/internal/searchql"
 )
 
 // ReadRoots returns captured-request and orphan-event rows from the in-memory
@@ -35,16 +36,12 @@ func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit 
 	}
 
 	includeOrphans := !q.HasRequestOnlyFilter()
-
-	var bodyNeedle []byte
-	if q.Body != "" {
-		bodyNeedle = []byte(q.Body)
-	}
+	matchRequest := searchql.CompilePredicate(q.Query)
 
 	// Emit a RootRow for each eligible record, applying field-level filters
-	// that do not depend on sort order. Service, correlation_id, and temporal
-	// filters are applied here to avoid appending rows that will be dropped later.
-	var candidates []inspect.RootRow
+	// that do not depend on sort order. Temporal filters and field-level terms
+	// are applied here to avoid appending rows that will be dropped later.
+	candidates := make([]inspect.RootRow, 0, len(all))
 	for _, r := range all {
 		// Temporal filters apply to all record types on the record's own timestamp.
 		ts := r.RecordTimestamp()
@@ -57,13 +54,7 @@ func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit 
 
 		switch v := r.(type) {
 		case *capture.CapturedRequest:
-			if q.Service != "" && v.Service != q.Service {
-				continue
-			}
-			if q.CorrelationID != "" && v.CorrelationID != q.CorrelationID {
-				continue
-			}
-			if bodyNeedle != nil && !bytes.Contains(v.Body, bodyNeedle) {
+			if !matchRequest(v) {
 				continue
 			}
 			ec := 0 // event_count is unknown in memory; filled by SQLite join
@@ -87,24 +78,8 @@ func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit 
 			if _, hasReq := requestCorrs[v.CorrelationID]; hasReq {
 				continue // correlated with a known request, not an orphan
 			}
-			if q.Service != "" && v.Service != q.Service {
+			if !matchOrphanResponse(q.Query, v) {
 				continue
-			}
-			if q.CorrelationID != "" && v.CorrelationID != q.CorrelationID {
-				continue
-			}
-			// Apply status filter to orphan_response on the event's own status.
-			if q.Status != nil {
-				if q.Status.Exact != 0 && v.Status != q.Status.Exact {
-					continue
-				}
-				if q.Status.Class != "" {
-					lo := int(q.Status.Class[0]-'0') * 100
-					hi := lo + 99
-					if v.Status < lo || v.Status > hi {
-						continue
-					}
-				}
 			}
 			st := v.Status
 			candidates = append(candidates, inspect.RootRow{
@@ -122,14 +97,7 @@ func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit 
 			if _, hasReq := requestCorrs[v.CorrelationID]; hasReq {
 				continue
 			}
-			if q.Service != "" && v.Service != q.Service {
-				continue
-			}
-			if q.CorrelationID != "" && v.CorrelationID != q.CorrelationID {
-				continue
-			}
-			// status filter excludes outbound orphans (they have no status at the top level).
-			if q.Status != nil {
+			if !matchOrphanOutbound(q.Query, v) {
 				continue
 			}
 			candidates = append(candidates, inspect.RootRow{
@@ -247,4 +215,125 @@ func (s *MemorySink) ServicesSeen(_ context.Context, since time.Time) ([]string,
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// matchOrphanResponse evaluates the subset of q that applies to orphan
+// response events on their own fields: service, correlation_id, status.
+// Request-only terms (method, path, source_ip, body, host) bypass this branch
+// entirely because the caller has already gated on q.HasRequestOnlyFilter().
+func matchOrphanResponse(q searchql.Query, ev *capture.ResponseEvent) bool {
+	for _, t := range q.Terms {
+		matched, applies := evaluateOrphanResponseTerm(&t, ev)
+		if !applies {
+			continue
+		}
+		if t.Negated {
+			matched = !matched
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// matchOrphanOutbound evaluates q against an orphan outbound event. Outbound
+// events have no top-level status, so any status term — positive or negated —
+// excludes them.
+func matchOrphanOutbound(q searchql.Query, ev *capture.OutboundEvent) bool {
+	for _, t := range q.Terms {
+		if t.Field == searchql.FieldStatus {
+			return false
+		}
+		matched, applies := evaluateOutboundOrphanTerm(&t, ev)
+		if !applies {
+			continue
+		}
+		if t.Negated {
+			matched = !matched
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// evaluateOutboundOrphanTerm dispatches per-term evaluation for orphan
+// outbound events. Headers terms scan both the request and response halves;
+// service/correlation_id fall through to the shared helper.
+func evaluateOutboundOrphanTerm(t *searchql.Term, ev *capture.OutboundEvent) (matched, applies bool) {
+	switch t.Field {
+	case "":
+		return searchql.MatchFreeformOutboundEvent(t, ev), true
+	case searchql.FieldHeaders:
+		if searchql.HeadersAny(ev.Request.Headers, t.Value) {
+			return true, true
+		}
+		if ev.Response != nil && searchql.HeadersAny(ev.Response.Headers, t.Value) {
+			return true, true
+		}
+		return false, true
+	case searchql.FieldHeader:
+		if searchql.HeaderValueContains(ev.Request.Headers, t.HeaderName, t.Value) {
+			return true, true
+		}
+		if ev.Response != nil && searchql.HeaderValueContains(ev.Response.Headers, t.HeaderName, t.Value) {
+			return true, true
+		}
+		return false, true
+	}
+	return evaluateOrphanCommonTerm(t, ev.Service, ev.CorrelationID)
+}
+
+// evaluateOrphanResponseTerm reports whether t matches ev on the term's field,
+// and whether the field is one the orphan response arm answers (service,
+// correlation_id, status, headers, header.<name>, freeform). Negation is
+// applied by the caller.
+func evaluateOrphanResponseTerm(t *searchql.Term, ev *capture.ResponseEvent) (matched, applies bool) {
+	if t.Field == "" {
+		return searchql.MatchFreeformResponseEvent(t, ev), true
+	}
+	if t.Field == searchql.FieldStatus {
+		if t.StatusFilter == nil {
+			return false, false
+		}
+		if t.StatusFilter.Exact != 0 {
+			return ev.Status == t.StatusFilter.Exact, true
+		}
+		lo, hi := t.StatusFilter.ClassRange()
+		return ev.Status >= lo && ev.Status <= hi, true
+	}
+	if t.Field == searchql.FieldHeaders {
+		return searchql.HeadersAny(ev.Headers, t.Value), true
+	}
+	if t.Field == searchql.FieldHeader {
+		return searchql.HeaderValueContains(ev.Headers, t.HeaderName, t.Value), true
+	}
+	return evaluateOrphanCommonTerm(t, ev.Service, ev.CorrelationID)
+}
+
+// evaluateOrphanCommonTerm reports whether t matches the service /
+// correlation_id portion of an event. service honors the term's wildcard;
+// correlation_id is exact-only (parser rejects wildcards on it). Negation is
+// applied by the caller.
+func evaluateOrphanCommonTerm(t *searchql.Term, service, correlationID string) (matched, applies bool) {
+	switch t.Field {
+	case searchql.FieldService:
+		return matchOrphanString(service, t), true
+	case searchql.FieldCorrelationID:
+		return correlationID == t.Value, true
+	}
+	return false, false
+}
+
+func matchOrphanString(s string, t *searchql.Term) bool {
+	switch t.Wildcard {
+	case searchql.WildcardPrefix:
+		return strings.HasPrefix(s, t.Value)
+	case searchql.WildcardSubstring:
+		return strings.Contains(s, t.Value)
+	default:
+		return s == t.Value
+	}
 }

@@ -73,6 +73,7 @@ CREATE INDEX IF NOT EXISTS idx_events_service ON events(service);
 CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events(correlation_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
+CREATE INDEX IF NOT EXISTS idx_events_request_path ON events(request_path);
 `
 
 const sqlitePragmas = `
@@ -120,7 +121,12 @@ func NewSQLiteSink(path string) (*SQLiteSink, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", "file:"+path)
+	// case_sensitive_like keeps SQLite's LIKE operator case-sensitive on
+	// every pooled connection, which is what unlocks the column-index
+	// optimisation for prefix LIKE patterns ('foo%'). The searchql grammar
+	// matches host/path/service exactly when no wildcard is present, so
+	// case-sensitive LIKE matches its documented semantics.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=case_sensitive_like(1)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}

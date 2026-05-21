@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +82,12 @@ func recordIDs(recs []map[string]any) []string {
 	return ids
 }
 
+// qParam returns "q=<URL-encoded q value>" so callers compose the query string
+// without escaping concerns.
+func qParam(q string) string {
+	return "q=" + url.QueryEscape(q)
+}
+
 func TestRequests_FilterValidation_UnknownKey_400(t *testing.T) {
 	t.Parallel()
 
@@ -134,29 +142,33 @@ func TestRequests_FilterValidation_BadUntil_400(t *testing.T) {
 	}
 }
 
-func TestRequests_FilterValidation_BadMethod_400(t *testing.T) {
+func TestRequests_FilterValidation_OldPerFieldKeys_400(t *testing.T) {
 	t.Parallel()
 
 	ts := newInspectServer(t, admin.ReadSources{})
-	resp := getRequests(t, ts, "method=FETCH")
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("status: got %d want 400", resp.StatusCode)
-	}
-	var body map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body["field"] != "method" {
-		t.Errorf("field: got %v want method", body["field"])
+	for _, key := range []string{"service", "method", "status", "path", "body", "correlation_id", "source_ip", "has_events"} {
+		t.Run(key, func(t *testing.T) {
+			resp := getRequests(t, ts, key+"=x")
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status: got %d want 400", resp.StatusCode)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body["field"] != key {
+				t.Errorf("field: got %v want %s", body["field"], key)
+			}
+		})
 	}
 }
 
-func TestRequests_FilterValidation_BadStatus_400(t *testing.T) {
+func TestRequests_FilterValidation_BadQ_400(t *testing.T) {
 	t.Parallel()
 
 	ts := newInspectServer(t, admin.ReadSources{})
-	resp := getRequests(t, ts, "status=notastatus")
+	resp := getRequests(t, ts, qParam("method:FETCH"))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status: got %d want 400", resp.StatusCode)
@@ -165,26 +177,12 @@ func TestRequests_FilterValidation_BadStatus_400(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body["field"] != "status" {
-		t.Errorf("field: got %v want status", body["field"])
+	if body["field"] != "q" {
+		t.Errorf("field: got %v want q", body["field"])
 	}
-}
-
-func TestRequests_FilterValidation_BadHasEvents_400(t *testing.T) {
-	t.Parallel()
-
-	ts := newInspectServer(t, admin.ReadSources{})
-	resp := getRequests(t, ts, "has_events=yes")
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("status: got %d want 400", resp.StatusCode)
-	}
-	var body map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body["field"] != "has_events" {
-		t.Errorf("field: got %v want has_events", body["field"])
+	msg, _ := body["error"].(string)
+	if msg == "" || !strings.Contains(msg, "method:FETCH") {
+		t.Errorf("error message should name offending token; got %q", msg)
 	}
 }
 
@@ -205,7 +203,7 @@ func TestRequests_Filter_Service(t *testing.T) {
 	}
 
 	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
-	status, body := getRequestsWithQuery(t, ts, "service=orders")
+	status, body := getRequestsWithQuery(t, ts, qParam("service:orders"))
 	if status != http.StatusOK {
 		t.Fatalf("status: got %d want 200", status)
 	}
@@ -238,7 +236,7 @@ func TestRequests_Filter_Method(t *testing.T) {
 
 	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
 	// method is case-insensitive on parse
-	_, body := getRequestsWithQuery(t, ts, "method=post")
+	_, body := getRequestsWithQuery(t, ts, qParam("method:post"))
 	ids := recordIDs(body.Records)
 	if len(ids) != 2 {
 		t.Fatalf("expected 2 records, got %d: %v", len(ids), ids)
@@ -257,7 +255,6 @@ func TestRequests_Filter_StatusExact(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
 
-	// Two requests, one with a correlated response at 200, one at 500.
 	r1 := filterBaseRequest("r1", "svc", "GET", "/", "corr-1", "x", base)
 	r2 := filterBaseRequest("r2", "svc", "GET", "/", "corr-2", "x", base.Add(time.Second))
 	for _, r := range []*capture.CapturedRequest{r1, r2} {
@@ -274,10 +271,10 @@ func TestRequests_Filter_StatusExact(t *testing.T) {
 	}
 
 	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
-	_, body := getRequestsWithQuery(t, ts, "status=200")
+	_, body := getRequestsWithQuery(t, ts, qParam("status:200"))
 	ids := recordIDs(body.Records)
 	if len(ids) != 1 || ids[0] != "r1" {
-		t.Errorf("status=200: got %v want [r1]", ids)
+		t.Errorf("status:200: got %v want [r1]", ids)
 	}
 }
 
@@ -308,22 +305,22 @@ func TestRequests_Filter_StatusClass(t *testing.T) {
 	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
 
 	// 5xx should return r2 and r3
-	_, body := getRequestsWithQuery(t, ts, "status=5xx")
+	_, body := getRequestsWithQuery(t, ts, qParam("status:5xx"))
 	ids := recordIDs(body.Records)
 	if len(ids) != 2 {
-		t.Fatalf("status=5xx: got %d records want 2: %v", len(ids), ids)
+		t.Fatalf("status:5xx: got %d records want 2: %v", len(ids), ids)
 	}
 	for _, id := range ids {
 		if id != "r2" && id != "r3" {
-			t.Errorf("status=5xx: unexpected id %q", id)
+			t.Errorf("status:5xx: unexpected id %q", id)
 		}
 	}
 
 	// 2xx should return r1
-	_, body = getRequestsWithQuery(t, ts, "status=2xx")
+	_, body = getRequestsWithQuery(t, ts, qParam("status:2xx"))
 	ids = recordIDs(body.Records)
 	if len(ids) != 1 || ids[0] != "r1" {
-		t.Errorf("status=2xx: got %v want [r1]", ids)
+		t.Errorf("status:2xx: got %v want [r1]", ids)
 	}
 }
 
@@ -345,10 +342,10 @@ func TestRequests_Filter_Path(t *testing.T) {
 	}
 
 	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
-	_, body := getRequestsWithQuery(t, ts, "path=/api/users")
+	_, body := getRequestsWithQuery(t, ts, qParam("path:/api/users*"))
 	ids := recordIDs(body.Records)
 	if len(ids) != 2 {
-		t.Fatalf("path=/api/users: got %d records want 2: %v", len(ids), ids)
+		t.Fatalf("path:/api/users*: got %d records want 2: %v", len(ids), ids)
 	}
 	for _, id := range ids {
 		if id != "r1" && id != "r3" {
@@ -356,10 +353,16 @@ func TestRequests_Filter_Path(t *testing.T) {
 		}
 	}
 
-	// Exact prefix: /api should match all 3 under /api
-	_, body = getRequestsWithQuery(t, ts, "path=/api")
+	// Trailing wildcard on /api matches all three rows under /api.
+	_, body = getRequestsWithQuery(t, ts, qParam("path:/api*"))
 	if len(body.Records) != 3 {
-		t.Errorf("path=/api: got %d want 3", len(body.Records))
+		t.Errorf("path:/api*: got %d want 3", len(body.Records))
+	}
+
+	// Bare path is exact match — no trailing wildcard, no row matches.
+	_, body = getRequestsWithQuery(t, ts, qParam("path:/api/users"))
+	if len(body.Records) != 0 {
+		t.Errorf("bare path:/api/users: got %d want 0 (exact, no row has that literal path)", len(body.Records))
 	}
 }
 
@@ -379,7 +382,7 @@ func TestRequests_Filter_CorrelationID(t *testing.T) {
 	}
 
 	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
-	_, body := getRequestsWithQuery(t, ts, "correlation_id=target-corr")
+	_, body := getRequestsWithQuery(t, ts, qParam("correlation_id:target-corr"))
 	ids := recordIDs(body.Records)
 	if len(ids) != 1 || ids[0] != "r1" {
 		t.Errorf("correlation_id filter: got %v want [r1]", ids)
@@ -403,7 +406,7 @@ func TestRequests_Filter_SourceIP(t *testing.T) {
 	}
 
 	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
-	_, body := getRequestsWithQuery(t, ts, "source_ip=10.0.0.1")
+	_, body := getRequestsWithQuery(t, ts, qParam("source_ip:10.0.0.1"))
 	ids := recordIDs(body.Records)
 	if len(ids) != 2 {
 		t.Fatalf("source_ip filter: got %v want 2", ids)
@@ -412,52 +415,6 @@ func TestRequests_Filter_SourceIP(t *testing.T) {
 		if id != "r1" && id != "r3" {
 			t.Errorf("source_ip filter: unexpected id %q", id)
 		}
-	}
-}
-
-func TestRequests_Filter_HasEvents_True(t *testing.T) {
-	t.Parallel()
-
-	s := filterTestDB(t)
-	ctx := context.Background()
-	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
-
-	r1 := filterBaseRequest("r1", "svc", "GET", "/", "corr-1", "x", base)
-	r2 := filterBaseRequest("r2", "svc", "GET", "/", "corr-2", "x", base.Add(time.Second))
-	r3 := filterBaseRequest("r3", "svc", "GET", "/", "corr-3", "x", base.Add(2*time.Second))
-	for _, r := range []*capture.CapturedRequest{r1, r2, r3} {
-		if err := s.Write(ctx, r); err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-	}
-	// Only r1 and r3 have events.
-	ev1 := filterResponseEvent("ev1", "corr-1", "svc", 200, base.Add(100*time.Millisecond))
-	ev3 := filterResponseEvent("ev3", "corr-3", "svc", 200, base.Add(2*time.Second+100*time.Millisecond))
-	for _, ev := range []*capture.ResponseEvent{ev1, ev3} {
-		if err := s.Write(ctx, ev); err != nil {
-			t.Fatalf("Write ev: %v", err)
-		}
-	}
-
-	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
-
-	// has_events=true: only r1, r3
-	_, body := getRequestsWithQuery(t, ts, "has_events=true")
-	ids := recordIDs(body.Records)
-	if len(ids) != 2 {
-		t.Fatalf("has_events=true: got %d want 2: %v", len(ids), ids)
-	}
-	for _, id := range ids {
-		if id != "r1" && id != "r3" {
-			t.Errorf("has_events=true: unexpected id %q", id)
-		}
-	}
-
-	// has_events=false: only r2
-	_, body = getRequestsWithQuery(t, ts, "has_events=false")
-	ids = recordIDs(body.Records)
-	if len(ids) != 1 || ids[0] != "r2" {
-		t.Errorf("has_events=false: got %v want [r2]", ids)
 	}
 }
 
@@ -547,7 +504,7 @@ func TestRequests_Filter_CombinedAND(t *testing.T) {
 	sinceStr := now.Add(-time.Hour).Format(time.RFC3339)
 	tsSrv := newInspectServer(t, admin.ReadSources{SQLite: s})
 
-	query := "method=POST&path=/api/users&status=5xx&since=" + sinceStr
+	query := qParam("method:POST path:/api/users* status:5xx") + "&since=" + sinceStr
 	_, body := getRequestsWithQuery(t, tsSrv, query)
 	ids := recordIDs(body.Records)
 	// Only r1 should match all three filters within the last hour.
@@ -577,7 +534,7 @@ func TestRequests_SQLiteOnly_NonTemporalFilter_ReadSource(t *testing.T) {
 	ts := newInspectServer(t, admin.ReadSources{Memory: mem, SQLite: s})
 
 	// Non-temporal filter → must be SQLite-only.
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/requests?service=orders", nil)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/requests?"+qParam("service:orders"), nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -628,7 +585,7 @@ func TestRequests_StdoutOnly_WithFilter_ReturnsEmpty(t *testing.T) {
 
 	// Stdout-only (no readers) with any filter → 200 empty list, source: none.
 	ts := newInspectServer(t, admin.ReadSources{})
-	resp := getRequests(t, ts, "service=orders")
+	resp := getRequests(t, ts, qParam("service:orders"))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status: got %d want 200", resp.StatusCode)
@@ -757,8 +714,8 @@ func TestRequests_OrphanStatus_Filter(t *testing.T) {
 
 	ts := newInspectServer(t, admin.ReadSources{SQLite: s})
 
-	// status=5xx should include the orphan_response.
-	_, body := getRequestsWithQuery(t, ts, "status=5xx")
+	// status:5xx should include the orphan_response.
+	_, body := getRequestsWithQuery(t, ts, qParam("status:5xx"))
 	ids := recordIDs(body.Records)
 	found := false
 	for _, id := range ids {
@@ -768,14 +725,14 @@ func TestRequests_OrphanStatus_Filter(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("orphan response not returned by status=5xx filter; got %v", ids)
+		t.Errorf("orphan response not returned by status:5xx filter; got %v", ids)
 	}
 
-	// status=2xx should NOT include the orphan.
-	_, body2xx := getRequestsWithQuery(t, ts, "status=2xx")
+	// status:2xx should NOT include the orphan.
+	_, body2xx := getRequestsWithQuery(t, ts, qParam("status:2xx"))
 	for _, r := range body2xx.Records {
 		if r["id"] == "ev-orphan-503" {
-			t.Error("orphan response should not appear in status=2xx filter")
+			t.Error("orphan response should not appear in status:2xx filter")
 		}
 	}
 }
