@@ -19,7 +19,11 @@ profile.cov
 .env
 
 docs/
+scripts/
+examples/
 Dockerfile
 .dockerignore
 docker-compose.yml
 docker-compose.*.yml
+Makefile
+*.md

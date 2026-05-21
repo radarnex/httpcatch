@@ -1,9 +1,12 @@
-BINARY := httpcatch
-BIN_DIR := bin
-PKG     := ./cmd/httpcatch
-GO      ?= go
+BINARY       := httpcatch
+BIN_DIR      := bin
+PKG          := ./cmd/httpcatch
+GO           ?= go
+DOCKER_IMAGE ?= radarnex/httpcatch
+VERSION      ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+BUILD_TIME   := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: help build test test-race vet fmt fmt-check tidy check run clean docker-build docker-up docker-down docker-logs
+.PHONY: help build test test-race vet fmt fmt-check tidy check run clean docker-build docker-up docker-down docker-logs docker-image-build docker-image-push
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} \
@@ -46,6 +49,25 @@ docker-build:
 		--build-arg VERSION=$$(git rev-parse --short HEAD 2>/dev/null || echo dev) \
 		--build-arg BUILD_TIME=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
 		-t httpcatch:dev .
+
+docker-image-build:
+	docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t $(DOCKER_IMAGE):$(VERSION) \
+		-t $(DOCKER_IMAGE):latest \
+		.
+
+docker-image-push:
+	docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t $(DOCKER_IMAGE):$(VERSION) \
+		-t $(DOCKER_IMAGE):latest \
+		--push \
+		.
 
 docker-up:
 	docker compose up -d --build

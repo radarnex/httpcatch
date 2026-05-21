@@ -2,6 +2,9 @@
 
 FROM golang:1.25-alpine AS build
 
+ARG TARGETARCH
+ARG TARGETOS=linux
+
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -14,8 +17,8 @@ ARG VERSION=docker
 ARG BUILD_TIME=unknown
 
 RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux \
+    --mount=type=cache,target=/root/.cache/go-build,id=go-build-${TARGETARCH} \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build \
       -trimpath \
       -ldflags "-s -w \
