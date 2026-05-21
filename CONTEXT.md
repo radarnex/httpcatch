@@ -58,7 +58,22 @@ A global byte limit on stored bodies (default 1 MiB, configurable, `0` disables)
 The trim policy for the SQLite store. Operators configure exactly one of time-based (`keep records younger than 7d`) or count-based (`keep the most recent 1000 records`) — the two are mutually exclusive. Retention is global; per-service overrides are not part of the first release. A background sweeper deletes records that fall outside the policy. The **memory** ring buffer has its own bound (count-based by construction) independent of this setting.
 
 **Indexed dimensions**:
-The fields a captured record (or event) is searchable and filterable by, both in the **inspect API** and the UI: `timestamp`, `service`, `host`, `correlation_id`, `method`, `path`, `status` (events only), `source_ip`, `has_events` (captured requests only — whether at least one correlated event has arrived), `duration_ms` (events only). Headers and body content are stored but **not** indexed; they appear in the detail view only. Body full-text search and per-header search are not part of the first release.
+The fields a captured record (or event) is searchable and filterable by with index-backed performance, both in the **inspect API** and the UI: `timestamp`, `service`, `host`, `correlation_id`, `method`, `path`, `status` (events only), `source_ip`, `has_events` (captured requests only — whether at least one correlated event has arrived), `duration_ms` (events only).
+
+**Scanned dimensions**:
+Fields searchable but not indexed — answered by scanning the matching captured records. Correct but slower than indexed dimensions and degrading as the store grows; operators feeling the cost are expected to narrow the query first with an **indexed dimension** (typically a time range or `service`) before adding a scanned predicate. The captured-request body and headers are scanned dimensions. Per-field indexes for these are out of scope under the **lightweight** constraint (no embedded search engine; see ADR-0001).
+
+**Search**:
+The query shape accepted by the **inspect API** (`GET /requests`) and the UI search box. A query is a whitespace-separated list of terms, AND'd together; a `-` prefix negates a term. Each term is either field-qualified (`host:`, `path:`, `service:`, `body:`, `headers:`, `header.<name>:`, `method:`, `status:`, `source_ip:`, `correlation_id:`) or a bare freeform term. The freeform term unions over a fixed field set: `host`, `path`, `service` (matched exactly unless wildcarded) and the captured-request and event bodies and headers (substring). Structured fields — `method`, `status`, `source_ip`, `correlation_id` — are field-qualified only and do not participate in freeform. There are no `AND`/`OR`/`NOT` keywords and no grouping parens in this release; the upgrade path to a full KQL grammar is open and non-breaking.
+
+**Per-header search**:
+`headers:foo` scans the full headers JSON for a substring match in any key or value. `header.<name>:foo` matches when the named header's value contains `foo`; header names are canonicalised case-insensitively, so `header.User-Agent:` and `header.user-agent:` are equivalent. A missing header never matches; `-header.<name>:foo` matches rows where the header is absent or its values don't contain `foo`. Both forms apply across `captured_requests.headers`, `events.request_headers`, and `events.response_headers`. Wildcards in the header *name* part (`header.x-*:foo`) are not supported in this release.
+
+**Wildcards**:
+Tokens (freeform or field-qualified) accept `*` as a wildcard. `foo*` matches as a prefix; `*foo` and `*foo*` match as substring. Other glob metacharacters (`?`, `[…]`) are not supported. Wildcards on **scanned dimensions** collapse to the underlying substring (`body:*foo*` ≡ `body:foo`). Tokens may be quoted (`"foo bar"`) to preserve whitespace; inside quotes `*` is a literal character and the value is matched verbatim.
+
+**Unindexed scan**:
+A query whose shape forces an **indexed dimension** to be matched as a substring — i.e., a leading wildcard on `host`, `path`, or `service`, either named or implicit in the freeform term. Such queries bypass the field's index; cost scales with the total row count in the matching time range. The **inspect API** sets `X-Httpcatch-Scan: leading-wildcard-indexed` on these responses; the UI surfaces a warning chip beside the search box. Operators are expected to narrow with an indexed dimension (time range, `service`) before resorting to this shape.
 
 ## Example dialogue
 
