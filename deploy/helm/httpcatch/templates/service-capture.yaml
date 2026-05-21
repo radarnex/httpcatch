@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "httpcatch.fullname" . }}-capture
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "httpcatch.componentLabels" (list . "capture") | nindent 4 }}
+  {{- include "httpcatch.annotations" (dict "ctx" . "extra" .Values.service.capture.annotations) | nindent 2 }}
+spec:
+  type: {{ .Values.service.capture.type }}
+  selector:
+    {{- include "httpcatch.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: capture
+      port: {{ .Values.service.capture.port }}
+      targetPort: capture
+      protocol: TCP

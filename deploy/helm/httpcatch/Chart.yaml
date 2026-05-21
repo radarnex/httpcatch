@@ -1,0 +1,18 @@
+apiVersion: v2
+name: httpcatch
+description: HTTP traffic capture and inspection tool
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/radarnex/httpcatch
+sources:
+  - https://github.com/radarnex/httpcatch
+keywords:
+  - http
+  - capture
+  - observability
+  - debugging
+  - proxy
+maintainers:
+  - name: radarnex

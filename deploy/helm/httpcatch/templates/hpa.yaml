@@ -1,0 +1,41 @@
+{{- if .Values.autoscaling.enabled }}
+{{- if .Values.persistence.enabled }}
+{{- fail "autoscaling.enabled is incompatible with persistence.enabled: the StatefulSet is pinned to a single replica because SQLite is single-writer. Disable one of them." }}
+{{- end }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "httpcatch.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "httpcatch.labels" . | nindent 4 }}
+  {{- include "httpcatch.annotations" (dict "ctx" .) | nindent 2 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "httpcatch.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+  {{- with .Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,172 @@
+image:
+  registry: docker.io
+  repository: radarnex/httpcatch
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+replicaCount: 1
+
+logFormat: json
+
+capturePort: 8080
+queueSize: 1024
+bodyCap: 1048576
+maxEventsPayload: 1048576
+workers: 2
+serviceHeader: X-Httpcatch-Service
+
+sinks:
+  stdout: true
+  memory: true
+  memoryCapacity: 1000
+
+admin:
+  sessionTTL: 24h
+  sessionSecure: true
+
+adminToken:
+  value: ""
+  existingSecret: ""
+  existingSecretKey: admin-token
+
+redaction:
+  headers: []
+  queryParams: []
+  jsonPaths: []
+  regex: []
+  cookies: []
+
+extraConfig: {}
+
+persistence:
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  mountPath: /var/lib/httpcatch
+  retentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+
+service:
+  capture:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+  admin:
+    type: ClusterIP
+    port: 8081
+    annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  path: /
+  pathType: Prefix
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+# Empty by default. For real workloads set requests.memory >= 128Mi
+resources: {}
+
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 1
+    successThreshold: 1
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 1
+    successThreshold: 1
+    failureThreshold: 3
+  startup:
+    enabled: true
+    initialDelaySeconds: 0
+    periodSeconds: 2
+    timeoutSeconds: 1
+    successThreshold: 1
+    failureThreshold: 30
+
+terminationGracePeriodSeconds: 30
+
+deployment:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: ""
+  maxUnavailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: ""
+  behavior: {}
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  namespace: ""
+  relabelings: []
+  metricRelabelings: []
+  honorLabels: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+podAnnotations: {}
+podLabels: {}
+commonLabels: {}
+commonAnnotations: {}
+
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+extraInitContainers: []
+extraContainers: []
