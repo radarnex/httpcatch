@@ -1174,93 +1174,119 @@ function initCurlCopy(root) {
   }
 
   // ── Histogram (stacked by status class) ──────────────────────────
-  function statusBucket(s) {
-    if (s == null) return null;
-    if (s >= 200 && s < 300) return "2";
-    if (s >= 300 && s < 400) return "3";
-    if (s >= 400 && s < 500) return "4";
-    if (s >= 500 && s < 600) return "5";
-    return null;
-  }
-
   function readVar(name, fallback) {
     var v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     return v || fallback;
   }
 
-  function renderHistogramAndCount() {
-    var canvas = document.getElementById("histogram-canvas");
-    var tbody = document.getElementById("requests-tbody");
-    var resultsCount = document.getElementById("results-count");
+  var lastAggregation = null;
+  var aggregationInFlight = null;
+  var aggregationDebounceHandle = 0;
+  var HISTOGRAM_BUCKETS = 40;
+  var AGGREGATION_DEBOUNCE_MS = 400;
+
+  function updateResultsWindow() {
     var resultsWindow = document.getElementById("results-window");
-    if (!canvas || !tbody) return;
-
-    var rows = tbody.querySelectorAll("tr[data-timestamp]");
-    var count = rows.length;
-    if (resultsCount) resultsCount.textContent = String(count);
-
+    if (!resultsWindow) return;
     var since = document.getElementById("f-since");
     var until = document.getElementById("f-until");
-    if (resultsWindow) {
-      if (since && until && since.value && until.value) {
-        var s = new Date(since.value); var u = new Date(until.value);
-        if (!isNaN(s.getTime()) && !isNaN(u.getTime())) {
-          resultsWindow.textContent = formatRange(s, u);
-        } else { resultsWindow.textContent = ""; }
-      } else { resultsWindow.textContent = ""; }
+    if (since && until && since.value && until.value) {
+      var s = new Date(since.value); var u = new Date(until.value);
+      if (!isNaN(s.getTime()) && !isNaN(u.getTime())) {
+        resultsWindow.textContent = formatRange(s, u);
+        return;
+      }
     }
+    resultsWindow.textContent = "";
+  }
 
-    if (count === 0) {
+  function aggregateURL() {
+    var params = new URLSearchParams(window.location.search);
+    params.delete("cursor");
+    params.delete("limit");
+    var fq = document.getElementById("f-q");
+    var fs = document.getElementById("f-since");
+    var fu = document.getElementById("f-until");
+    if (fq && fq.value) params.set("q", fq.value); else params.delete("q");
+    if (fs && fs.value) params.set("since", fs.value); else params.delete("since");
+    if (fu && fu.value) params.set("until", fu.value); else params.delete("until");
+    params.set("buckets", String(HISTOGRAM_BUCKETS));
+    return "/requests/aggregate?" + params.toString();
+  }
+
+  function fetchAggregationAndRender() {
+    updateResultsWindow();
+    var canvas = document.getElementById("histogram-canvas");
+    if (!canvas) return;
+    if (aggregationInFlight) aggregationInFlight.abort();
+    var controller = new AbortController();
+    aggregationInFlight = controller;
+    fetch(aggregateURL(), {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    }).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }).then(function (data) {
+      if (aggregationInFlight === controller) aggregationInFlight = null;
+      lastAggregation = data;
+      var resultsCount = document.getElementById("results-count");
+      if (resultsCount && typeof data.total === "number") {
+        resultsCount.textContent = String(data.total);
+      }
+      renderHistogram();
+    }).catch(function (err) {
+      if (err && err.name === "AbortError") return;
+      if (aggregationInFlight === controller) aggregationInFlight = null;
+      console.error("httpcatch: aggregate fetch failed:", err);
+    });
+  }
+
+  // Live-tail polls every 2s and may dispatch this on each tick; trailing
+  // debounce coalesces bursts into a single aggregation call.
+  function fetchAggregationDebounced() {
+    if (aggregationDebounceHandle) clearTimeout(aggregationDebounceHandle);
+    aggregationDebounceHandle = setTimeout(function () {
+      aggregationDebounceHandle = 0;
+      fetchAggregationAndRender();
+    }, AGGREGATION_DEBOUNCE_MS);
+  }
+
+  function renderHistogram() {
+    var canvas = document.getElementById("histogram-canvas");
+    if (!canvas) return;
+    var agg = lastAggregation;
+    if (!agg || !agg.buckets || !agg.buckets.length) {
       var c = canvas.getContext("2d");
       c.clearRect(0, 0, canvas.width, canvas.height);
       return;
     }
 
-    var timestamps = [];
-    var buckets2 = []; // parallel: status class char
-    rows.forEach(function (r) {
-      var ts = r.getAttribute("data-timestamp");
-      var d = new Date(ts);
-      if (isNaN(d.getTime())) return;
-      timestamps.push(d.getTime());
-      var statusEl = r.querySelector(".s-badge");
-      var cls = null;
-      if (statusEl) {
-        var m = statusEl.className.match(/s-(\d)xx/);
-        if (m) cls = m[1];
-      }
-      buckets2.push(cls);
-    });
-    if (!timestamps.length) return;
-
-    var minT = Math.min.apply(null, timestamps);
-    var maxT = Math.max.apply(null, timestamps);
+    var since = document.getElementById("f-since");
+    var until = document.getElementById("f-until");
+    var minT = null, maxT = null;
     if (since && since.value) {
       var sd = new Date(since.value); if (!isNaN(sd.getTime())) minT = sd.getTime();
     }
     if (until && until.value) {
       var ud = new Date(until.value); if (!isNaN(ud.getTime())) maxT = ud.getTime();
     }
+    if (minT == null || maxT == null) {
+      var first = new Date(agg.buckets[0].start).getTime();
+      var last = new Date(agg.buckets[agg.buckets.length - 1].start).getTime();
+      if (minT == null) minT = first;
+      if (maxT == null) maxT = last;
+    }
     if (maxT <= minT) maxT = minT + 60000;
 
-    var bn = 40;
-    var bw = (maxT - minT) / bn;
-    var stacks = new Array(bn);
-    for (var i = 0; i < bn; i++) stacks[i] = { "2": 0, "3": 0, "4": 0, "5": 0, other: 0 };
-    timestamps.forEach(function (t, k) {
-      var idx = Math.floor((t - minT) / bw);
-      if (idx < 0) idx = 0;
-      if (idx >= bn) idx = bn - 1;
-      var cls = buckets2[k];
-      stacks[idx][cls || "other"]++;
-    });
-
-    drawHistogram(canvas, stacks, minT, maxT);
+    drawHistogram(canvas, agg.buckets, minT, maxT);
   }
 
   var AXIS_HEIGHT = 18;
+  var Y_AXIS_WIDTH = 32;
 
-  function drawHistogram(canvas, stacks, minT, maxT) {
+  function drawHistogram(canvas, buckets, minT, maxT) {
     var dpr = window.devicePixelRatio || 1;
     var w = canvas.clientWidth;
     var h = canvas.clientHeight;
@@ -1271,16 +1297,21 @@ function initCurlCopy(root) {
     ctx.clearRect(0, 0, w, h);
 
     var chartH = h - AXIS_HEIGHT;
+    var chartW = w - Y_AXIS_WIDTH;
+    var chartX = Y_AXIS_WIDTH;
 
     var max = 0;
-    stacks.forEach(function (b) {
-      var total = b["2"] + b["3"] + b["4"] + b["5"] + b.other;
+    buckets.forEach(function (b) {
+      var total = (b.s2xx || 0) + (b.s3xx || 0) + (b.s4xx || 0) + (b.s5xx || 0) + (b.other || 0);
       if (total > max) max = total;
     });
+    var niceMax = niceCeil(max);
 
-    if (max > 0) {
-      var n = stacks.length;
-      var barW = w / n;
+    drawYAxis(ctx, chartX, chartH, niceMax);
+
+    if (niceMax > 0) {
+      var n = buckets.length;
+      var barW = chartW / n;
       var gap = Math.max(1, barW * 0.15);
       var colors = {
         "2": readVar("--s-2xx", "#0d9968"),
@@ -1289,19 +1320,24 @@ function initCurlCopy(root) {
         "5": readVar("--s-5xx", "#e11d48"),
         "other": readVar("--text-4", "#a3aab8"),
       };
-      stacks.forEach(function (b, i) {
-        var total = b["2"] + b["3"] + b["4"] + b["5"] + b.other;
+      var fields = [
+        { key: "s2xx", color: colors["2"] },
+        { key: "s3xx", color: colors["3"] },
+        { key: "s4xx", color: colors["4"] },
+        { key: "s5xx", color: colors["5"] },
+        { key: "other", color: colors["other"] },
+      ];
+      buckets.forEach(function (b, i) {
+        var total = (b.s2xx || 0) + (b.s3xx || 0) + (b.s4xx || 0) + (b.s5xx || 0) + (b.other || 0);
         if (total === 0) return;
-        var x = i * barW + gap / 2;
+        var x = chartX + i * barW + gap / 2;
         var y = chartH;
-        var stack = ["2", "3", "4", "5", "other"];
-        for (var s = 0; s < stack.length; s++) {
-          var cls = stack[s];
-          var v = b[cls];
+        for (var s = 0; s < fields.length; s++) {
+          var v = b[fields[s].key] || 0;
           if (v === 0) continue;
-          var hp = (v / max) * (chartH - 4);
+          var hp = (v / niceMax) * (chartH - 4);
           y -= hp;
-          ctx.fillStyle = colors[cls];
+          ctx.fillStyle = fields[s].color;
           ctx.fillRect(x, y, Math.max(1, barW - gap), hp);
         }
       });
@@ -1310,14 +1346,46 @@ function initCurlCopy(root) {
     ctx.strokeStyle = readVar("--border-strong", "#e4e4e7");
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, chartH + 0.5);
-    ctx.lineTo(w, chartH + 0.5);
+    ctx.moveTo(chartX, chartH + 0.5);
+    ctx.lineTo(chartX + chartW, chartH + 0.5);
     ctx.stroke();
 
-    drawAxisLabels(ctx, w, h, chartH, minT, maxT);
+    drawAxisLabels(ctx, chartX, chartW, h, minT, maxT);
   }
 
-  function drawAxisLabels(ctx, w, h, chartH, minT, maxT) {
+  function niceCeil(max) {
+    if (max <= 0) return 0;
+    if (max <= 1) return 1;
+    var exp = Math.pow(10, Math.floor(Math.log10(max)));
+    var f = max / exp;
+    var nice;
+    if (f <= 1) nice = 1;
+    else if (f <= 2) nice = 2;
+    else if (f <= 5) nice = 5;
+    else nice = 10;
+    return nice * exp;
+  }
+
+  function drawYAxis(ctx, chartX, chartH, niceMax) {
+    ctx.fillStyle = readVar("--text-3", "#71717a");
+    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.textBaseline = "middle";
+
+    var grid = readVar("--border", "#eef0f3");
+    var ticks = niceMax === 0 ? 1 : Math.min(5, niceMax);
+    for (var i = 0; i <= ticks; i++) {
+      var val = niceMax * i / ticks;
+      var y = chartH - (i / ticks) * (chartH - 4);
+      var label = String(Math.round(val));
+      ctx.fillStyle = grid;
+      ctx.fillRect(chartX, Math.floor(y) + 0.5, 4, 1);
+      ctx.fillStyle = readVar("--text-3", "#71717a");
+      var metrics = ctx.measureText(label);
+      ctx.fillText(label, chartX - metrics.width - 4, y);
+    }
+  }
+
+  function drawAxisLabels(ctx, chartX, chartW, h, minT, maxT) {
     if (!minT || !maxT || maxT <= minT) return;
     var ticks = 6;
     var spanMs = maxT - minT;
@@ -1328,12 +1396,12 @@ function initCurlCopy(root) {
 
     for (var i = 0; i <= ticks; i++) {
       var t = minT + (spanMs * i / ticks);
-      var x = (w * i / ticks);
+      var x = chartX + (chartW * i / ticks);
       var label = fmt(new Date(t));
       var metrics = ctx.measureText(label);
       var tx = x - metrics.width / 2;
-      if (i === 0) tx = 1;
-      if (i === ticks) tx = w - metrics.width - 1;
+      if (i === 0) tx = chartX;
+      if (i === ticks) tx = chartX + chartW - metrics.width;
       ctx.fillText(label, tx, h - 2);
     }
   }
@@ -1990,7 +2058,7 @@ function initCurlCopy(root) {
     wireSavedViews();
     wireExport();
     reformatTimestamps(document);
-    renderHistogramAndCount();
+    fetchAggregationAndRender();
 
     // Detail-page tabs (full-page detail view).
     wireDrawerTabs(document);
@@ -2000,19 +2068,20 @@ function initCurlCopy(root) {
       if (rafHandle) return;
       rafHandle = requestAnimationFrame(function () {
         rafHandle = 0;
-        renderHistogramAndCount();
+        renderHistogram();
       });
     });
 
     document.addEventListener("httpcatch:rows-updated", function () {
       reformatTimestamps(document);
-      renderHistogramAndCount();
+      fetchAggregationDebounced();
     });
 
     window.__tz.onChange(function () {
       reformatTimestamps(document);
       refreshTriggerLabel();
-      renderHistogramAndCount();
+      updateResultsWindow();
+      renderHistogram();
     });
 
     wireCopyButtons(document);

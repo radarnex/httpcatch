@@ -193,6 +193,129 @@ func (s *MemorySink) ReadDetail(_ context.Context, id string) (inspect.DetailRec
 	return inspect.DetailRecord{Root: root, Events: events}, nil
 }
 
+// AggregateRoots returns the total matching row count and a status-class
+// histogram. The ring buffer has no request↔response join, so captured-request
+// rows are recorded with no status (folded into Other); orphan response rows
+// contribute their own status.
+func (s *MemorySink) AggregateRoots(_ context.Context, q inspect.InspectQuery, bucketCount int) (inspect.Aggregation, error) {
+	all := s.Recent(s.Len())
+
+	requestCorrs := make(map[string]struct{}, len(all))
+	for _, r := range all {
+		if _, ok := r.(*capture.CapturedRequest); ok {
+			requestCorrs[r.RecordCorrelationID()] = struct{}{}
+		}
+	}
+
+	includeOrphans := !q.HasRequestOnlyFilter()
+	matchRequest := searchql.CompilePredicate(q.Query)
+
+	bucketing := q.Since != nil && q.Until != nil && bucketCount > 0 && q.Until.After(*q.Since)
+	var sinceNS, bucketWidth int64
+	var buckets []inspect.HistogramBucket
+	if bucketing {
+		sinceNS = q.Since.UnixNano()
+		bucketWidth = (q.Until.UnixNano() - sinceNS) / int64(bucketCount)
+		if bucketWidth <= 0 {
+			bucketWidth = 1
+		}
+		buckets = make([]inspect.HistogramBucket, bucketCount)
+		for i := range buckets {
+			buckets[i].Start = time.Unix(0, sinceNS+bucketWidth*int64(i)).UTC()
+		}
+	}
+
+	tally := func(ts time.Time, status *int) {
+		if !bucketing {
+			return
+		}
+		idx := int((ts.UnixNano() - sinceNS) / bucketWidth)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= bucketCount {
+			idx = bucketCount - 1
+		}
+		switch statusClass(status) {
+		case 2:
+			buckets[idx].S2xx++
+		case 3:
+			buckets[idx].S3xx++
+		case 4:
+			buckets[idx].S4xx++
+		case 5:
+			buckets[idx].S5xx++
+		default:
+			buckets[idx].Other++
+		}
+	}
+
+	var total int
+	for _, r := range all {
+		ts := r.RecordTimestamp()
+		if q.Since != nil && ts.Before(*q.Since) {
+			continue
+		}
+		if q.Until != nil && !ts.Before(*q.Until) {
+			continue
+		}
+
+		switch v := r.(type) {
+		case *capture.CapturedRequest:
+			if !matchRequest(v) {
+				continue
+			}
+			total++
+			tally(ts, nil)
+		case *capture.ResponseEvent:
+			if !includeOrphans {
+				continue
+			}
+			if _, hasReq := requestCorrs[v.CorrelationID]; hasReq {
+				continue
+			}
+			if !matchOrphanResponse(q.Query, v) {
+				continue
+			}
+			st := v.Status
+			total++
+			tally(ts, &st)
+		case *capture.OutboundEvent:
+			if !includeOrphans {
+				continue
+			}
+			if _, hasReq := requestCorrs[v.CorrelationID]; hasReq {
+				continue
+			}
+			if !matchOrphanOutbound(q.Query, v) {
+				continue
+			}
+			total++
+			tally(ts, nil)
+		}
+	}
+
+	return inspect.Aggregation{Total: total, Buckets: buckets}, nil
+}
+
+func statusClass(s *int) int {
+	if s == nil {
+		return 0
+	}
+	v := *s
+	switch {
+	case v >= 200 && v < 300:
+		return 2
+	case v >= 300 && v < 400:
+		return 3
+	case v >= 400 && v < 500:
+		return 4
+	case v >= 500 && v < 600:
+		return 5
+	}
+	return 0
+}
+
 // ServicesSeen returns the distinct services present in the ring buffer that
 // were written at or after since (zero means all time), ordered alphabetically.
 func (s *MemorySink) ServicesSeen(_ context.Context, since time.Time) ([]string, error) {

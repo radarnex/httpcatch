@@ -73,106 +73,9 @@ WHERE cr.id IS NULL
 func (s *SQLiteSink) ReadRoots(ctx context.Context, q inspect.InspectQuery, limit int, cursor *inspect.Cursor) ([]inspect.RootRow, *inspect.Cursor, error) {
 	fetch := limit + 1
 
-	// --- Captured-requests arm of the UNION ---
-
-	var reqWhere []string
-	var reqArgs []any
-
-	if cursor != nil {
-		nanos := cursor.Timestamp.UnixNano()
-		reqWhere = append(reqWhere, "(cr.timestamp < ? OR (cr.timestamp = ? AND cr.id < ?))")
-		reqArgs = append(reqArgs, nanos, nanos, cursor.ID)
-	}
-	if q.Since != nil {
-		reqWhere = append(reqWhere, "cr.timestamp >= ?")
-		reqArgs = append(reqArgs, q.Since.UnixNano())
-	}
-	if q.Until != nil {
-		reqWhere = append(reqWhere, "cr.timestamp < ?")
-		reqArgs = append(reqArgs, q.Until.UnixNano())
-	}
-	if termSQL, termArgs := searchql.CompileSQL(q.Query); termSQL != "" {
-		reqWhere = append(reqWhere, termSQL)
-		reqArgs = append(reqArgs, termArgs...)
-	}
-
-	var reqHaving []string
-	var reqHavingArgs []any
-
-	if havingSQL, havingArgs := searchql.CompileSQLHaving(q.Query); havingSQL != "" {
-		reqHaving = append(reqHaving, havingSQL)
-		reqHavingArgs = append(reqHavingArgs, havingArgs...)
-	}
-
-	reqQuery := sqliteReadRootsBase
-	if len(reqWhere) > 0 {
-		reqQuery += "\nWHERE " + strings.Join(reqWhere, "\n  AND ")
-	}
-	reqQuery += "\nGROUP BY cr.id"
-	if len(reqHaving) > 0 {
-		reqQuery += "\nHAVING " + strings.Join(reqHaving, "\n  AND ")
-	}
-
-	// --- Orphan-events arm of the UNION ---
-	//
-	// Request-only filters exclude orphan rows by definition: those fields
-	// belong to captured requests only. When any is set, skip the orphan arm.
-	includeOrphans := !q.HasRequestOnlyFilter()
-
-	var orphanQuery string
-	var orphanArgs []any
-
-	if includeOrphans {
-		var orphanWhere []string
-
-		if cursor != nil {
-			nanos := cursor.Timestamp.UnixNano()
-			orphanWhere = append(orphanWhere, "(e.timestamp < ? OR (e.timestamp = ? AND e.id < ?))")
-			orphanArgs = append(orphanArgs, nanos, nanos, cursor.ID)
-		}
-		if q.Since != nil {
-			orphanWhere = append(orphanWhere, "e.timestamp >= ?")
-			orphanArgs = append(orphanArgs, q.Since.UnixNano())
-		}
-		if q.Until != nil {
-			orphanWhere = append(orphanWhere, "e.timestamp < ?")
-			orphanArgs = append(orphanArgs, q.Until.UnixNano())
-		}
-		if orphanSQL, orphArgs := searchql.CompileSQLOrphans(q.Query); orphanSQL != "" {
-			orphanWhere = append(orphanWhere, orphanSQL)
-			orphanArgs = append(orphanArgs, orphArgs...)
-		}
-
-		orphanQuery = sqliteOrphansBase
-		if len(orphanWhere) > 0 {
-			// sqliteOrphansBase already has "WHERE cr.id IS NULL"; additional
-			// filters are appended with AND.
-			orphanQuery += "  AND " + strings.Join(orphanWhere, "\n  AND ")
-		}
-	}
-
-	// --- Assemble UNION or single-arm query ---
-
-	var fullQuery string
-	var allArgs []any
-
-	if includeOrphans {
-		// Wrap the UNION in a subquery so the outer ORDER BY references the
-		// unambiguous column names emitted by the UNION arms.
-		fullQuery = "SELECT * FROM (\n" + reqQuery + "\nUNION ALL\n" + orphanQuery + "\n)\nORDER BY timestamp DESC, id DESC"
-		// Args: req-where + req-having + orphan-where + LIMIT
-		allArgs = append(allArgs, reqArgs...)
-		allArgs = append(allArgs, reqHavingArgs...)
-		allArgs = append(allArgs, orphanArgs...)
-	} else {
-		// Not a UNION: ORDER BY must qualify the table alias to avoid ambiguity
-		// with the events table joined in sqliteReadRootsBase.
-		fullQuery = reqQuery + "\nORDER BY cr.timestamp DESC, cr.id DESC"
-		allArgs = append(allArgs, reqArgs...)
-		allArgs = append(allArgs, reqHavingArgs...)
-	}
-	fullQuery += "\nLIMIT ?"
-	allArgs = append(allArgs, fetch)
+	innerSQL, innerArgs := s.buildRootsUnionSQL(q, cursor)
+	fullQuery := "SELECT * FROM (\n" + innerSQL + "\n)\nORDER BY timestamp DESC, id DESC\nLIMIT ?"
+	allArgs := append(innerArgs, fetch)
 
 	rows, err := s.db.QueryContext(ctx, fullQuery, allArgs...)
 	if err != nil {
@@ -242,6 +145,180 @@ func (s *SQLiteSink) ReadRoots(ctx context.Context, q inspect.InspectQuery, limi
 		result = result[:limit]
 	}
 	return result, nextCursor, nil
+}
+
+// AggregateRoots computes the total matching row count and a per-bucket
+// status-class breakdown across q's time range. Bucketing is performed in SQL
+// using integer division on the nanosecond timestamps so a single scan over
+// captured_requests + events suffices regardless of result size.
+//
+// When q.Since or q.Until is nil bucketing is impossible; only Total is
+// returned (Buckets is empty). The cursor in q is ignored — aggregation
+// always covers the full matching set across pages.
+func (s *SQLiteSink) AggregateRoots(ctx context.Context, q inspect.InspectQuery, bucketCount int) (inspect.Aggregation, error) {
+	innerSQL, innerArgs := s.buildRootsUnionSQL(q, nil)
+
+	if q.Since == nil || q.Until == nil || bucketCount <= 0 || !q.Until.After(*q.Since) {
+		countQuery := "SELECT COUNT(*) FROM (\n" + innerSQL + "\n)"
+		var total int
+		if err := s.db.QueryRowContext(ctx, countQuery, innerArgs...).Scan(&total); err != nil {
+			return inspect.Aggregation{}, fmt.Errorf("sqlite AggregateRoots count: %w", err)
+		}
+		return inspect.Aggregation{Total: total}, nil
+	}
+
+	sinceNS := q.Since.UnixNano()
+	untilNS := q.Until.UnixNano()
+	bucketWidth := (untilNS - sinceNS) / int64(bucketCount)
+	if bucketWidth <= 0 {
+		bucketWidth = 1
+	}
+
+	aggQuery := `
+SELECT
+    CAST((timestamp - ?) / ? AS INTEGER) AS bucket,
+    CASE
+        WHEN status >= 200 AND status < 300 THEN 2
+        WHEN status >= 300 AND status < 400 THEN 3
+        WHEN status >= 400 AND status < 500 THEN 4
+        WHEN status >= 500 AND status < 600 THEN 5
+        ELSE 0
+    END AS klass,
+    COUNT(*) AS cnt
+FROM (
+` + innerSQL + `
+)
+GROUP BY bucket, klass`
+
+	aggArgs := make([]any, 0, len(innerArgs)+2)
+	aggArgs = append(aggArgs, sinceNS, bucketWidth)
+	aggArgs = append(aggArgs, innerArgs...)
+
+	rows, err := s.db.QueryContext(ctx, aggQuery, aggArgs...)
+	if err != nil {
+		return inspect.Aggregation{}, fmt.Errorf("sqlite AggregateRoots: %w", err)
+	}
+	defer rows.Close()
+
+	buckets := make([]inspect.HistogramBucket, bucketCount)
+	for i := range buckets {
+		start := sinceNS + bucketWidth*int64(i)
+		buckets[i].Start = time.Unix(0, start).UTC()
+	}
+	var total int
+	for rows.Next() {
+		var idx, klass, cnt int
+		if err := rows.Scan(&idx, &klass, &cnt); err != nil {
+			return inspect.Aggregation{}, fmt.Errorf("sqlite AggregateRoots scan: %w", err)
+		}
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= bucketCount {
+			idx = bucketCount - 1
+		}
+		switch klass {
+		case 2:
+			buckets[idx].S2xx += cnt
+		case 3:
+			buckets[idx].S3xx += cnt
+		case 4:
+			buckets[idx].S4xx += cnt
+		case 5:
+			buckets[idx].S5xx += cnt
+		default:
+			buckets[idx].Other += cnt
+		}
+		total += cnt
+	}
+	if err := rows.Err(); err != nil {
+		return inspect.Aggregation{}, fmt.Errorf("sqlite AggregateRoots rows: %w", err)
+	}
+	return inspect.Aggregation{Total: total, Buckets: buckets}, nil
+}
+
+// buildRootsUnionSQL renders the UNION subquery shared by ReadRoots and
+// AggregateRoots. Cursor predicates are applied to each arm when cursor is
+// non-nil. Outer ORDER BY/LIMIT are the caller's responsibility. Args are
+// returned in placeholder order.
+func (s *SQLiteSink) buildRootsUnionSQL(q inspect.InspectQuery, cursor *inspect.Cursor) (string, []any) {
+	var reqWhere []string
+	var reqArgs []any
+
+	if cursor != nil {
+		nanos := cursor.Timestamp.UnixNano()
+		reqWhere = append(reqWhere, "(cr.timestamp < ? OR (cr.timestamp = ? AND cr.id < ?))")
+		reqArgs = append(reqArgs, nanos, nanos, cursor.ID)
+	}
+	if q.Since != nil {
+		reqWhere = append(reqWhere, "cr.timestamp >= ?")
+		reqArgs = append(reqArgs, q.Since.UnixNano())
+	}
+	if q.Until != nil {
+		reqWhere = append(reqWhere, "cr.timestamp < ?")
+		reqArgs = append(reqArgs, q.Until.UnixNano())
+	}
+	if termSQL, termArgs := searchql.CompileSQL(q.Query); termSQL != "" {
+		reqWhere = append(reqWhere, termSQL)
+		reqArgs = append(reqArgs, termArgs...)
+	}
+
+	var reqHaving []string
+	var reqHavingArgs []any
+	if havingSQL, havingArgs := searchql.CompileSQLHaving(q.Query); havingSQL != "" {
+		reqHaving = append(reqHaving, havingSQL)
+		reqHavingArgs = append(reqHavingArgs, havingArgs...)
+	}
+
+	reqQuery := sqliteReadRootsBase
+	if len(reqWhere) > 0 {
+		reqQuery += "\nWHERE " + strings.Join(reqWhere, "\n  AND ")
+	}
+	reqQuery += "\nGROUP BY cr.id"
+	if len(reqHaving) > 0 {
+		reqQuery += "\nHAVING " + strings.Join(reqHaving, "\n  AND ")
+	}
+
+	includeOrphans := !q.HasRequestOnlyFilter()
+
+	if !includeOrphans {
+		args := make([]any, 0, len(reqArgs)+len(reqHavingArgs))
+		args = append(args, reqArgs...)
+		args = append(args, reqHavingArgs...)
+		return reqQuery, args
+	}
+
+	var orphanWhere []string
+	var orphanArgs []any
+	if cursor != nil {
+		nanos := cursor.Timestamp.UnixNano()
+		orphanWhere = append(orphanWhere, "(e.timestamp < ? OR (e.timestamp = ? AND e.id < ?))")
+		orphanArgs = append(orphanArgs, nanos, nanos, cursor.ID)
+	}
+	if q.Since != nil {
+		orphanWhere = append(orphanWhere, "e.timestamp >= ?")
+		orphanArgs = append(orphanArgs, q.Since.UnixNano())
+	}
+	if q.Until != nil {
+		orphanWhere = append(orphanWhere, "e.timestamp < ?")
+		orphanArgs = append(orphanArgs, q.Until.UnixNano())
+	}
+	if orphanSQL, orphArgs := searchql.CompileSQLOrphans(q.Query); orphanSQL != "" {
+		orphanWhere = append(orphanWhere, orphanSQL)
+		orphanArgs = append(orphanArgs, orphArgs...)
+	}
+
+	orphanQuery := sqliteOrphansBase
+	if len(orphanWhere) > 0 {
+		orphanQuery += "  AND " + strings.Join(orphanWhere, "\n  AND ")
+	}
+
+	fullQuery := reqQuery + "\nUNION ALL\n" + orphanQuery
+	args := make([]any, 0, len(reqArgs)+len(reqHavingArgs)+len(orphanArgs))
+	args = append(args, reqArgs...)
+	args = append(args, reqHavingArgs...)
+	args = append(args, orphanArgs...)
+	return fullQuery, args
 }
 
 // ReadDetail resolves the given id against both tables (captured_requests then

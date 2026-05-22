@@ -15,12 +15,13 @@ import (
 // not in this set triggers a 400. Field-level filters now ride on the single
 // `q` parameter and are parsed by the searchql package.
 var knownQueryKeys = map[string]struct{}{
-	"limit":  {},
-	"cursor": {},
-	"since":  {},
-	"until":  {},
-	"q":      {},
-	"live":   {},
+	"limit":   {},
+	"cursor":  {},
+	"since":   {},
+	"until":   {},
+	"q":       {},
+	"live":    {},
+	"buckets": {},
 }
 
 // parseFieldError is a parse-time validation failure for a single query parameter.

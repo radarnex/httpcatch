@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,6 +23,11 @@ const (
 
 	defaultLimit = 50
 	maxLimit     = 500
+
+	histogramBucketCount = 40
+	// maxHistogramBuckets caps client-supplied `buckets` so a stray large
+	// value cannot force an unbounded GROUP BY.
+	maxHistogramBuckets = 240
 )
 
 type rootsResponse struct {
@@ -107,6 +113,19 @@ func gatherRoots(ctx context.Context, q inspect.InspectQuery, memReader, sqlRead
 	return deduped, nextCur, source, nil
 }
 
+// gatherAggregation routes to SQLite when present — it carries the
+// captured_requests↔events join needed for per-row status — and falls back to
+// memory otherwise. bucketCount <= 0 returns Total only.
+func gatherAggregation(ctx context.Context, q inspect.InspectQuery, bucketCount int, memReader, sqlReader inspect.Reader) (inspect.Aggregation, error) {
+	if sqlReader != nil {
+		return sqlReader.AggregateRoots(ctx, q, bucketCount)
+	}
+	if memReader != nil {
+		return memReader.AggregateRoots(ctx, q, bucketCount)
+	}
+	return inspect.Aggregation{}, nil
+}
+
 // gatherDetail resolves a record by id, merging siblings across readers.
 // Resolution order: memory first; SQLite on miss. Siblings from the other
 // reader are merged when the root is found. Returns ErrNotFound when neither
@@ -167,6 +186,48 @@ func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 		w.Header().Set("X-Httpcatch-Read-Source", source)
 		w.WriteHeader(http.StatusOK)
 		writeRootsResponse(w, rows, nextCur)
+	}
+}
+
+// requestsAggregateHandler returns an http.HandlerFunc for
+// GET /requests/aggregate. Accepts the same filters as /requests plus an
+// optional `buckets` parameter; returns total matching rows and a histogram.
+func requestsAggregateHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		vals := r.URL.Query()
+		bucketCount := histogramBucketCount
+		if bs := vals.Get("buckets"); bs != "" {
+			n, err := strconv.Atoi(bs)
+			if err != nil || n < 1 || n > maxHistogramBuckets {
+				writeFieldError(w, "buckets", fmt.Sprintf("must be an integer between 1 and %d", maxHistogramBuckets))
+				return
+			}
+			bucketCount = n
+		}
+
+		q, fieldErrs := parseInspectQuery(vals)
+		if len(fieldErrs) > 0 {
+			writeParseErrors(w, fieldErrs)
+			return
+		}
+		q.Cursor = nil
+		q.Limit = 0
+
+		ctx := r.Context()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+
+		agg, err := gatherAggregation(ctx, q, bucketCount, memReader, sqlReader)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("read error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if agg.Buckets == nil {
+			agg.Buckets = []inspect.HistogramBucket{}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(agg)
 	}
 }
 

@@ -978,3 +978,80 @@ func TestRequestDetail_Integration_MemoryAndSQLite(t *testing.T) {
 		t.Errorf("events: got %d want 0 (no events API yet)", len(eventsSlice))
 	}
 }
+
+func TestRequestsAggregate_TotalAcrossPages(t *testing.T) {
+	t.Parallel()
+
+	mem := sinks.NewMemorySink(200)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	const total = 60
+	for i := range total {
+		r := &capture.CapturedRequest{
+			ID:            fmt.Sprintf("r%02d", i),
+			Timestamp:     base.Add(time.Duration(i) * time.Second),
+			Service:       "svc",
+			Method:        "GET",
+			Path:          "/api",
+			CorrelationID: fmt.Sprintf("c%02d", i),
+			SourceIP:      "1.2.3.4",
+		}
+		if err := mem.Write(ctx, r); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	ts := newInspectServer(t, admin.ReadSources{Memory: mem})
+
+	since := base.Add(-time.Second).Format(time.RFC3339)
+	until := base.Add(10 * time.Minute).Format(time.RFC3339)
+	u := ts.URL + "/requests/aggregate?" + url.Values{
+		"since":   {since},
+		"until":   {until},
+		"buckets": {"6"},
+	}.Encode()
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET aggregate: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body struct {
+		Total   int `json:"total"`
+		Buckets []struct {
+			Start string `json:"start"`
+			S2xx  int    `json:"s2xx"`
+			Other int    `json:"other"`
+		} `json:"buckets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Total != total {
+		t.Errorf("total: got %d want %d (must exceed default page size)", body.Total, total)
+	}
+	if len(body.Buckets) != 6 {
+		t.Errorf("buckets: got %d want 6", len(body.Buckets))
+	}
+}
+
+func TestRequestsAggregate_InvalidBuckets(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	u := ts.URL + "/requests/aggregate?buckets=0"
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET aggregate: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status: got %d want 400", resp.StatusCode)
+	}
+}

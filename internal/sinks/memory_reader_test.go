@@ -204,6 +204,67 @@ func TestMemoryReader_ReadRoots_RowShape(t *testing.T) {
 	}
 }
 
+func TestMemoryReader_AggregateRoots_TotalIgnoresLimit(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(100)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 75; i++ {
+		r := makeRequest(fmt.Sprintf("r%02d", i), base.Add(time.Duration(i)*time.Second), "svc", "GET", "/", "c", "x")
+		if err := s.Write(ctx, r); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	since := base.Add(-time.Second)
+	until := base.Add(2 * time.Minute)
+	q := inspect.InspectQuery{Limit: 10, Since: &since, Until: &until}
+
+	agg, err := s.AggregateRoots(ctx, q, 5)
+	if err != nil {
+		t.Fatalf("AggregateRoots: %v", err)
+	}
+	if agg.Total != 75 {
+		t.Errorf("Total: got %d want 75", agg.Total)
+	}
+	if len(agg.Buckets) != 5 {
+		t.Fatalf("Buckets: got %d want 5", len(agg.Buckets))
+	}
+	var sum int
+	for _, b := range agg.Buckets {
+		sum += b.S2xx + b.S3xx + b.S4xx + b.S5xx + b.Other
+	}
+	if sum != 75 {
+		t.Errorf("bucket totals: got %d want 75", sum)
+	}
+}
+
+func TestMemoryReader_AggregateRoots_NoTimeRange(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(10)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		r := makeRequest(fmt.Sprintf("r%d", i), base.Add(time.Duration(i)*time.Second), "svc", "GET", "/", "c", "x")
+		if err := s.Write(ctx, r); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	agg, err := s.AggregateRoots(ctx, inspect.InspectQuery{}, 5)
+	if err != nil {
+		t.Fatalf("AggregateRoots: %v", err)
+	}
+	if agg.Total != 3 {
+		t.Errorf("Total: got %d want 3", agg.Total)
+	}
+	if len(agg.Buckets) != 0 {
+		t.Errorf("Buckets: expected empty without since/until, got %d", len(agg.Buckets))
+	}
+}
+
 func TestMemoryReader_ServicesSeen_AlphabeticalOrder(t *testing.T) {
 	t.Parallel()
 

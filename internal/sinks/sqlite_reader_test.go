@@ -439,6 +439,129 @@ func TestSQLiteReader_ReadDetail_OutboundEvent(t *testing.T) {
 	}
 }
 
+func TestSQLiteReader_AggregateRoots_StatusBuckets(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// Three requests with paired response events at different status classes.
+	cases := []struct {
+		reqID, evID, corrID string
+		status              int
+		offset              time.Duration
+	}{
+		{"r-2xx", "e-2xx", "c-2xx", 201, 0},
+		{"r-4xx", "e-4xx", "c-4xx", 404, time.Second},
+		{"r-5xx", "e-5xx", "c-5xx", 503, 2 * time.Second},
+	}
+	for _, c := range cases {
+		req := sqliteRequest(c.reqID, base.Add(c.offset), "svc", "GET", "/", c.corrID, "x")
+		if err := s.Write(ctx, req); err != nil {
+			t.Fatalf("Write req %s: %v", c.reqID, err)
+		}
+		ev := &capture.ResponseEvent{
+			ID:            c.evID,
+			Timestamp:     base.Add(c.offset).Add(100 * time.Millisecond),
+			CorrelationID: c.corrID,
+			Service:       "svc",
+			ServiceSource: "app",
+			Status:        c.status,
+			Headers:       map[string][]string{},
+			Body:          []byte{},
+		}
+		if err := s.Write(ctx, ev); err != nil {
+			t.Fatalf("Write ev %s: %v", c.evID, err)
+		}
+	}
+
+	since := base.Add(-time.Second)
+	until := base.Add(10 * time.Second)
+	q := inspect.InspectQuery{Since: &since, Until: &until}
+
+	agg, err := s.AggregateRoots(ctx, q, 4)
+	if err != nil {
+		t.Fatalf("AggregateRoots: %v", err)
+	}
+	if agg.Total != 3 {
+		t.Errorf("Total: got %d want 3", agg.Total)
+	}
+	if len(agg.Buckets) != 4 {
+		t.Fatalf("Buckets: got %d want 4", len(agg.Buckets))
+	}
+	var s2, s4, s5 int
+	for _, b := range agg.Buckets {
+		s2 += b.S2xx
+		s4 += b.S4xx
+		s5 += b.S5xx
+	}
+	if s2 != 1 || s4 != 1 || s5 != 1 {
+		t.Errorf("status class totals: 2xx=%d 4xx=%d 5xx=%d, want 1 each", s2, s4, s5)
+	}
+}
+
+func TestSQLiteReader_AggregateRoots_CountOnlyWhenRangeMissing(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		req := sqliteRequest(fmt.Sprintf("r%d", i), base.Add(time.Duration(i)*time.Second), "svc", "GET", "/", fmt.Sprintf("c%d", i), "x")
+		if err := s.Write(ctx, req); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	agg, err := s.AggregateRoots(ctx, inspect.InspectQuery{}, 5)
+	if err != nil {
+		t.Fatalf("AggregateRoots: %v", err)
+	}
+	if agg.Total != 4 {
+		t.Errorf("Total: got %d want 4", agg.Total)
+	}
+	if len(agg.Buckets) != 0 {
+		t.Errorf("Buckets: expected empty without since/until, got %d", len(agg.Buckets))
+	}
+}
+
+func TestSQLiteReader_AggregateRoots_IncludesOrphans(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	req := sqliteRequest("req-1", base, "svc", "GET", "/", "corr-req", "x")
+	if err := s.Write(ctx, req); err != nil {
+		t.Fatalf("Write req: %v", err)
+	}
+	orphan := orphanResponseEvent("orph-1", "corr-orphan", "svc", 503, base.Add(time.Second))
+	if err := s.Write(ctx, orphan); err != nil {
+		t.Fatalf("Write orphan: %v", err)
+	}
+
+	since := base.Add(-time.Second)
+	until := base.Add(5 * time.Second)
+	q := inspect.InspectQuery{Since: &since, Until: &until}
+
+	agg, err := s.AggregateRoots(ctx, q, 4)
+	if err != nil {
+		t.Fatalf("AggregateRoots: %v", err)
+	}
+	if agg.Total != 2 {
+		t.Errorf("Total: got %d want 2 (request + orphan)", agg.Total)
+	}
+	var s5 int
+	for _, b := range agg.Buckets {
+		s5 += b.S5xx
+	}
+	if s5 != 1 {
+		t.Errorf("5xx total: got %d want 1 (from orphan response)", s5)
+	}
+}
+
 // orphanResponseEvent returns a ResponseEvent with no matching captured request
 // (an orphan). Used in orphan-detection tests.
 func orphanResponseEvent(id, corrID, service string, status int, ts time.Time) *capture.ResponseEvent {

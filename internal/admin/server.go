@@ -101,6 +101,7 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 		r.Get("/", rootRedirectHandler())
 		r.Get("/status", statusHandler(sources))
 		r.Get("/requests", requestsHandler(rs.Memory, rs.SQLite))
+		r.Get("/requests/aggregate", requestsAggregateHandler(rs.Memory, rs.SQLite))
 		r.Get("/requests/{id}", requestDetailHandler(rs.Memory, rs.SQLite))
 		r.Get("/ui/requests", requestListHandler(rs.Memory, rs.SQLite))
 		r.Get("/ui/requests/{id}", requestDetailUIHandler(rs.Memory, rs.SQLite))
