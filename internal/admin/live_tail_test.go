@@ -98,7 +98,7 @@ func TestLiveTail_RowsCarryDataTimestamp(t *testing.T) {
 	}
 
 	ts := newUIViewServer(t, admin.ReadSources{Memory: mem})
-	resp := getUIPage(t, ts, "/ui/requests")
+	resp := getUIPage(t, ts, "/ui/requests?"+allTimeWindow)
 	defer resp.Body.Close()
 
 	doc := parseHTML(t, resp.Body)

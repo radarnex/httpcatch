@@ -37,6 +37,11 @@ func newUIViewServer(t *testing.T, readers admin.ReadSources) *httptest.Server {
 	return ts
 }
 
+// allTimeWindow widens the explorer window past the requestListHandler's
+// 15-minute default so tests can use fixtures with old timestamps without
+// stamping every record with "now". Append to a /ui/requests query string.
+const allTimeWindow = "since=2020-01-01T00:00:00Z&until=2030-01-01T00:00:00Z"
+
 // getUIPage sends an authenticated HTML GET request and returns the response.
 func getUIPage(t *testing.T, ts *httptest.Server, path string) *http.Response {
 	t.Helper()
@@ -596,7 +601,7 @@ func TestUIRequests_TableColumnsPresent(t *testing.T) {
 	}
 
 	ts := newUIViewServer(t, admin.ReadSources{Memory: mem})
-	resp := getUIPage(t, ts, "/ui/requests")
+	resp := getUIPage(t, ts, "/ui/requests?"+allTimeWindow)
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
@@ -631,7 +636,7 @@ func TestUIRequests_OrphanRowHasAmberBadge(t *testing.T) {
 	}
 
 	ts := newUIViewServer(t, admin.ReadSources{Memory: mem})
-	resp := getUIPage(t, ts, "/ui/requests")
+	resp := getUIPage(t, ts, "/ui/requests?"+allTimeWindow)
 	defer resp.Body.Close()
 
 	doc := parseHTML(t, resp.Body)
@@ -682,7 +687,7 @@ func TestUIRequests_PaginationLinks(t *testing.T) {
 	ts := newUIViewServer(t, admin.ReadSources{Memory: mem})
 
 	// First page with limit=3: should have a Next cursor link.
-	resp := getUIPage(t, ts, "/ui/requests?limit=3")
+	resp := getUIPage(t, ts, "/ui/requests?limit=3&"+allTimeWindow)
 	defer resp.Body.Close()
 
 	doc := parseHTML(t, resp.Body)
@@ -1487,7 +1492,7 @@ func TestUIViews_Integration(t *testing.T) {
 	ts := newUIViewServer(t, admin.ReadSources{Memory: mem, SQLite: sqliteSink})
 
 	// Step 1: fetch the list page.
-	listResp := getUIPage(t, ts, "/ui/requests")
+	listResp := getUIPage(t, ts, "/ui/requests?"+allTimeWindow)
 	if listResp.StatusCode != http.StatusOK {
 		listResp.Body.Close()
 		t.Fatalf("GET /ui/requests: status %d", listResp.StatusCode)

@@ -28,6 +28,12 @@ var httpMethods = []string{
 // servicesSince is the lookback window for populating the service dropdown.
 const servicesSince = 24 * time.Hour
 
+// defaultExplorerWindow is the time range the UI applies when the operator
+// opens /ui/requests with no since/until in the URL. The picker preset list
+// starts at 15m and the trigger placeholder reads "Past 15 minutes", so the
+// default matches what the operator sees in the picker.
+const defaultExplorerWindow = 15 * time.Minute
+
 // listTmpl, detailTmpl, and eventDetailTmpl are parsed once at startup from
 // the embedded FS. Each is parsed together with layout.html so the
 // {{define "body"}} block in each page template overrides the {{block "body"}}
@@ -215,8 +221,21 @@ func requestListHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 			}
 		}
 
-		// Round-trip raw filter strings into the form.
+		// Round-trip raw filter strings into the form. When neither since nor
+		// until is supplied, fall back to the picker's default window so the
+		// trigger label and the returned rows describe the same time range.
+		// The live-tail mode (`live=1` in the URL hash) and cursor pagination
+		// both opt out of the default: live tail polls with its own derived
+		// since, and pagination must preserve the original query.
 		vals := r.URL.Query()
+		if vals.Get("since") == "" && vals.Get("until") == "" && vals.Get("cursor") == "" {
+			now := time.Now().UTC()
+			// RFC3339Nano preserves the full sub-second precision so a record
+			// captured a few milliseconds before `now` does not get filtered
+			// out by a second-rounded `until`.
+			vals.Set("since", now.Add(-defaultExplorerWindow).Format(time.RFC3339Nano))
+			vals.Set("until", now.Format(time.RFC3339Nano))
+		}
 		data.Query = listQueryView{
 			Q:        vals.Get("q"),
 			SinceRaw: vals.Get("since"),

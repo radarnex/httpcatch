@@ -46,7 +46,7 @@ func TestCompileSQL_PerKey(t *testing.T) {
 		},
 		{
 			input:    "body:error",
-			wantSQL:  "CAST(cr.body AS TEXT) LIKE ?",
+			wantSQL:  "LOWER(CAST(cr.body AS TEXT)) LIKE ?",
 			wantArgs: []any{"%error%"},
 		},
 		{
@@ -88,10 +88,11 @@ func TestCompileSQL_Wildcards(t *testing.T) {
 		{"path:*signup*", "cr.path LIKE ?", []any{"%signup%"}},
 		{"service:foo*", "cr.service LIKE ?", []any{"foo%"}},
 		{"service:*foo*", "cr.service LIKE ?", []any{"%foo%"}},
-		{"body:foo", "CAST(cr.body AS TEXT) LIKE ?", []any{"%foo%"}},
-		{"body:foo*", "CAST(cr.body AS TEXT) LIKE ?", []any{"%foo%"}},
-		{"body:*foo", "CAST(cr.body AS TEXT) LIKE ?", []any{"%foo%"}},
-		{"body:*foo*", "CAST(cr.body AS TEXT) LIKE ?", []any{"%foo%"}},
+		{"body:foo", "LOWER(CAST(cr.body AS TEXT)) LIKE ?", []any{"%foo%"}},
+		{"body:foo*", "LOWER(CAST(cr.body AS TEXT)) LIKE ?", []any{"%foo%"}},
+		{"body:*foo", "LOWER(CAST(cr.body AS TEXT)) LIKE ?", []any{"%foo%"}},
+		{"body:*foo*", "LOWER(CAST(cr.body AS TEXT)) LIKE ?", []any{"%foo%"}},
+		{"body:Foo", "LOWER(CAST(cr.body AS TEXT)) LIKE ?", []any{"%foo%"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
@@ -121,8 +122,8 @@ func TestCompileSQL_Quoting(t *testing.T) {
 	}{
 		{`host:"foo bar"`, "cr.host = ?", []any{"foo bar"}},
 		{`path:"/signup/*"`, "cr.path = ?", []any{"/signup/*"}},
-		{`body:"login failed"`, "CAST(cr.body AS TEXT) LIKE ?", []any{"%login failed%"}},
-		{`body:"foo\"bar"`, "CAST(cr.body AS TEXT) LIKE ?", []any{`%foo"bar%`}},
+		{`body:"login failed"`, "LOWER(CAST(cr.body AS TEXT)) LIKE ?", []any{"%login failed%"}},
+		{`body:"foo\"bar"`, "LOWER(CAST(cr.body AS TEXT)) LIKE ?", []any{`%foo"bar%`}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
@@ -152,7 +153,7 @@ func TestCompileSQL_Negation(t *testing.T) {
 	}{
 		{"-service:foo", "NOT (cr.service = ?)", []any{"foo"}},
 		{"-host:billing-api*", "NOT (cr.host LIKE ?)", []any{"billing-api%"}},
-		{`-body:"login failed"`, "NOT (CAST(cr.body AS TEXT) LIKE ?)", []any{"%login failed%"}},
+		{`-body:"login failed"`, "NOT (LOWER(CAST(cr.body AS TEXT)) LIKE ?)", []any{"%login failed%"}},
 		{"-method:GET", "NOT (cr.method = ?)", []any{"GET"}},
 	}
 	for _, tc := range tests {
@@ -221,10 +222,10 @@ func TestCompileSQL_Empty(t *testing.T) {
 func TestCompileSQL_HeadersAny(t *testing.T) {
 	t.Parallel()
 
-	wantSQL := "(CAST(cr.headers AS TEXT) LIKE ? OR " +
+	wantSQL := "(LOWER(CAST(cr.headers AS TEXT)) LIKE ? OR " +
 		"EXISTS (SELECT 1 FROM events e_h " +
 		"WHERE e_h.correlation_id = cr.correlation_id " +
-		"AND (CAST(e_h.request_headers AS TEXT) LIKE ? OR CAST(e_h.response_headers AS TEXT) LIKE ?)))"
+		"AND (LOWER(CAST(e_h.request_headers AS TEXT)) LIKE ? OR LOWER(CAST(e_h.response_headers AS TEXT)) LIKE ?)))"
 
 	tests := []struct {
 		input    string
@@ -270,12 +271,12 @@ func TestCompileSQL_HeaderNamed(t *testing.T) {
 	t.Parallel()
 
 	wantSQL := "(" +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(cr.headers, ?)) WHERE value LIKE ?) OR " +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(cr.headers, ?)) WHERE LOWER(value) LIKE ?) OR " +
 		"EXISTS (SELECT 1 FROM events e_h " +
 		"WHERE e_h.correlation_id = cr.correlation_id " +
 		"AND (" +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.request_headers, ?)) WHERE value LIKE ?) OR " +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.response_headers, ?)) WHERE value LIKE ?)" +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.request_headers, ?)) WHERE LOWER(value) LIKE ?) OR " +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.response_headers, ?)) WHERE LOWER(value) LIKE ?)" +
 		"))" +
 		")"
 	wantPath := `$."User-Agent"`
@@ -333,9 +334,9 @@ func TestCompileSQL_HeaderQuotedPhrase(t *testing.T) {
 	}
 	_, gotArgs := CompileSQL(q)
 	wantArgs := []any{
-		`$."User-Agent"`, "%Mozilla/5.0 (Macintosh)%",
-		`$."User-Agent"`, "%Mozilla/5.0 (Macintosh)%",
-		`$."User-Agent"`, "%Mozilla/5.0 (Macintosh)%",
+		`$."User-Agent"`, "%mozilla/5.0 (macintosh)%",
+		`$."User-Agent"`, "%mozilla/5.0 (macintosh)%",
+		`$."User-Agent"`, "%mozilla/5.0 (macintosh)%",
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Errorf("Args: got %v want %v", gotArgs, wantArgs)
@@ -468,7 +469,7 @@ func TestCompileSQLOrphans_HeadersAny(t *testing.T) {
 	t.Parallel()
 	q, _ := Parse("headers:foo")
 	sql, args := CompileSQLOrphans(q)
-	want := "(CAST(e.request_headers AS TEXT) LIKE ? OR CAST(e.response_headers AS TEXT) LIKE ?)"
+	want := "(LOWER(CAST(e.request_headers AS TEXT)) LIKE ? OR LOWER(CAST(e.response_headers AS TEXT)) LIKE ?)"
 	if sql != want {
 		t.Errorf("orphan SQL: got %q want %q", sql, want)
 	}
@@ -482,8 +483,8 @@ func TestCompileSQLOrphans_HeaderNamed(t *testing.T) {
 	q, _ := Parse("header.user-agent:client")
 	sql, args := CompileSQLOrphans(q)
 	want := "(" +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(e.request_headers, ?)) WHERE value LIKE ?) OR " +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(e.response_headers, ?)) WHERE value LIKE ?)" +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(e.request_headers, ?)) WHERE LOWER(value) LIKE ?) OR " +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(e.response_headers, ?)) WHERE LOWER(value) LIKE ?)" +
 		")"
 	if sql != want {
 		t.Errorf("orphan SQL: got %q want %q", sql, want)
@@ -511,15 +512,15 @@ func freeformReqWantSQL(hostPred, pathPred, servicePred, eventPathPred string) s
 		"SELECT id FROM captured_requests WHERE " + hostPred + " UNION " +
 		"SELECT id FROM captured_requests WHERE " + pathPred + " UNION " +
 		"SELECT id FROM captured_requests WHERE " + servicePred + " UNION " +
-		"SELECT id FROM captured_requests WHERE CAST(body AS TEXT) LIKE ? UNION " +
-		"SELECT id FROM captured_requests WHERE CAST(headers AS TEXT) LIKE ? UNION " +
+		"SELECT id FROM captured_requests WHERE LOWER(CAST(body AS TEXT)) LIKE ? UNION " +
+		"SELECT id FROM captured_requests WHERE LOWER(CAST(headers AS TEXT)) LIKE ? UNION " +
 		"SELECT cr_ff.id FROM captured_requests cr_ff JOIN events e_ff " +
 		"ON e_ff.correlation_id = cr_ff.correlation_id " +
 		"WHERE " + eventPathPred + " OR " +
-		"CAST(e_ff.request_body AS TEXT) LIKE ? OR " +
-		"CAST(e_ff.request_headers AS TEXT) LIKE ? OR " +
-		"CAST(e_ff.response_body AS TEXT) LIKE ? OR " +
-		"CAST(e_ff.response_headers AS TEXT) LIKE ?" +
+		"LOWER(CAST(e_ff.request_body AS TEXT)) LIKE ? OR " +
+		"LOWER(CAST(e_ff.request_headers AS TEXT)) LIKE ? OR " +
+		"LOWER(CAST(e_ff.response_body AS TEXT)) LIKE ? OR " +
+		"LOWER(CAST(e_ff.response_headers AS TEXT)) LIKE ?" +
 		")"
 }
 
@@ -527,10 +528,10 @@ func freeformOrphanWantSQL(servicePred, pathPred string) string {
 	return "e.id IN (" +
 		"SELECT id FROM events WHERE " + servicePred + " UNION " +
 		"SELECT id FROM events WHERE " + pathPred + " UNION " +
-		"SELECT id FROM events WHERE CAST(request_body AS TEXT) LIKE ? UNION " +
-		"SELECT id FROM events WHERE CAST(request_headers AS TEXT) LIKE ? UNION " +
-		"SELECT id FROM events WHERE CAST(response_body AS TEXT) LIKE ? UNION " +
-		"SELECT id FROM events WHERE CAST(response_headers AS TEXT) LIKE ?" +
+		"SELECT id FROM events WHERE LOWER(CAST(request_body AS TEXT)) LIKE ? UNION " +
+		"SELECT id FROM events WHERE LOWER(CAST(request_headers AS TEXT)) LIKE ? UNION " +
+		"SELECT id FROM events WHERE LOWER(CAST(response_body AS TEXT)) LIKE ? UNION " +
+		"SELECT id FROM events WHERE LOWER(CAST(response_headers AS TEXT)) LIKE ?" +
 		")"
 }
 

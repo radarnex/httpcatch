@@ -11,7 +11,7 @@
 {{if .Services}}
 <div class="services-grid">
   {{range .Services}}
-  <a class="service-card" href="/ui/requests?service={{.}}">
+  <a class="service-card" href="/ui/requests?q=service:{{.}}">
     <div class="svc-name"><span class="svc-chip"><span class="dot"></span>{{.}}</span></div>
     <div class="svc-meta">view requests →</div>
   </a>

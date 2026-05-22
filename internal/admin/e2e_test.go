@@ -316,7 +316,7 @@ func TestE2E_UI_MultiFeatureQuery_ChipsBannerRowsConsistent(t *testing.T) {
 	srvURL := startServerWithReaders(t, testAdminToken, admin.ReadSources{SQLite: sq})
 
 	q := "service:foo *billing* -path:/health header.user-agent:client"
-	req, _ := http.NewRequest(http.MethodGet, srvURL+"/ui/requests?q="+url.QueryEscape(q), nil)
+	req, _ := http.NewRequest(http.MethodGet, srvURL+"/ui/requests?"+allTimeWindow+"&q="+url.QueryEscape(q), nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "text/html")
 	resp, err := http.DefaultClient.Do(req)

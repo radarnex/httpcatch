@@ -146,6 +146,72 @@ func TestSQLiteFreeform_MatchesEveryTier1Arm(t *testing.T) {
 	}
 }
 
+func TestSQLiteFreeform_BodyMatchesCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 22, 6, 47, 0, 0, time.UTC)
+
+	body := []byte(`<?xml version="1.0" encoding="UTF-8"?><Cancellation><udf02>16384734*eb8a56a300398a5f2ced4c47f2e9aab9*627*61*3*302*native*24315222</udf02></Cancellation>`)
+	r := sqliteRequest("r1", base, "svc-x", "POST", "/api/cancel", "c1", "1.2.3.4")
+	r.Headers[capture.HostHeader] = []string{"svc-x.local"}
+	r.Body = body
+	if err := s.Write(ctx, r); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Queries that should all match the same body row:
+	cases := []string{
+		"*eb8a56a300398a5f2ced4c47f2e9aab9*",
+		"*EB8A56A300398A5F2CED4C47F2E9AAB9*",
+		"*Cancellation*",
+		"*cancellation*",
+		`body:"udf02"`,
+	}
+	for _, in := range cases {
+		q := inspect.InspectQuery{Query: mustParseQuery(t, in)}
+		rows, _, err := s.ReadRoots(ctx, q, 50, nil)
+		if err != nil {
+			t.Fatalf("ReadRoots(%q): %v", in, err)
+		}
+		if len(rows) != 1 || rows[0].ID != "r1" {
+			t.Errorf("query %q: got %v want [r1]", in, rowIDs(rows))
+		}
+	}
+}
+
+func TestSQLiteFreeform_SubstringMatchesEveryScannedArm(t *testing.T) {
+	t.Parallel()
+
+	s, _ := sqliteFreeformSetup(t)
+	ctx := context.Background()
+
+	q := inspect.InspectQuery{Query: mustParseQuery(t, "*billing-api*")}
+	rows, _, err := s.ReadRoots(ctx, q, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots: %v", err)
+	}
+	got := make(map[string]bool)
+	for _, r := range rows {
+		got[r.ID] = true
+	}
+	wantHits := []string{
+		"by-host", "by-path", "by-service",
+		"by-body", "by-headers",
+		"by-event-rpath", "by-event-rbody", "by-event-rhdrs",
+		"by-event-respb", "by-event-resphd",
+	}
+	for _, id := range wantHits {
+		if !got[id] {
+			t.Errorf("freeform *billing-api* did not match %s", id)
+		}
+	}
+	if got["miss"] {
+		t.Error("freeform *billing-api* should not match the 'miss' row")
+	}
+}
+
 func TestSQLiteFreeform_PrefixMatchesIndexedArmsOnly(t *testing.T) {
 	t.Parallel()
 

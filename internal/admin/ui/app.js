@@ -33,6 +33,115 @@
   });
 })();
 
+// ── Timezone preference ────────────────────────────────────────────
+// Captured records are stored in UTC; the UI defaults to displaying them in
+// UTC so the rendered time matches the underlying record. The operator can
+// switch to browser-local time from the admin menu.
+window.__tz = (function () {
+  var KEY = "httpcatch.tz";
+
+  function read() {
+    try {
+      var v = localStorage.getItem(KEY);
+      return v === "local" ? "local" : "UTC";
+    } catch (e) { return "UTC"; }
+  }
+
+  var current = read();
+  var listeners = [];
+  // Intl.DateTimeFormat construction is one of the heavier Web APIs (locale
+  // data lookup + format-pattern compile), and the histogram axis + the
+  // per-row reformat walk both call into formatter/parts in tight loops. Cache
+  // one formatter per opts shape; bust on tz change.
+  var fmtCache = {};
+
+  function set(t) {
+    current = t === "local" ? "local" : "UTC";
+    try { localStorage.setItem(KEY, current); } catch (e) {}
+    fmtCache = {};
+    syncButtons(current);
+    for (var i = 0; i < listeners.length; i++) {
+      try { listeners[i](current); } catch (_) {}
+    }
+  }
+
+  function get() { return current; }
+
+  function onChange(fn) { listeners.push(fn); }
+
+  function syncButtons(t) {
+    var u = document.getElementById("tz-utc");
+    var l = document.getElementById("tz-local");
+    if (u) {
+      u.classList.toggle("on", t === "UTC");
+      u.setAttribute("aria-checked", t === "UTC" ? "true" : "false");
+    }
+    if (l) {
+      l.classList.toggle("on", t === "local");
+      l.setAttribute("aria-checked", t === "local" ? "true" : "false");
+    }
+  }
+
+  function intlOptions(opts) {
+    var out = {};
+    for (var k in opts) if (Object.prototype.hasOwnProperty.call(opts, k)) out[k] = opts[k];
+    if (current === "UTC") out.timeZone = "UTC";
+    return out;
+  }
+
+  function formatter(opts) {
+    var key = JSON.stringify(opts);
+    var f = fmtCache[key];
+    if (!f) {
+      f = new Intl.DateTimeFormat(undefined, intlOptions(opts));
+      fmtCache[key] = f;
+    }
+    return f;
+  }
+
+  var PARTS_OPTS = {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+  };
+
+  // formatTimestamp renders an ISO/Date as "YYYY-MM-DD HH:MM:SS" in the
+  // configured timezone — the same shape Go's server template emits.
+  function formatTimestamp(iso) {
+    if (!iso) return "";
+    var d = iso instanceof Date ? iso : new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    var p = parts(d);
+    return p.year + "-" + p.month + "-" + p.day + " " + p.hour + ":" + p.minute + ":" + p.second;
+  }
+
+  // Intl.DateTimeFormat is the only stable way to read date parts in a
+  // non-system timezone — Date.getHours() etc. always read local.
+  function parts(d) {
+    var f = formatter(PARTS_OPTS);
+    var out = {};
+    f.formatToParts(d).forEach(function (p) {
+      if (p.type !== "literal") out[p.type] = p.value;
+    });
+    // hour comes back as "24" at midnight in some locales; normalise to "00".
+    if (out.hour === "24") out.hour = "00";
+    return out;
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    syncButtons(current);
+    var u = document.getElementById("tz-utc");
+    var l = document.getElementById("tz-local");
+    if (u) u.addEventListener("click", function () { set("UTC"); });
+    if (l) l.addEventListener("click", function () { set("local"); });
+  });
+
+  return {
+    get: get, set: set, onChange: onChange,
+    formatter: formatter, parts: parts, formatTimestamp: formatTimestamp,
+  };
+})();
+
 // ── Admin menu open/close ──────────────────────────────────────────
 (function () {
   document.addEventListener("DOMContentLoaded", function () {
@@ -239,7 +348,7 @@ function initCurlCopy(root) {
 
   function rowHTML(row) {
     var ts = row.timestamp || "";
-    var displayTs = ts ? ts.replace("T", " ").replace(/\.\d+/, "").replace("Z", "") : "";
+    var displayTs = window.__tz.formatTimestamp(ts);
     var kind = row.kind || "";
     var rowClass = kind !== "request" ? "row-orphan" : "";
     var id = row.id || "";
@@ -582,12 +691,15 @@ function initCurlCopy(root) {
     return map[p] || p;
   }
 
-  var TIME_FMT = new Intl.DateTimeFormat(undefined, {
-    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
-  });
+  function timeFmt() {
+    return window.__tz.formatter({
+      month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+    });
+  }
 
   function formatRange(from, to) {
-    return TIME_FMT.format(from) + " – " + TIME_FMT.format(to);
+    var f = timeFmt();
+    return f.format(from) + " – " + f.format(to);
   }
 
   // ── Calendar (month grid) ────────────────────────────────────────
@@ -611,7 +723,8 @@ function initCurlCopy(root) {
   }
   function formatRangeSummary(from, to) {
     if (!from || !to) return "";
-    return TIME_FMT.format(from) + " – " + TIME_FMT.format(to);
+    var f = timeFmt();
+    return f.format(from) + " – " + f.format(to);
   }
 
   function wirePicker() {
@@ -730,7 +843,7 @@ function initCurlCopy(root) {
           var to = combineDateAndTime(calEnd, toTimeEl && toTimeEl.value);
           summaryEl.textContent = formatRangeSummary(from, to);
         } else if (calStart) {
-          summaryEl.textContent = TIME_FMT.format(combineDateAndTime(calStart, fromTimeEl && fromTimeEl.value)) + " – …";
+          summaryEl.textContent = timeFmt().format(combineDateAndTime(calStart, fromTimeEl && fromTimeEl.value)) + " – …";
         } else {
           summaryEl.textContent = "";
         }
@@ -1230,9 +1343,18 @@ function initCurlCopy(root) {
   function pickAxisFormat(spanMs) {
     var hourMs = 3600 * 1000;
     var dayMs = 24 * hourMs;
-    if (spanMs <= 4 * hourMs) return function (d) { return pad2(d.getHours()) + ":" + pad2(d.getMinutes()); };
-    if (spanMs <= 2 * dayMs) return function (d) { return pad2(d.getHours()) + ":00"; };
-    return function (d) { return MONTH_ABBR[d.getMonth()] + " " + d.getDate(); };
+    if (spanMs <= 4 * hourMs) return function (d) {
+      var p = window.__tz.parts(d);
+      return p.hour + ":" + p.minute;
+    };
+    if (spanMs <= 2 * dayMs) return function (d) {
+      var p = window.__tz.parts(d);
+      return p.hour + ":00";
+    };
+    return function (d) {
+      var p = window.__tz.parts(d);
+      return MONTH_ABBR[parseInt(p.month, 10) - 1] + " " + parseInt(p.day, 10);
+    };
   }
 
   // ── Search box ───────────────────────────────────────────────────
@@ -1317,16 +1439,70 @@ function initCurlCopy(root) {
     }
     var sql = window.__searchql;
     var chipTerms = [];
+    // -1 means the caret is in the text input; otherwise it indexes chipTerms.
+    var selectedChipIndex = -1;
+
+    function clampSelection() {
+      if (selectedChipIndex < -1) selectedChipIndex = -1;
+      if (selectedChipIndex > chipTerms.length - 1) selectedChipIndex = -1;
+    }
+
+    function tokenAt(idx) {
+      return sql.chipFromTerm(chipTerms[idx]).token;
+    }
+
+    function indexOfChip(chipEl) {
+      var siblings = host.querySelectorAll(".qchip");
+      for (var i = 0; i < siblings.length; i++) {
+        if (siblings[i] === chipEl) return i;
+      }
+      return -1;
+    }
+
+    function applySelectionClasses() {
+      var chips = host.querySelectorAll(".qchip");
+      for (var i = 0; i < chips.length; i++) {
+        chips[i].classList.toggle("is-selected", i === selectedChipIndex);
+      }
+    }
+
+    function selectChip(idx) {
+      selectedChipIndex = idx;
+      clampSelection();
+      applySelectionClasses();
+      if (selectedChipIndex === -1) {
+        input.focus();
+      } else {
+        // Blur the input so its caret stops blinking while a chip is selected;
+        // the chip list itself is not focusable.
+        input.blur();
+      }
+    }
+
+    function expandChipToInput(idx) {
+      if (idx < 0 || idx >= chipTerms.length) return;
+      var token = tokenAt(idx);
+      chipTerms.splice(idx, 1);
+      selectedChipIndex = -1;
+      rerenderChips();
+      input.value = token;
+      input.focus();
+      try { input.setSelectionRange(token.length, token.length); } catch (e) {}
+      syncHiddenQ();
+      syncBannerAndHint();
+    }
 
     function rerenderChips() {
       var existing = host.querySelectorAll(".qchip");
       for (var i = 0; i < existing.length; i++) existing[i].parentNode.removeChild(existing[i]);
+      clampSelection();
       if (!chipTerms.length) return;
       var html = "";
       for (var j = 0; j < chipTerms.length; j++) {
         html += renderChip(sql.chipFromTerm(chipTerms[j]));
       }
       input.insertAdjacentHTML("beforebegin", html);
+      applySelectionClasses();
     }
 
     function syncBannerAndHint() {
@@ -1443,6 +1619,86 @@ function initCurlCopy(root) {
         syncHiddenQ();
         syncBannerAndHint();
         input.focus();
+        submitForm();
+        return;
+      }
+      if ((e.key === "ArrowLeft" || e.key === "ArrowUp") &&
+          input.value === "" && chipTerms.length > 0) {
+        e.preventDefault();
+        // Stop propagation so the document-level handler doesn't immediately
+        // shift the just-set selection one position to the left.
+        e.stopPropagation();
+        selectChip(chipTerms.length - 1);
+      }
+    });
+
+    // Listens at document level because chip navigation runs while the input
+    // is blurred — input-scoped listeners would miss those events.
+    document.addEventListener("keydown", function (e) {
+      if (selectedChipIndex < 0) return;
+      // Don't hijack typing into another input/textarea.
+      var t = e.target;
+      if (t && t !== document.body && t !== input &&
+          (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        if (selectedChipIndex > 0) selectChip(selectedChipIndex - 1);
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        if (selectedChipIndex < chipTerms.length - 1) selectChip(selectedChipIndex + 1);
+        else selectChip(-1);
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        expandChipToInput(selectedChipIndex);
+        return;
+      }
+      if (e.key === "Backspace" || e.key === "Delete") {
+        e.preventDefault();
+        var removeAt = selectedChipIndex;
+        chipTerms.splice(removeAt, 1);
+        // After delete, leave selection on the chip that took its place,
+        // or fall back to the previous chip / the input.
+        if (removeAt < chipTerms.length) {
+          selectedChipIndex = removeAt;
+        } else if (chipTerms.length > 0) {
+          selectedChipIndex = chipTerms.length - 1;
+        } else {
+          selectedChipIndex = -1;
+        }
+        rerenderChips();
+        syncHiddenQ();
+        syncBannerAndHint();
+        if (selectedChipIndex === -1) input.focus();
+        submitForm();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        selectChip(-1);
+        return;
+      }
+      // Single printable key: expand the selected chip into the input and
+      // append the typed character. e.key.length === 1 filters out named keys
+      // (F1, ArrowUp, etc.) so chip navigation isn't hijacked.
+      if (e.key && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        var idx = selectedChipIndex;
+        var token = tokenAt(idx);
+        chipTerms.splice(idx, 1);
+        selectedChipIndex = -1;
+        rerenderChips();
+        input.value = token + e.key;
+        input.focus();
+        var len = input.value.length;
+        try { input.setSelectionRange(len, len); } catch (_) {}
+        syncHiddenQ();
+        syncBannerAndHint();
       }
     });
 
@@ -1452,22 +1708,34 @@ function initCurlCopy(root) {
     });
 
     host.addEventListener("click", function (e) {
-      var x = e.target.closest("[data-chip-remove]");
-      if (!x) return;
-      e.preventDefault();
-      var chip = x.closest(".qchip");
-      if (!chip || !chip.parentNode) return;
-      var siblings = chip.parentNode.querySelectorAll(".qchip");
-      var index = -1;
-      for (var i = 0; i < siblings.length; i++) {
-        if (siblings[i] === chip) { index = i; break; }
+      var removeBtn = e.target.closest("[data-chip-remove]");
+      if (removeBtn) {
+        e.preventDefault();
+        var chipR = removeBtn.closest(".qchip");
+        if (!chipR) return;
+        var indexR = indexOfChip(chipR);
+        if (indexR < 0) return;
+        chipTerms.splice(indexR, 1);
+        selectedChipIndex = -1;
+        rerenderChips();
+        syncHiddenQ();
+        syncBannerAndHint();
+        input.focus();
+        submitForm();
+        return;
       }
-      if (index < 0) return;
-      chipTerms.splice(index, 1);
-      rerenderChips();
-      syncHiddenQ();
-      syncBannerAndHint();
-      input.focus();
+      var chip = e.target.closest(".qchip");
+      if (chip) {
+        var idx = indexOfChip(chip);
+        if (idx >= 0) {
+          e.preventDefault();
+          expandChipToInput(idx);
+        }
+      }
+    });
+
+    input.addEventListener("focus", function () {
+      if (selectedChipIndex !== -1) selectChip(-1);
     });
 
     var hintDismiss = document.getElementById("or-hint-dismiss");
@@ -1700,6 +1968,19 @@ function initCurlCopy(root) {
     return fetchPage("", 0).then(function () { return all; });
   }
 
+  // The Go template server-renders [data-timestamp] elements in UTC, so this
+  // is a no-op on first paint when the operator has TZ=UTC selected.
+  function reformatTimestamps(root) {
+    (root || document).querySelectorAll("[data-timestamp]").forEach(function (el) {
+      var iso = el.getAttribute("data-timestamp");
+      if (!iso) return;
+      var formatted = window.__tz.formatTimestamp(iso);
+      var link = el.querySelector("a.row-link");
+      var target = link || el;
+      target.textContent = formatted;
+    });
+  }
+
   // ── Bootstrapping ────────────────────────────────────────────────
   document.addEventListener("DOMContentLoaded", function () {
     refreshTriggerLabel();
@@ -1708,6 +1989,7 @@ function initCurlCopy(root) {
     wireSidePanel();
     wireSavedViews();
     wireExport();
+    reformatTimestamps(document);
     renderHistogramAndCount();
 
     // Detail-page tabs (full-page detail view).
@@ -1722,6 +2004,15 @@ function initCurlCopy(root) {
       });
     });
 
-    document.addEventListener("httpcatch:rows-updated", renderHistogramAndCount);
+    document.addEventListener("httpcatch:rows-updated", function () {
+      reformatTimestamps(document);
+      renderHistogramAndCount();
+    });
+
+    window.__tz.onChange(function () {
+      reformatTimestamps(document);
+      refreshTriggerLabel();
+      renderHistogramAndCount();
+    });
   });
 })();

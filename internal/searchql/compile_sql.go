@@ -45,8 +45,7 @@ func compileTermSQL(t Term) (string, []any) {
 		p, arg := indexedPredicate("cr.service", t)
 		pred, argList = p, []any{arg}
 	case FieldBody:
-		pred = "CAST(cr.body AS TEXT) LIKE ?"
-		argList = []any{"%" + t.Value + "%"}
+		pred, argList = scannedTextPredicate("cr.body", t)
 	case FieldHeaders:
 		pred, argList = headersAnyPredicate(t)
 	case FieldHeader:
@@ -72,6 +71,25 @@ func compileTermSQL(t Term) (string, []any) {
 	return pred, argList
 }
 
+// scannedTextLike returns the "LOWER(CAST(col AS TEXT)) LIKE ?" fragment for a
+// scanned (non-indexed) text/blob column. The connection-wide
+// case_sensitive_like(1) pragma is set so indexed columns can use their indexes
+// for prefix LIKE; scanned columns wrap the value in LOWER() to restore the
+// case-insensitive default operators expect from a free-text search.
+func scannedTextLike(col string) string {
+	return "LOWER(CAST(" + col + " AS TEXT)) LIKE ?"
+}
+
+// likeNeedle returns the "%value%" bound argument for any LOWER(...)-LIKE arm.
+// The value is lowercased once here so callers do not re-lower per row.
+func likeNeedle(t Term) string {
+	return "%" + strings.ToLower(t.Value) + "%"
+}
+
+func scannedTextPredicate(col string, t Term) (string, []any) {
+	return scannedTextLike(col), []any{likeNeedle(t)}
+}
+
 // freeformPredicate emits the Tier-1 union for a freeform term against the
 // captured-requests row plus its correlated events. Each Tier-1 arm is
 // expressed as its own SELECT inside a UNION subquery: SQLite's planner picks
@@ -86,20 +104,20 @@ func freeformPredicate(t Term) (string, []any) {
 	pathPred, pathArg := indexedPredicate("path", t)
 	servicePred, serviceArg := indexedPredicate("service", t)
 	eventPathPred, eventPathArg := indexedPredicate("e_ff.request_path", t)
-	needle := "%" + t.Value + "%"
+	needle := likeNeedle(t)
 	pred := "cr.id IN (" +
 		"SELECT id FROM captured_requests WHERE " + hostPred + " UNION " +
 		"SELECT id FROM captured_requests WHERE " + pathPred + " UNION " +
 		"SELECT id FROM captured_requests WHERE " + servicePred + " UNION " +
-		"SELECT id FROM captured_requests WHERE CAST(body AS TEXT) LIKE ? UNION " +
-		"SELECT id FROM captured_requests WHERE CAST(headers AS TEXT) LIKE ? UNION " +
+		"SELECT id FROM captured_requests WHERE " + scannedTextLike("body") + " UNION " +
+		"SELECT id FROM captured_requests WHERE " + scannedTextLike("headers") + " UNION " +
 		"SELECT cr_ff.id FROM captured_requests cr_ff JOIN events e_ff " +
 		"ON e_ff.correlation_id = cr_ff.correlation_id " +
 		"WHERE " + eventPathPred + " OR " +
-		"CAST(e_ff.request_body AS TEXT) LIKE ? OR " +
-		"CAST(e_ff.request_headers AS TEXT) LIKE ? OR " +
-		"CAST(e_ff.response_body AS TEXT) LIKE ? OR " +
-		"CAST(e_ff.response_headers AS TEXT) LIKE ?" +
+		scannedTextLike("e_ff.request_body") + " OR " +
+		scannedTextLike("e_ff.request_headers") + " OR " +
+		scannedTextLike("e_ff.response_body") + " OR " +
+		scannedTextLike("e_ff.response_headers") +
 		")"
 	args := []any{
 		hostArg, pathArg, serviceArg,
@@ -110,40 +128,41 @@ func freeformPredicate(t Term) (string, []any) {
 	return pred, args
 }
 
-// headersAnyPredicate emits a substring predicate against the row's headers
-// JSON column plus any correlated events' request/response headers. A row
-// matches if any of the three columns substring-matches the needle. The
-// headers columns are bound as BLOB at write time (the writer passes a
-// json.Marshal []byte), so each comparison wraps the column in
+// headersAnyPredicate emits a case-insensitive substring predicate against
+// the row's headers JSON column plus any correlated events' request/response
+// headers. A row matches if any of the three columns substring-matches the
+// needle. The headers columns are bound as BLOB at write time (the writer
+// passes a json.Marshal []byte), so each comparison wraps the column in
 // CAST(... AS TEXT) — without it, SQLite's LIKE returns NULL on a BLOB and
 // the predicate silently never matches.
 func headersAnyPredicate(t Term) (string, []any) {
-	needle := "%" + t.Value + "%"
-	pred := "(CAST(cr.headers AS TEXT) LIKE ? OR " +
+	needle := likeNeedle(t)
+	pred := "(" + scannedTextLike("cr.headers") + " OR " +
 		"EXISTS (SELECT 1 FROM events e_h " +
 		"WHERE e_h.correlation_id = cr.correlation_id " +
-		"AND (CAST(e_h.request_headers AS TEXT) LIKE ? OR CAST(e_h.response_headers AS TEXT) LIKE ?)))"
+		"AND (" + scannedTextLike("e_h.request_headers") + " OR " + scannedTextLike("e_h.response_headers") + ")))"
 	return pred, []any{needle, needle, needle}
 }
 
-// headerNamedPredicate emits a JSON1-backed substring predicate against the
-// named header's values across cr.headers, events.request_headers, and
-// events.response_headers. json_extract(col, '$."Canonical"') returns a JSON
-// array (the http.Header multi-value shape) or NULL when the key is absent;
-// json_each iterates the array; the EXISTS chain returns true when any value
-// substring-matches the needle. A missing key contributes no match — negation
-// of a missing-key row is therefore true, per the PRD. json_extract accepts a
-// BLOB column transparently, so no CAST is needed here.
+// headerNamedPredicate emits a JSON1-backed case-insensitive substring
+// predicate against the named header's values across cr.headers,
+// events.request_headers, and events.response_headers.
+// json_extract(col, '$."Canonical"') returns a JSON array (the http.Header
+// multi-value shape) or NULL when the key is absent; json_each iterates the
+// array; the EXISTS chain returns true when any value substring-matches the
+// needle. A missing key contributes no match — negation of a missing-key row
+// is therefore true, per the PRD. json_extract accepts a BLOB column
+// transparently, so no CAST is needed here.
 func headerNamedPredicate(t Term) (string, []any) {
-	needle := "%" + t.Value + "%"
+	needle := likeNeedle(t)
 	path := jsonHeaderPath(t.HeaderName)
 	pred := "(" +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(cr.headers, ?)) WHERE value LIKE ?) OR " +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(cr.headers, ?)) WHERE LOWER(value) LIKE ?) OR " +
 		"EXISTS (SELECT 1 FROM events e_h " +
 		"WHERE e_h.correlation_id = cr.correlation_id " +
 		"AND (" +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.request_headers, ?)) WHERE value LIKE ?) OR " +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.response_headers, ?)) WHERE value LIKE ?)" +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.request_headers, ?)) WHERE LOWER(value) LIKE ?) OR " +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.response_headers, ?)) WHERE LOWER(value) LIKE ?)" +
 		"))" +
 		")"
 	return pred, []any{path, needle, path, needle, path, needle}
@@ -226,19 +245,19 @@ func CompileSQLOrphans(q Query) (where string, args []any) {
 			clauses = append(clauses, pred)
 			args = append(args, t.Value)
 		case FieldHeaders:
-			needle := "%" + t.Value + "%"
-			pred := "(CAST(e.request_headers AS TEXT) LIKE ? OR CAST(e.response_headers AS TEXT) LIKE ?)"
+			needle := likeNeedle(t)
+			pred := "(" + scannedTextLike("e.request_headers") + " OR " + scannedTextLike("e.response_headers") + ")"
 			if t.Negated {
 				pred = "NOT (" + pred + ")"
 			}
 			clauses = append(clauses, pred)
 			args = append(args, needle, needle)
 		case FieldHeader:
-			needle := "%" + t.Value + "%"
+			needle := likeNeedle(t)
 			path := jsonHeaderPath(t.HeaderName)
 			pred := "(" +
-				"EXISTS (SELECT 1 FROM json_each(json_extract(e.request_headers, ?)) WHERE value LIKE ?) OR " +
-				"EXISTS (SELECT 1 FROM json_each(json_extract(e.response_headers, ?)) WHERE value LIKE ?)" +
+				"EXISTS (SELECT 1 FROM json_each(json_extract(e.request_headers, ?)) WHERE LOWER(value) LIKE ?) OR " +
+				"EXISTS (SELECT 1 FROM json_each(json_extract(e.response_headers, ?)) WHERE LOWER(value) LIKE ?)" +
 				")"
 			if t.Negated {
 				pred = "NOT (" + pred + ")"
@@ -288,14 +307,14 @@ func CompileSQLOrphans(q Query) (where string, args []any) {
 func freeformOrphanPredicate(t Term) (string, []any) {
 	servicePred, serviceArg := indexedPredicate("service", t)
 	pathPred, pathArg := indexedPredicate("request_path", t)
-	needle := "%" + t.Value + "%"
+	needle := likeNeedle(t)
 	pred := "e.id IN (" +
 		"SELECT id FROM events WHERE " + servicePred + " UNION " +
 		"SELECT id FROM events WHERE " + pathPred + " UNION " +
-		"SELECT id FROM events WHERE CAST(request_body AS TEXT) LIKE ? UNION " +
-		"SELECT id FROM events WHERE CAST(request_headers AS TEXT) LIKE ? UNION " +
-		"SELECT id FROM events WHERE CAST(response_body AS TEXT) LIKE ? UNION " +
-		"SELECT id FROM events WHERE CAST(response_headers AS TEXT) LIKE ?" +
+		"SELECT id FROM events WHERE " + scannedTextLike("request_body") + " UNION " +
+		"SELECT id FROM events WHERE " + scannedTextLike("request_headers") + " UNION " +
+		"SELECT id FROM events WHERE " + scannedTextLike("response_body") + " UNION " +
+		"SELECT id FROM events WHERE " + scannedTextLike("response_headers") +
 		")"
 	args := []any{
 		serviceArg, pathArg,

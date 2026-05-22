@@ -55,6 +55,12 @@
             <button type="button" id="theme-dark" role="radio" aria-checked="false">Dark</button>
           </div>
           <div class="admin-menu-sep"></div>
+          <div class="admin-menu-h">Timezone</div>
+          <div class="theme-seg" role="radiogroup" aria-label="Timezone">
+            <button type="button" id="tz-utc" role="radio" aria-checked="true">UTC</button>
+            <button type="button" id="tz-local" role="radio" aria-checked="false">Local</button>
+          </div>
+          <div class="admin-menu-sep"></div>
           <form action="/auth/logout" method="POST" style="margin: 0;">
             <button type="submit" class="admin-menu-item danger">Log out</button>
           </form>
