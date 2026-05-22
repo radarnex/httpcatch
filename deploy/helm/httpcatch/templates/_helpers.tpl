@@ -211,6 +211,7 @@ Pod template shared by Deployment and StatefulSet.
 {{- define "httpcatch.podSpec" -}}
 serviceAccountName: {{ include "httpcatch.serviceAccountName" . }}
 automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+enableServiceLinks: false
 terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
 {{- with .Values.image.pullSecrets }}
 imagePullSecrets:
