@@ -2,7 +2,8 @@ BINARY       := httpcatch
 BIN_DIR      := bin
 PKG          := ./cmd/httpcatch
 GO           ?= go
-DOCKER_IMAGE ?= radarnex/httpcatch
+DOCKER_IMAGE    ?= radarnex/httpcatch
+BUILDX_BUILDER  ?= multiplatform
 VERSION      ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_TIME   := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -52,6 +53,7 @@ docker-build:
 
 docker-image-build:
 	docker buildx build \
+		--builder $(BUILDX_BUILDER) \
 		--platform linux/amd64,linux/arm64 \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -61,6 +63,7 @@ docker-image-build:
 
 docker-image-push:
 	docker buildx build \
+		--builder $(BUILDX_BUILDER) \
 		--platform linux/amd64,linux/arm64 \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
