@@ -133,6 +133,7 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 			MaxEventsPayload: cfg.MaxEventsPayload,
 			Counters:         eventsCounters,
 		},
+		Effective: cfg,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("admin server: %w", err)

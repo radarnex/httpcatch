@@ -50,6 +50,10 @@ type EventsSources struct {
 type ServerOptions struct {
 	Readers ReadSources
 	Events  EventsSources
+	// Effective is the post-defaults, post-env, post-validation snapshot of the
+	// running config. Rendered verbatim on the Configuration page. When zero,
+	// the page renders an empty effective config block.
+	Effective config.Config
 }
 
 // New validates the bind policy and constructs a Server. An error is returned
@@ -101,6 +105,7 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 		r.Get("/ui/requests", requestListHandler(rs.Memory, rs.SQLite))
 		r.Get("/ui/requests/{id}", requestDetailUIHandler(rs.Memory, rs.SQLite))
 		r.Get("/ui/services", servicesUIHandler(rs.Memory, rs.SQLite))
+		r.Get("/ui/configuration", configurationUIHandler(serverOpts.Effective, sources.Unredacted))
 	})
 
 	// POST /events uses bearer-only auth (no session cookie) to eliminate CSRF risk.

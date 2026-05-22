@@ -1,0 +1,18 @@
+{{define "body"}}
+<div class="page-head">
+  <span class="crumb">Configuration<span class="sep">/</span></span>
+  <h1>Effective configuration</h1>
+  <span class="grow"></span>
+  <button type="button" class="btn btn-ghost" id="cfg-copy" data-copy-target="cfg-yaml" title="Copy YAML">Copy</button>
+</div>
+
+<div class="cfg-body">
+  {{if .Unredacted}}
+  <div class="cfg-banner danger" role="alert">
+    <strong>Unredacted mode.</strong> No redaction rules are configured. Captured payloads are stored as-is.
+  </div>
+  {{end}}
+
+  <pre class="cfg-yaml" id="cfg-yaml">{{.YAML}}</pre>
+</div>
+{{end}}

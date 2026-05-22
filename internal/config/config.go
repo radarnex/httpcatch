@@ -36,28 +36,28 @@ type SinksConfig struct {
 
 // AdminConfig holds the parsed admin port settings.
 type AdminConfig struct {
-	Bind           string
-	Token          string
-	InsecureListen bool
-	SessionTTL     time.Duration
-	SessionSecure  bool
+	Bind           string        `yaml:"bind"`
+	Token          string        `yaml:"token"`
+	InsecureListen bool          `yaml:"insecure_listen"`
+	SessionTTL     time.Duration `yaml:"session_ttl"`
+	SessionSecure  bool          `yaml:"session_secure"`
 }
 
 // RedactionConfig holds the parsed redaction rules for use by the ruleset.
 type RedactionConfig struct {
-	Headers     []string
-	QueryParams []string
-	JSONPaths   []string
-	Regex       []RegexRuleConfig
-	Cookies     []CookieRuleConfig
+	Headers     []string           `yaml:"headers"`
+	QueryParams []string           `yaml:"query_params"`
+	JSONPaths   []string           `yaml:"json_paths"`
+	Regex       []RegexRuleConfig  `yaml:"regex"`
+	Cookies     []CookieRuleConfig `yaml:"cookies"`
 }
 
 // CookieRuleConfig is one entry under `cookies:` — a mode plus the names the
 // mode applies to. Mode is left as a string at the config layer; the ruleset
 // loader validates it against the set of known modes.
 type CookieRuleConfig struct {
-	Mode  string
-	Names []string
+	Mode  string   `yaml:"mode"`
+	Names []string `yaml:"names"`
 }
 
 // RegexRuleConfig is one entry under `regex:` — a human-readable name plus the
@@ -65,8 +65,8 @@ type CookieRuleConfig struct {
 // ruleset loader compiles it and surfaces any compile error attributed to the
 // rule name.
 type RegexRuleConfig struct {
-	Name    string
-	Pattern string
+	Name    string `yaml:"name"`
+	Pattern string `yaml:"pattern"`
 }
 
 type Config struct {
@@ -78,8 +78,8 @@ type Config struct {
 	ServiceHeader    string          `yaml:"service_header"`
 	LogFormat        string          `yaml:"log_format"`
 	Sinks            SinksConfig     `yaml:"sinks"`
-	Redaction        RedactionConfig
-	Admin            AdminConfig
+	Redaction        RedactionConfig `yaml:"redaction"`
+	Admin            AdminConfig     `yaml:"admin"`
 }
 
 func Defaults() Config {

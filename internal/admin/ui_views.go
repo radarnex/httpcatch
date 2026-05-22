@@ -2,19 +2,24 @@ package admin
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"gopkg.in/yaml.v3"
 
 	"github.com/radarnex/httpcatch/internal/capture"
+	"github.com/radarnex/httpcatch/internal/config"
 	"github.com/radarnex/httpcatch/internal/inspect"
 	"github.com/radarnex/httpcatch/internal/searchql"
 )
@@ -39,10 +44,11 @@ const defaultExplorerWindow = 15 * time.Minute
 // {{define "body"}} block in each page template overrides the {{block "body"}}
 // slot in the layout.
 var (
-	listTmpl        = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/requests_list.html"))
-	detailTmpl      = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/requests_detail.html"))
-	eventDetailTmpl = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/events_detail.html"))
-	servicesTmpl    = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/services.html"))
+	listTmpl          = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/requests_list.html"))
+	detailTmpl        = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/requests_detail.html"))
+	eventDetailTmpl   = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/events_detail.html"))
+	servicesTmpl      = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/services.html"))
+	configurationTmpl = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/configuration.html"))
 )
 
 // rootRedirectHandler redirects the root URL to the request list.
@@ -755,4 +761,79 @@ func formatBody(body []byte, contentType string) string {
 		}
 	}
 	return string(body)
+}
+
+// configurationPageData is the template data for GET /ui/configuration.
+type configurationPageData struct {
+	Page       string
+	YAML       template.HTML
+	Unredacted bool
+}
+
+const (
+	adminTokenMaskUnset = "<unset>"
+	adminTokenMaskSet   = "<set>"
+)
+
+// configurationAnchorKey matches a top-level YAML key at column zero. The
+// captured name becomes an in-page anchor so chip links like
+// /ui/configuration#redaction land on the matching section header.
+var configurationAnchorKey = regexp.MustCompile(`(?m)^([a-z_]+):`)
+
+// configurationUIHandler precomputes the rendered page body and an ETag at
+// construction time. The effective config is immutable for the lifetime of the
+// process (rule reload requires restart), so per-request work collapses to a
+// conditional-GET check and a byte write — matching the static-asset pattern.
+func configurationUIHandler(effective config.Config, unredacted func() bool) http.HandlerFunc {
+	display := effective
+	if display.Admin.Token == "" {
+		display.Admin.Token = adminTokenMaskUnset
+	} else {
+		display.Admin.Token = adminTokenMaskSet
+	}
+
+	var yamlBuf bytes.Buffer
+	enc := yaml.NewEncoder(&yamlBuf)
+	enc.SetIndent(2)
+	if err := enc.Encode(display); err != nil {
+		panic(fmt.Errorf("configuration page: marshal config: %w", err))
+	}
+	_ = enc.Close()
+
+	data := configurationPageData{
+		Page:       "configuration",
+		YAML:       template.HTML(injectConfigurationAnchors(yamlBuf.String())),
+		Unredacted: unredacted(),
+	}
+
+	var bodyBuf bytes.Buffer
+	if err := configurationTmpl.ExecuteTemplate(&bodyBuf, "layout", data); err != nil {
+		panic(fmt.Errorf("configuration page: render template: %w", err))
+	}
+	body := bodyBuf.Bytes()
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:])[:16] + `"`
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}
+}
+
+// injectConfigurationAnchors html-escapes the YAML text, then wraps each
+// top-level key in a <span id="key"> so fragment links land on the right line.
+// Keys are ASCII identifiers and survive html-escaping unchanged.
+func injectConfigurationAnchors(yamlText string) string {
+	escaped := template.HTMLEscapeString(yamlText)
+	return configurationAnchorKey.ReplaceAllStringFunc(escaped, func(m string) string {
+		key := m[:len(m)-1]
+		return `<span id="` + key + `">` + key + `</span>:`
+	})
 }

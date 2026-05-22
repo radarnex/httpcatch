@@ -2014,5 +2014,26 @@ function initCurlCopy(root) {
       refreshTriggerLabel();
       renderHistogramAndCount();
     });
+
+    wireCopyButtons(document);
   });
+
+  function wireCopyButtons(root) {
+    var buttons = root.querySelectorAll("[data-copy-target]");
+    buttons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var target = document.getElementById(btn.getAttribute("data-copy-target"));
+        if (!target) return;
+        navigator.clipboard.writeText(target.textContent || "").then(function () {
+          var prev = btn.textContent;
+          btn.textContent = "Copied";
+          btn.classList.add("is-copied");
+          setTimeout(function () {
+            btn.textContent = prev;
+            btn.classList.remove("is-copied");
+          }, 1200);
+        });
+      });
+    });
+  }
 })();
