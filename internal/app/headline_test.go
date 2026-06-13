@@ -134,7 +134,7 @@ func getRequestsList(t *testing.T, adminURL, query string) []map[string]any {
 		path += "?" + query
 	}
 	_, body := adminGet(t, adminURL, path)
-	raw, _ := body["records"]
+	raw := body["records"]
 	recs, _ := raw.([]any)
 	out := make([]map[string]any, 0, len(recs))
 	for _, r := range recs {
@@ -149,16 +149,6 @@ func getRequestsList(t *testing.T, adminURL, query string) []map[string]any {
 func findByKind(recs []map[string]any, kind string) map[string]any {
 	for _, r := range recs {
 		if r["kind"] == kind {
-			return r
-		}
-	}
-	return nil
-}
-
-// findByID returns the first record with the given id, or nil.
-func findByID(recs []map[string]any, id string) map[string]any {
-	for _, r := range recs {
-		if r["id"] == id {
 			return r
 		}
 	}

@@ -7,7 +7,7 @@ BUILDX_BUILDER  ?= multiplatform
 VERSION      ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_TIME   := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: help build test test-race vet fmt fmt-check tidy check run clean docker-build docker-up docker-down docker-logs docker-image-build docker-image-push
+.PHONY: help build test test-race vet fmt fmt-check lint lint-fix vuln tidy check run clean docker-build docker-up docker-down docker-logs docker-image-build docker-image-push
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} \
@@ -25,6 +25,15 @@ test-race: ## Run tests with the race detector
 vet: ## go vet
 	$(GO) vet ./...
 
+lint:
+	$(GO) tool golangci-lint run ./...
+
+lint-fix:
+	$(GO) tool golangci-lint run --fix ./...
+
+vuln:
+	$(GO) tool govulncheck ./...
+
 fmt: ## Format all Go files
 	$(GO) fmt ./...
 
@@ -37,7 +46,7 @@ fmt-check: ## Fail if any file is not gofmt-clean
 tidy: ## go mod tidy
 	$(GO) mod tidy
 
-check: fmt-check vet test-race ## Pre-push validation: fmt + vet + race tests
+check: fmt-check vet lint vuln test-race ## Pre-push validation: fmt + vet + lint + vuln + race tests
 
 run: build ## Build then run; pass flags via ARGS, e.g. make run ARGS="--config c.yaml"
 	./$(BIN_DIR)/$(BINARY) $(ARGS)

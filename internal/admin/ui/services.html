@@ -3,7 +3,7 @@
   <span class="crumb">Services<span class="sep">/</span></span>
   <h1>Services seen in the last 24h</h1>
   <span class="grow"></span>
-  <span class="count" style="font-size:12px; color: var(--text-3);"><b style="color:var(--text-1);">{{len .Services}}</b> service{{if ne (len .Services) 1}}s{{end}}</span>
+  <span class="svc-count"><b>{{len .Services}}</b> service{{if ne (len .Services) 1}}s{{end}}</span>
 </div>
 
 {{if .Error}}<div class="inline-error" role="alert">{{.Error}}</div>{{end}}

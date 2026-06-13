@@ -14,7 +14,29 @@ const (
 	ServiceSourceHeader  = "header"
 	ServiceSourceHost    = "host"
 	ServiceSourceUnknown = "unknown"
+
+	// maxServiceLabelBytes caps the length accepted for a service label. Values
+	// longer than this are treated as absent so the chain falls through to the
+	// next candidate.
+	maxServiceLabelBytes = 256
 )
+
+// SanitiseServiceLabel trims whitespace, lowercases, and validates a candidate
+// service label. It returns "" when the value contains control characters
+// (U+0000–U+001F or U+007F) or exceeds maxServiceLabelBytes, so callers can
+// fall through to the next step in the resolution chain.
+func SanitiseServiceLabel(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || len(s) > maxServiceLabelBytes {
+		return ""
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return strings.ToLower(s)
+}
 
 // IdentifyService resolves the service label for a captured request using
 // the chain configured-header → Host → "unknown". The configured header
@@ -26,20 +48,18 @@ func IdentifyService(headers http.Header, configuredHeader string) (value, sourc
 	if name == "" {
 		name = DefaultServiceHeader
 	}
-	if v := strings.TrimSpace(headers.Get(name)); v != "" {
-		return v, ServiceSourceHeader
+	if raw := headers.Get(name); raw != "" {
+		if v := SanitiseServiceLabel(raw); v != "" {
+			return v, ServiceSourceHeader
+		}
 	}
 
-	host := strings.TrimSpace(headers.Get(HostHeader))
-	if host == "" {
-		return UnknownService, ServiceSourceUnknown
-	}
+	host := headers.Get(HostHeader)
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	host = strings.ToLower(host)
-	if host == "" {
-		return UnknownService, ServiceSourceUnknown
+	if v := SanitiseServiceLabel(host); v != "" {
+		return v, ServiceSourceHost
 	}
-	return host, ServiceSourceHost
+	return UnknownService, ServiceSourceUnknown
 }

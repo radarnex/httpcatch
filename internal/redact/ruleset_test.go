@@ -245,7 +245,7 @@ func TestQueryRules_NonMatchingPassThrough(t *testing.T) {
 	}
 }
 
-func TestQueryRules_CaseSensitive(t *testing.T) {
+func TestQueryRules_CaseInsensitive(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -254,8 +254,8 @@ func TestQueryRules_CaseSensitive(t *testing.T) {
 		want     string
 	}{
 		{"exact match redacted", "token", redact.Redacted},
-		{"capitalized untouched", "Token", "secret"},
-		{"upper untouched", "TOKEN", "secret"},
+		{"capitalized redacted", "Token", redact.Redacted},
+		{"upper redacted", "TOKEN", redact.Redacted},
 	}
 
 	for _, tc := range cases {
@@ -707,6 +707,8 @@ func TestJSONPathRules_PathNotPresentIsNoOp(t *testing.T) {
 func TestJSONPathRules_NonJSONContentTypeUntouched(t *testing.T) {
 	t.Parallel()
 
+	// Bodies that are not valid JSON are left untouched regardless of Content-Type.
+	// The error counter does not tick unless the declared type is JSON.
 	cases := []struct {
 		name        string
 		contentType string
@@ -715,7 +717,6 @@ func TestJSONPathRules_NonJSONContentTypeUntouched(t *testing.T) {
 		{"xml", "application/xml", []byte(`<root><password>hunter2</password></root>`)},
 		{"binary", "application/octet-stream", []byte{0x00, 0x01, 0x02, 0xff}},
 		{"plain-text", "text/plain", []byte(`password: hunter2`)},
-		{"empty-content-type", "", []byte(`{"password":"hunter2"}`)},
 	}
 
 	for _, tc := range cases {
@@ -738,6 +739,30 @@ func TestJSONPathRules_NonJSONContentTypeUntouched(t *testing.T) {
 				t.Errorf("RedactionErrorsTotal: got %d, want 0", got)
 			}
 		})
+	}
+}
+
+func TestJSONPathRules_MislabelledJSONBody_Redacted(t *testing.T) {
+	t.Parallel()
+
+	// A body that is valid JSON is redacted via json_paths even when the
+	// declared Content-Type is not application/json.
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := makeRecordWithBody("text/plain", []byte(`{"password":"hunter2","user":"alice"}`))
+	out := redactCaptured(t, rs, rec)
+
+	if got := gjsonGet(t, out.Body, "password"); got != redact.Redacted {
+		t.Errorf("password: got %q, want %q", got, redact.Redacted)
+	}
+	if got := gjsonGet(t, out.Body, "user"); got != "alice" {
+		t.Errorf("user: got %q, want alice", got)
+	}
+	if got := rs.RedactionErrorsTotal(); got != 0 {
+		t.Errorf("RedactionErrorsTotal: got %d, want 0 (mislabelled JSON is not an error)", got)
 	}
 }
 
@@ -1025,7 +1050,7 @@ func TestRegexRules_MultipleMatchesAllReplaced(t *testing.T) {
 	}
 }
 
-func TestRegexRules_BinaryBodySkippedHeadersAndQueryScanned(t *testing.T) {
+func TestRegexRules_BinaryBodyScannedHeadersAndQueryScanned(t *testing.T) {
 	t.Parallel()
 
 	rs, err := redact.NewRuleset(config.RedactionConfig{
@@ -1035,8 +1060,8 @@ func TestRegexRules_BinaryBodySkippedHeadersAndQueryScanned(t *testing.T) {
 		t.Fatalf("NewRuleset: %v", err)
 	}
 
+	// Regex rules apply to all non-empty bodies regardless of Content-Type.
 	bodyBytes := []byte("10.0.0.1 inside-binary")
-	original := append([]byte(nil), bodyBytes...)
 	rec := &capture.CapturedRequest{
 		ContentType: "application/octet-stream",
 		Body:        bodyBytes,
@@ -1045,8 +1070,9 @@ func TestRegexRules_BinaryBodySkippedHeadersAndQueryScanned(t *testing.T) {
 	}
 	out := redactCaptured(t, rs, rec)
 
-	if string(out.Body) != string(original) {
-		t.Errorf("binary body changed: got %q, want %q", out.Body, original)
+	want := redact.Redacted + " inside-binary"
+	if string(out.Body) != want {
+		t.Errorf("body: got %q, want %q", out.Body, want)
 	}
 	if vals := out.Headers["X-IP"]; len(vals) != 1 || vals[0] != redact.Redacted {
 		t.Errorf("X-IP: got %v, want [%q]", vals, redact.Redacted)
@@ -1056,7 +1082,7 @@ func TestRegexRules_BinaryBodySkippedHeadersAndQueryScanned(t *testing.T) {
 	}
 }
 
-func TestRegexRules_NonTextBodySkippedHeadersAndQueryScanned(t *testing.T) {
+func TestRegexRules_NonTextBodyScannedHeadersAndQueryScanned(t *testing.T) {
 	t.Parallel()
 
 	rs, err := redact.NewRuleset(config.RedactionConfig{
@@ -1066,8 +1092,8 @@ func TestRegexRules_NonTextBodySkippedHeadersAndQueryScanned(t *testing.T) {
 		t.Fatalf("NewRuleset: %v", err)
 	}
 
+	// Regex rules apply to all non-empty bodies regardless of Content-Type.
 	bodyBytes := []byte("not really a png but 10.0.0.1 lives here")
-	original := append([]byte(nil), bodyBytes...)
 	rec := &capture.CapturedRequest{
 		ContentType: "image/png",
 		Body:        bodyBytes,
@@ -1076,8 +1102,9 @@ func TestRegexRules_NonTextBodySkippedHeadersAndQueryScanned(t *testing.T) {
 	}
 	out := redactCaptured(t, rs, rec)
 
-	if string(out.Body) != string(original) {
-		t.Errorf("image body changed: got %q, want %q", out.Body, original)
+	want := "not really a png but " + redact.Redacted + " lives here"
+	if string(out.Body) != want {
+		t.Errorf("body: got %q, want %q", out.Body, want)
 	}
 	if vals := out.Headers["X-IP"]; len(vals) != 1 || vals[0] != redact.Redacted {
 		t.Errorf("X-IP: got %v, want [%q]", vals, redact.Redacted)
@@ -1270,9 +1297,10 @@ redaction:
 	}
 }
 
-// TestRedact_EventVariants is a table-driven test that verifies each rule type
-// is applied to the correct halves of each record variant (header rules to all
-// headers maps; JSON-path rules to all bodies, content-type-gated per half).
+// TestRedact_EventVariants verifies each rule type is applied to the correct
+// halves of each record variant: header rules to all headers maps; JSON-path
+// rules to all bodies that parse as valid JSON; regex rules to all non-empty
+// bodies.
 func TestRedact_EventVariants(t *testing.T) {
 	t.Parallel()
 
@@ -1282,12 +1310,6 @@ func TestRedact_EventVariants(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("NewRuleset: %v", err)
-	}
-
-	type result struct {
-		headers   map[string][]string
-		body      []byte
-		bodyCount int // how many bodies were redacted
 	}
 
 	t.Run("NoOp/CapturedRequest", func(t *testing.T) {
@@ -1448,4 +1470,243 @@ func TestRedact_EventVariants(t *testing.T) {
 			t.Errorf("non-JSON body should be untouched: got %q", re.Body)
 		}
 	})
+}
+
+// ---- S-RED-01: regex applies regardless of Content-Type ----
+
+func TestRegexRules_MultipartFormData_BodyRedacted(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "digits16", Pattern: `\d{16}`}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	// multipart/form-data was the canonical bypass: same secret, different outcome.
+	body := "--x\r\nContent-Disposition: form-data; name=\"card\"\r\n\r\n4111111111111111\r\n--x--"
+	rec := &capture.CapturedRequest{
+		ContentType: "multipart/form-data; boundary=x",
+		Body:        []byte(body),
+	}
+	out := redactCaptured(t, rs, rec)
+
+	if strings.Contains(string(out.Body), "4111111111111111") {
+		t.Errorf("card number survived redaction: %q", out.Body)
+	}
+	if !strings.Contains(string(out.Body), redact.Redacted) {
+		t.Errorf("body does not contain redaction marker: %q", out.Body)
+	}
+}
+
+func TestRegexRules_OctetStream_BodyRedacted(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Regex: []config.RegexRuleConfig{{Name: "secret_key", Pattern: `sk-[A-Za-z0-9]{20}`}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	// application/octet-stream carrying operator-secret-pattern bytes.
+	body := []byte("key=sk-AAAAABBBBBCCCCCDDDDDE data after")
+	rec := &capture.CapturedRequest{
+		ContentType: "application/octet-stream",
+		Body:        body,
+	}
+	out := redactCaptured(t, rs, rec)
+
+	if strings.Contains(string(out.Body), "sk-AAAAABBBBBCCCCCDDDDDE") {
+		t.Errorf("secret key survived redaction: %q", out.Body)
+	}
+	if !strings.Contains(string(out.Body), redact.Redacted) {
+		t.Errorf("body does not contain redaction marker: %q", out.Body)
+	}
+}
+
+// ---- S-RED-02: json-path applies on gjson.ValidBytes, not declared type ----
+
+func TestJSONPathRules_ErrorCounterTicksForDeclaredJSONInvalidBody(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	// declared JSON + invalid body → counter increments.
+	rec := makeRecordWithBody("application/json", []byte(`not valid json`))
+	redactCaptured(t, rs, rec)
+
+	if got := rs.RedactionErrorsTotal(); got != 1 {
+		t.Errorf("RedactionErrorsTotal: got %d, want 1", got)
+	}
+}
+
+func TestJSONPathRules_ErrorCounterSilentForNonDeclaredJSONInvalidBody(t *testing.T) {
+	t.Parallel()
+
+	// non-JSON declared type + invalid body → no counter tick (not an error).
+	cases := []struct {
+		name        string
+		contentType string
+	}{
+		{"text/plain", "text/plain"},
+		{"image/png", "image/png"},
+		{"empty", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rs, _ := redact.NewRuleset(config.RedactionConfig{JSONPaths: []string{"password"}})
+			rec := makeRecordWithBody(tc.contentType, []byte(`not valid json`))
+			redactCaptured(t, rs, rec)
+			if got := rs.RedactionErrorsTotal(); got != 0 {
+				t.Errorf("%q: RedactionErrorsTotal: got %d, want 0", tc.contentType, got)
+			}
+		})
+	}
+}
+
+// ---- S-RED-03: cookie redaction on event variants ----
+
+func TestRedact_ResponseEvent_SetCookieRedacted(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		mode     string
+		input    []string
+		wantVals []string
+		wantGone bool
+	}{
+		{
+			name:     "redact mode replaces value",
+			mode:     "redact",
+			input:    []string{"sid=secret; Path=/; HttpOnly", "pref=dark"},
+			wantVals: []string{"sid=" + redact.Redacted + "; Path=/; HttpOnly", "pref=dark"},
+		},
+		{
+			name:     "strip mode drops named entry",
+			mode:     "strip",
+			input:    []string{"sid=secret; Path=/"},
+			wantGone: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rs, err := redact.NewRuleset(config.RedactionConfig{
+				Cookies: []config.CookieRuleConfig{{Mode: tc.mode, Names: []string{"sid"}}},
+			})
+			if err != nil {
+				t.Fatalf("NewRuleset: %v", err)
+			}
+
+			rec := &capture.ResponseEvent{
+				ID:      "re-1",
+				Service: "svc",
+				Headers: map[string][]string{
+					"Set-Cookie": tc.input,
+				},
+			}
+			out := rs.Redact(rec)
+			re, ok := out.(*capture.ResponseEvent)
+			if !ok {
+				t.Fatalf("expected *ResponseEvent, got %T", out)
+			}
+
+			if tc.wantGone {
+				if _, exists := re.Headers["Set-Cookie"]; exists {
+					t.Errorf("Set-Cookie should be removed; got %v", re.Headers["Set-Cookie"])
+				}
+				return
+			}
+			got := re.Headers["Set-Cookie"]
+			if len(got) != len(tc.wantVals) {
+				t.Fatalf("Set-Cookie: got %d values, want %d (%v)", len(got), len(tc.wantVals), got)
+			}
+			for i, v := range got {
+				if v != tc.wantVals[i] {
+					t.Errorf("Set-Cookie[%d]: got %q, want %q", i, v, tc.wantVals[i])
+				}
+			}
+		})
+	}
+}
+
+func TestRedact_OutboundEvent_RequestCookieRedacted(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Cookies: []config.CookieRuleConfig{{Mode: "redact", Names: []string{"session"}}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	rec := &capture.OutboundEvent{
+		ID:      "oe-1",
+		Service: "svc",
+		Request: capture.OutboundRequestHalf{
+			Method: "GET",
+			Path:   "/api",
+			Headers: map[string][]string{
+				"Cookie": {"session=abc123; other=keep"},
+			},
+		},
+	}
+	out := rs.Redact(rec)
+	oe, ok := out.(*capture.OutboundEvent)
+	if !ok {
+		t.Fatalf("expected *OutboundEvent, got %T", out)
+	}
+
+	wantCookie := "session=" + redact.Redacted + "; other=keep"
+	vals := oe.Request.Headers["Cookie"]
+	if len(vals) != 1 || vals[0] != wantCookie {
+		t.Errorf("Cookie: got %v, want [%q]", vals, wantCookie)
+	}
+}
+
+func TestRedact_OutboundEvent_ResponseSetCookieRedacted(t *testing.T) {
+	t.Parallel()
+
+	rs, err := redact.NewRuleset(config.RedactionConfig{
+		Cookies: []config.CookieRuleConfig{{Mode: "strip", Names: []string{"sid"}}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuleset: %v", err)
+	}
+
+	status := 200
+	rec := &capture.OutboundEvent{
+		ID:      "oe-2",
+		Service: "svc",
+		Request: capture.OutboundRequestHalf{
+			Method: "GET",
+			Path:   "/",
+		},
+		Response: &capture.OutboundResponseHalf{
+			Status: status,
+			Headers: map[string][]string{
+				"Set-Cookie": {"sid=secret; Path=/", "other=keep"},
+			},
+		},
+	}
+	out := rs.Redact(rec)
+	oe, ok := out.(*capture.OutboundEvent)
+	if !ok {
+		t.Fatalf("expected *OutboundEvent, got %T", out)
+	}
+
+	// strip mode drops sid; other survives.
+	got := oe.Response.Headers["Set-Cookie"]
+	if len(got) != 1 || got[0] != "other=keep" {
+		t.Errorf("Set-Cookie: got %v, want [other=keep]", got)
+	}
 }

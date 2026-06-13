@@ -5,15 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>httpcatch</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/app.css">
-  <script>
-    (function () {
-      var t = null;
-      try { t = localStorage.getItem('httpcatch.theme'); } catch (e) {}
-      if (t !== 'dark' && t !== 'light') t = 'light';
-      document.documentElement.setAttribute('data-theme', t);
-    })();
-  </script>
 </head>
 <body>
   <div class="app" data-density="regular" data-mstyle="filled" data-rail="shown">
@@ -62,7 +55,7 @@
             <button type="button" id="tz-local" role="radio" aria-checked="false">Local</button>
           </div>
           <div class="admin-menu-sep"></div>
-          <form action="/auth/logout" method="POST" style="margin: 0;">
+          <form action="/auth/logout" method="POST">
             <button type="submit" class="admin-menu-item danger">Log out</button>
           </form>
         </div>

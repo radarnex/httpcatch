@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -30,27 +31,29 @@ type wireResponseEvent struct {
 	Status        *int                `json:"status"`
 	Headers       map[string][]string `json:"headers"`
 	Body          string              `json:"body"`
+	ContentType   string              `json:"content_type"`
 	DurationMS    *int64              `json:"duration_ms"`
 }
 
 // wireOutboundHalf is the request or response half of an outbound event.
 type wireOutboundHalf struct {
-	Method  string              `json:"method"`
-	Path    string              `json:"path"`
-	Headers map[string][]string `json:"headers"`
-	Body    string              `json:"body"`
-	Status  *int                `json:"status"`
+	Method      string              `json:"method"`
+	Path        string              `json:"path"`
+	Headers     map[string][]string `json:"headers"`
+	Body        string              `json:"body"`
+	ContentType string              `json:"content_type"`
+	Status      *int                `json:"status"`
 }
 
 // wireOutboundEvent is the JSON-decoded shape for an outbound event payload.
 type wireOutboundEvent struct {
-	Type          string              `json:"type"`
-	CorrelationID string              `json:"correlation_id"`
-	Service       string              `json:"service"`
-	Timestamp     *time.Time          `json:"timestamp"`
-	Request       *wireOutboundHalf   `json:"request"`
-	Response      *wireOutboundHalf   `json:"response"`
-	DurationMS    *int64              `json:"duration_ms"`
+	Type          string            `json:"type"`
+	CorrelationID string            `json:"correlation_id"`
+	Service       string            `json:"service"`
+	Timestamp     *time.Time        `json:"timestamp"`
+	Request       *wireOutboundHalf `json:"request"`
+	Response      *wireOutboundHalf `json:"response"`
+	DurationMS    *int64            `json:"duration_ms"`
 }
 
 // validationError describes a field-level failure at a specific batch index.
@@ -68,12 +71,14 @@ type eventsErrorResponse struct {
 // pure function with no side effects.
 func validateResponseEvent(e wireResponseEvent) []error {
 	var errs []error
-	if strings.TrimSpace(e.Service) == "" {
+	if service := strings.TrimSpace(e.Service); service == "" {
 		// service is authoritative on the events API — no Host-header fallback.
 		// This is a deliberate asymmetry with the capture port, where the host
 		// header provides a fallback for misconfigured proxies. App code calling
 		// the events API always knows its own service name.
 		errs = append(errs, fmt.Errorf("service: required"))
+	} else if capture.SanitiseServiceLabel(service) == "" {
+		errs = append(errs, fmt.Errorf("service: invalid"))
 	}
 	if e.Status == nil {
 		errs = append(errs, fmt.Errorf("status: required"))
@@ -88,8 +93,10 @@ func validateResponseEvent(e wireResponseEvent) []error {
 // pure function with no side effects.
 func validateOutboundEvent(e wireOutboundEvent) []error {
 	var errs []error
-	if strings.TrimSpace(e.Service) == "" {
+	if service := strings.TrimSpace(e.Service); service == "" {
 		errs = append(errs, fmt.Errorf("service: required"))
+	} else if capture.SanitiseServiceLabel(service) == "" {
+		errs = append(errs, fmt.Errorf("service: invalid"))
 	}
 	if e.Request == nil {
 		errs = append(errs, fmt.Errorf("request: required"))
@@ -111,6 +118,22 @@ func validateOutboundEvent(e wireOutboundEvent) []error {
 	return errs
 }
 
+// maxExplicitCorrelationID is the maximum byte length accepted for a
+// caller-supplied correlation_id. Values exceeding this fall through to
+// header-derived or synthesized correlation.
+const maxExplicitCorrelationID = 256
+
+// isPrintableASCII returns true when every byte in s is a printable ASCII
+// character (0x20–0x7E inclusive).
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // deriveCorrelation resolves the correlation id and source for an event,
 // following the same precedence as the capture pipeline:
 //  1. explicit correlation_id in the event body
@@ -118,8 +141,11 @@ func validateOutboundEvent(e wireOutboundEvent) []error {
 //  3. X-Request-ID from the event's headers
 //  4. synthesized UUID
 func deriveCorrelation(correlationID string, headers map[string][]string) (id, source string) {
-	if strings.TrimSpace(correlationID) != "" {
-		return correlationID, capture.CorrelationSourceExplicit
+	if c := strings.TrimSpace(correlationID); c != "" {
+		if len(c) <= maxExplicitCorrelationID && isPrintableASCII(c) {
+			return c, capture.CorrelationSourceExplicit
+		}
+		// malformed or oversized — fall through to header-derived / synthesized
 	}
 	// Build an http.Header from the event's own headers map so we can reuse
 	// the capture package's correlation identifier.
@@ -142,6 +168,28 @@ func capEventBody(body string, bodyCap int) (capped []byte, originalSize int, tr
 	return capped, originalSize, truncated
 }
 
+// resolveContentType returns the content type for an event half using the
+// following precedence:
+//  1. The explicit content_type field on the wire payload, when non-empty.
+//  2. The Content-Type header from the event's headers map, when present.
+//  3. Empty string (no content type declared).
+func resolveContentType(wireContentType string, headers map[string][]string) string {
+	if wireContentType != "" {
+		return wireContentType
+	}
+	key := textproto.CanonicalMIMEHeaderKey("Content-Type")
+	if vals, ok := headers[key]; ok && len(vals) > 0 && vals[0] != "" {
+		return vals[0]
+	}
+	// Headers may also be stored with non-canonical casing.
+	for k, vals := range headers {
+		if textproto.CanonicalMIMEHeaderKey(k) == key && len(vals) > 0 && vals[0] != "" {
+			return vals[0]
+		}
+	}
+	return ""
+}
+
 // buildResponseRecord constructs a capture.ResponseEvent from the validated wire shape.
 func buildResponseRecord(e wireResponseEvent, bodyCap int, now time.Time) *capture.ResponseEvent {
 	ts := now
@@ -155,13 +203,14 @@ func buildResponseRecord(e wireResponseEvent, bodyCap int, now time.Time) *captu
 		Timestamp:         ts,
 		CorrelationID:     corrID,
 		CorrelationSource: corrSource,
-		Service:           e.Service,
+		Service:           capture.SanitiseServiceLabel(e.Service),
 		ServiceSource:     "explicit",
 		Status:            *e.Status,
 		Headers:           e.Headers,
 		Body:              body,
 		BodyTruncated:     truncated,
 		BodyOriginalSize:  originalSize,
+		ContentType:       resolveContentType(e.ContentType, e.Headers),
 		DurationMS:        *e.DurationMS,
 	}
 }
@@ -187,6 +236,7 @@ func buildOutboundRecord(e wireOutboundEvent, bodyCap int, now time.Time) *captu
 		Body:             reqBody,
 		BodyTruncated:    reqTruncated,
 		BodyOriginalSize: reqOrigSize,
+		ContentType:      resolveContentType(e.Request.ContentType, e.Request.Headers),
 	}
 
 	var resp *capture.OutboundResponseHalf
@@ -198,6 +248,7 @@ func buildOutboundRecord(e wireOutboundEvent, bodyCap int, now time.Time) *captu
 			Body:             respBody,
 			BodyTruncated:    respTruncated,
 			BodyOriginalSize: respOrigSize,
+			ContentType:      resolveContentType(e.Response.ContentType, e.Response.Headers),
 		}
 	}
 
@@ -206,7 +257,7 @@ func buildOutboundRecord(e wireOutboundEvent, bodyCap int, now time.Time) *captu
 		Timestamp:         ts,
 		CorrelationID:     corrID,
 		CorrelationSource: corrSource,
-		Service:           e.Service,
+		Service:           capture.SanitiseServiceLabel(e.Service),
 		ServiceSource:     "explicit",
 		DurationMS:        *e.DurationMS,
 		Request:           req,
@@ -217,7 +268,7 @@ func buildOutboundRecord(e wireOutboundEvent, bodyCap int, now time.Time) *captu
 // writeEventsError encodes a list of validation errors as JSON and sets the
 // given HTTP status. When isBatch is false, the index field is omitted.
 func writeEventsError(w http.ResponseWriter, status int, errs []validationError) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(eventsErrorResponse{Errors: errs})
 }
@@ -262,6 +313,10 @@ func parseAndBuild(item json.RawMessage, idx *int, bodyCap int, now time.Time, c
 			incRejectedSafe(counters, RejectReasonMissingRequiredField)
 			return nil, fieldErrors(idx, errs)
 		}
+		if bodyCap > 0 && len(re.Body) > bodyCap {
+			incRejectedSafe(counters, RejectReasonBodyTooLarge)
+			return nil, []validationError{{Index: idx, Field: "body", Message: "body too large"}}
+		}
 		return buildResponseRecord(re, bodyCap, now), nil
 	case eventTypeOutbound:
 		var oe wireOutboundEvent
@@ -272,6 +327,14 @@ func parseAndBuild(item json.RawMessage, idx *int, bodyCap int, now time.Time, c
 		if errs := validateOutboundEvent(oe); len(errs) > 0 {
 			incRejectedSafe(counters, RejectReasonMissingRequiredField)
 			return nil, fieldErrors(idx, errs)
+		}
+		if bodyCap > 0 && oe.Request != nil && len(oe.Request.Body) > bodyCap {
+			incRejectedSafe(counters, RejectReasonBodyTooLarge)
+			return nil, []validationError{{Index: idx, Field: "request.body", Message: "body too large"}}
+		}
+		if bodyCap > 0 && oe.Response != nil && len(oe.Response.Body) > bodyCap {
+			incRejectedSafe(counters, RejectReasonBodyTooLarge)
+			return nil, []validationError{{Index: idx, Field: "response.body", Message: "body too large"}}
 		}
 		return buildOutboundRecord(oe, bodyCap, now), nil
 	default:
@@ -301,9 +364,17 @@ func incIngestedSafe(c *EventsCounters, rec capture.Record) {
 	}
 }
 
+// incDroppedQueueFullSafe increments the queue-full drop counter, ignoring a nil receiver.
+func incDroppedQueueFullSafe(c *EventsCounters) {
+	if c != nil {
+		c.incDroppedQueueFull()
+	}
+}
+
 // eventsHandler returns an http.HandlerFunc for POST /events. queue may be nil
 // (the handler returns 503); counters may be nil (increments are skipped).
-func eventsHandler(queue *capture.Queue, bodyCap, maxPayload int, counters *EventsCounters) http.HandlerFunc {
+// maxBatch limits the number of items in an array batch; zero disables the count cap.
+func eventsHandler(queue *capture.Queue, bodyCap, maxPayload, maxBatch int, counters *EventsCounters) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Payload size cap: reject before reading the body further.
 		if maxPayload > 0 && r.ContentLength > int64(maxPayload) {
@@ -355,6 +426,11 @@ func eventsHandler(queue *capture.Queue, bodyCap, maxPayload int, counters *Even
 				writeEventsError(w, http.StatusBadRequest, singleFieldError("body", "empty batch"))
 				return
 			}
+			if maxBatch > 0 && len(rawItems) > maxBatch {
+				incRejectedSafe(counters, RejectReasonBatchTooLarge)
+				writeEventsError(w, http.StatusRequestEntityTooLarge, singleFieldError("body", "batch too large"))
+				return
+			}
 			// First pass: validate all. Nothing enqueues until all pass.
 			records := make([]capture.Record, 0, len(rawItems))
 			for i, item := range rawItems {
@@ -366,9 +442,28 @@ func eventsHandler(queue *capture.Queue, bodyCap, maxPayload int, counters *Even
 				}
 				records = append(records, rec)
 			}
+			accepted, dropped := 0, 0
 			for _, rec := range records {
-				queue.Enqueue(rec)
-				incIngestedSafe(counters, rec)
+				if queue.Enqueue(rec) {
+					incIngestedSafe(counters, rec)
+					accepted++
+				} else {
+					incDroppedQueueFullSafe(counters)
+					dropped++
+				}
+			}
+			switch {
+			case dropped == 0:
+				w.WriteHeader(http.StatusAccepted)
+			case accepted > 0:
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusMultiStatus)
+				_ = json.NewEncoder(w).Encode(struct {
+					Accepted int `json:"accepted"`
+					Dropped  int `json:"dropped"`
+				}{Accepted: accepted, Dropped: dropped})
+			default:
+				writeEventsError(w, http.StatusServiceUnavailable, singleFieldError("queue", "queue full"))
 			}
 		} else {
 			rec, verrs := parseAndBuild(rawBody, nil, bodyCap, now, counters)
@@ -376,10 +471,13 @@ func eventsHandler(queue *capture.Queue, bodyCap, maxPayload int, counters *Even
 				writeEventsError(w, http.StatusBadRequest, verrs)
 				return
 			}
-			queue.Enqueue(rec)
-			incIngestedSafe(counters, rec)
+			if queue.Enqueue(rec) {
+				incIngestedSafe(counters, rec)
+				w.WriteHeader(http.StatusAccepted)
+			} else {
+				incDroppedQueueFullSafe(counters)
+				writeEventsError(w, http.StatusServiceUnavailable, singleFieldError("queue", "queue full"))
+			}
 		}
-
-		w.WriteHeader(http.StatusAccepted)
 	}
 }

@@ -74,35 +74,6 @@ func parseHTML(t *testing.T, r io.Reader) *html.Node {
 	return doc
 }
 
-// findAttr walks the HTML tree and returns all elements of elType that have
-// attrKey equal to attrVal, collecting the requested collectAttr value.
-func findAttr(n *html.Node, elType, attrKey, attrVal, collectAttr string) []string {
-	var results []string
-	var walk func(*html.Node)
-	walk = func(node *html.Node) {
-		if node.Type == html.ElementNode && node.Data == elType {
-			matched := false
-			collect := ""
-			for _, a := range node.Attr {
-				if a.Key == attrKey && a.Val == attrVal {
-					matched = true
-				}
-				if a.Key == collectAttr {
-					collect = a.Val
-				}
-			}
-			if matched {
-				results = append(results, collect)
-			}
-		}
-		for c := node.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	walk(n)
-	return results
-}
-
 // findElements returns all elements matching a tag name and an optional
 // attribute filter (empty attrKey means no filter).
 func findElements(n *html.Node, tag, attrKey, attrVal string) []*html.Node {
@@ -551,10 +522,10 @@ func TestLayout_LoadsSearchQLJS(t *testing.T) {
 	if !strings.Contains(s, `src="/static/searchql.js"`) {
 		t.Error("layout must load /static/searchql.js before /static/app.js")
 	}
-	idxSql := strings.Index(s, `src="/static/searchql.js"`)
+	idxSQL := strings.Index(s, `src="/static/searchql.js"`)
 	idxApp := strings.Index(s, `src="/static/app.js"`)
-	if idxSql < 0 || idxApp < 0 || idxSql > idxApp {
-		t.Errorf("searchql.js script tag must appear before app.js (sql=%d app=%d)", idxSql, idxApp)
+	if idxSQL < 0 || idxApp < 0 || idxSQL > idxApp {
+		t.Errorf("searchql.js script tag must appear before app.js (sql=%d app=%d)", idxSQL, idxApp)
 	}
 }
 

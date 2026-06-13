@@ -30,27 +30,30 @@ type Cookie struct {
 
 // CapturedRequest is the wire-level HTTP record produced by the capture port.
 type CapturedRequest struct {
-	ID                string              `json:"id"`
-	Timestamp         time.Time           `json:"timestamp"`
-	Method            string              `json:"method"`
-	Path              string              `json:"path"`
-	Query             map[string][]string `json:"query"`
-	Headers           map[string][]string `json:"headers"`
-	Cookies           []Cookie            `json:"cookies"`
-	Body              []byte              `json:"body"`
-	BodyTruncated     bool                `json:"body_truncated"`
-	BodyOriginalSize  int                 `json:"body_original_size"`
-	ContentType       string              `json:"content_type"`
-	SourceIP          string              `json:"source_ip"`
-	Service           string              `json:"service"`
-	ServiceSource     string              `json:"service_source"`
-	CorrelationID     string              `json:"correlation_id"`
-	CorrelationSource string              `json:"correlation_source"`
+	ID            string              `json:"id"`
+	Timestamp     time.Time           `json:"timestamp"`
+	Method        string              `json:"method"`
+	Path          string              `json:"path"`
+	Query         map[string][]string `json:"query"`
+	Headers       map[string][]string `json:"headers"`
+	Cookies       []Cookie            `json:"cookies"`
+	Body          []byte              `json:"body"`
+	BodyTruncated bool                `json:"body_truncated"`
+	// BodyOriginalSize is the exact byte count when BodyTruncated is false.
+	// When BodyTruncated is true it is a lower bound (body_cap + 1): the body
+	// exceeded the configured cap and the remainder was not read or measured.
+	BodyOriginalSize  int    `json:"body_original_size"`
+	ContentType       string `json:"content_type"`
+	SourceIP          string `json:"source_ip"`
+	Service           string `json:"service"`
+	ServiceSource     string `json:"service_source"`
+	CorrelationID     string `json:"correlation_id"`
+	CorrelationSource string `json:"correlation_source"`
 }
 
-func (r *CapturedRequest) Kind() RecordKind          { return KindRequest }
-func (r *CapturedRequest) RecordTimestamp() time.Time { return r.Timestamp }
-func (r *CapturedRequest) RecordService() string      { return r.Service }
+func (r *CapturedRequest) Kind() RecordKind            { return KindRequest }
+func (r *CapturedRequest) RecordTimestamp() time.Time  { return r.Timestamp }
+func (r *CapturedRequest) RecordService() string       { return r.Service }
 func (r *CapturedRequest) RecordCorrelationID() string { return r.CorrelationID }
 func (r *CapturedRequest) RecordID() string            { return r.ID }
 
@@ -67,38 +70,47 @@ type ResponseEvent struct {
 	Headers           map[string][]string `json:"headers"`
 	Body              []byte              `json:"body"`
 	BodyTruncated     bool                `json:"body_truncated"`
-	BodyOriginalSize  int                 `json:"body_original_size"`
-	ContentType       string              `json:"content_type"`
-	DurationMS        int64               `json:"duration_ms"`
+	// BodyOriginalSize is the exact byte count when BodyTruncated is false.
+	// When BodyTruncated is true it is a lower bound (body_cap + 1): the body
+	// exceeded the configured cap and the remainder was not read or measured.
+	BodyOriginalSize int    `json:"body_original_size"`
+	ContentType      string `json:"content_type"`
+	DurationMS       int64  `json:"duration_ms"`
 }
 
-func (r *ResponseEvent) Kind() RecordKind          { return KindResponseEvent }
-func (r *ResponseEvent) RecordTimestamp() time.Time { return r.Timestamp }
-func (r *ResponseEvent) RecordService() string      { return r.Service }
+func (r *ResponseEvent) Kind() RecordKind            { return KindResponseEvent }
+func (r *ResponseEvent) RecordTimestamp() time.Time  { return r.Timestamp }
+func (r *ResponseEvent) RecordService() string       { return r.Service }
 func (r *ResponseEvent) RecordCorrelationID() string { return r.CorrelationID }
 func (r *ResponseEvent) RecordID() string            { return r.ID }
 
 // OutboundRequestHalf is the request side of an outbound call recorded by the
 // application.
 type OutboundRequestHalf struct {
-	Method           string              `json:"method"`
-	Path             string              `json:"path"`
-	Headers          map[string][]string `json:"headers"`
-	Body             []byte              `json:"body"`
-	BodyTruncated    bool                `json:"body_truncated"`
-	BodyOriginalSize int                 `json:"body_original_size"`
-	ContentType      string              `json:"content_type"`
+	Method        string              `json:"method"`
+	Path          string              `json:"path"`
+	Headers       map[string][]string `json:"headers"`
+	Body          []byte              `json:"body"`
+	BodyTruncated bool                `json:"body_truncated"`
+	// BodyOriginalSize is the exact byte count when BodyTruncated is false.
+	// When BodyTruncated is true it is a lower bound (body_cap + 1): the body
+	// exceeded the configured cap and the remainder was not read or measured.
+	BodyOriginalSize int    `json:"body_original_size"`
+	ContentType      string `json:"content_type"`
 }
 
 // OutboundResponseHalf is the response side of an outbound call. It is nil
 // when the downstream call never completed.
 type OutboundResponseHalf struct {
-	Status           int                 `json:"status"`
-	Headers          map[string][]string `json:"headers"`
-	Body             []byte              `json:"body"`
-	BodyTruncated    bool                `json:"body_truncated"`
-	BodyOriginalSize int                 `json:"body_original_size"`
-	ContentType      string              `json:"content_type"`
+	Status        int                 `json:"status"`
+	Headers       map[string][]string `json:"headers"`
+	Body          []byte              `json:"body"`
+	BodyTruncated bool                `json:"body_truncated"`
+	// BodyOriginalSize is the exact byte count when BodyTruncated is false.
+	// When BodyTruncated is true it is a lower bound (body_cap + 1): the body
+	// exceeded the configured cap and the remainder was not read or measured.
+	BodyOriginalSize int    `json:"body_original_size"`
+	ContentType      string `json:"content_type"`
 }
 
 // OutboundEvent carries both halves of a downstream call the application made,
@@ -115,8 +127,8 @@ type OutboundEvent struct {
 	Response          *OutboundResponseHalf `json:"response"`
 }
 
-func (r *OutboundEvent) Kind() RecordKind          { return KindOutboundEvent }
-func (r *OutboundEvent) RecordTimestamp() time.Time { return r.Timestamp }
-func (r *OutboundEvent) RecordService() string      { return r.Service }
+func (r *OutboundEvent) Kind() RecordKind            { return KindOutboundEvent }
+func (r *OutboundEvent) RecordTimestamp() time.Time  { return r.Timestamp }
+func (r *OutboundEvent) RecordService() string       { return r.Service }
 func (r *OutboundEvent) RecordCorrelationID() string { return r.CorrelationID }
 func (r *OutboundEvent) RecordID() string            { return r.ID }

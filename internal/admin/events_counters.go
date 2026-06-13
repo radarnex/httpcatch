@@ -8,26 +8,32 @@ type EventsCounters struct {
 	ingestedResponse atomic.Uint64
 	ingestedOutbound atomic.Uint64
 
-	rejectedInvalidJSON        atomic.Uint64
-	rejectedPayloadTooLarge    atomic.Uint64
-	rejectedUnknownType        atomic.Uint64
-	rejectedMissingType        atomic.Uint64
+	rejectedInvalidJSON          atomic.Uint64
+	rejectedPayloadTooLarge      atomic.Uint64
+	rejectedUnknownType          atomic.Uint64
+	rejectedMissingType          atomic.Uint64
 	rejectedMissingRequiredField atomic.Uint64
-	rejectedEmptyBatch         atomic.Uint64
+	rejectedEmptyBatch           atomic.Uint64
+	rejectedBatchTooLarge        atomic.Uint64
+	rejectedBodyTooLarge         atomic.Uint64
+
+	droppedQueueFull atomic.Uint64
 }
 
 func NewEventsCounters() *EventsCounters { return &EventsCounters{} }
 
-func (c *EventsCounters) incIngestedResponse()  { c.ingestedResponse.Add(1) }
-func (c *EventsCounters) incIngestedOutbound()  { c.ingestedOutbound.Add(1) }
+func (c *EventsCounters) incIngestedResponse() { c.ingestedResponse.Add(1) }
+func (c *EventsCounters) incIngestedOutbound() { c.ingestedOutbound.Add(1) }
 
 const (
-	RejectReasonInvalidJSON         = "invalid_json"
-	RejectReasonPayloadTooLarge     = "payload_too_large"
-	RejectReasonUnknownType         = "unknown_type"
-	RejectReasonMissingType         = "missing_type"
+	RejectReasonInvalidJSON          = "invalid_json"
+	RejectReasonPayloadTooLarge      = "payload_too_large"
+	RejectReasonUnknownType          = "unknown_type"
+	RejectReasonMissingType          = "missing_type"
 	RejectReasonMissingRequiredField = "missing_required_field"
-	RejectReasonEmptyBatch          = "empty_batch"
+	RejectReasonEmptyBatch           = "empty_batch"
+	RejectReasonBatchTooLarge        = "batch_too_large"
+	RejectReasonBodyTooLarge         = "body_too_large"
 )
 
 func (c *EventsCounters) incRejected(reason string) {
@@ -44,8 +50,14 @@ func (c *EventsCounters) incRejected(reason string) {
 		c.rejectedMissingRequiredField.Add(1)
 	case RejectReasonEmptyBatch:
 		c.rejectedEmptyBatch.Add(1)
+	case RejectReasonBatchTooLarge:
+		c.rejectedBatchTooLarge.Add(1)
+	case RejectReasonBodyTooLarge:
+		c.rejectedBodyTooLarge.Add(1)
 	}
 }
+
+func (c *EventsCounters) incDroppedQueueFull() { c.droppedQueueFull.Add(1) }
 
 func (c *EventsCounters) EventsIngestedResponseTotal() uint64 {
 	return c.ingestedResponse.Load()
@@ -70,4 +82,13 @@ func (c *EventsCounters) EventsRejectedMissingRequiredFieldTotal() uint64 {
 }
 func (c *EventsCounters) EventsRejectedEmptyBatchTotal() uint64 {
 	return c.rejectedEmptyBatch.Load()
+}
+func (c *EventsCounters) EventsRejectedBatchTooLargeTotal() uint64 {
+	return c.rejectedBatchTooLarge.Load()
+}
+func (c *EventsCounters) EventsRejectedBodyTooLargeTotal() uint64 {
+	return c.rejectedBodyTooLarge.Load()
+}
+func (c *EventsCounters) EventsDroppedQueueFullTotal() uint64 {
+	return c.droppedQueueFull.Load()
 }

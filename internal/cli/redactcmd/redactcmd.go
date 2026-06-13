@@ -25,8 +25,9 @@ import (
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, env func(string) string) int {
 	fs := flag.NewFlagSet("redact", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	samplePath := fs.String("test", "", "path to a JSON-encoded CapturedRequest to apply the ruleset against")
+	samplePath := fs.String("test", "", "path to a JSON-encoded CapturedRequest to apply the ruleset against (local-operator use; path is not confined)")
 	configPath := fs.String("config", "", "path to YAML config file (optional; env overrides always apply)")
+	showValues := fs.Bool("show-values", false, "show before-side header/cookie/query values in cleartext (default: masked as `<masked: N chars>`)")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError writes its own message to stderr (which we
@@ -79,7 +80,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, env func(stri
 		return 1
 	}
 
-	entries := diffRecords(before, after)
+	entries := diffRecords(before, after, !*showValues)
 	if err := renderDiff(entries, stdout); err != nil {
 		fmt.Fprintf(stderr, "redact: write diff: %v\n", err)
 		return 1

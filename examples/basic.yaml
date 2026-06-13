@@ -1,17 +1,37 @@
+# Default bind is 0.0.0.0:<capture_port>. Set capture_bind explicitly to restrict
+# the capture port to a specific interface (e.g. 127.0.0.1:8080 for a sidecar
+# topology, or a private NIC). When capture_bind is set, capture_port is ignored.
+# capture_bind: "127.0.0.1:8080"
 capture_port: 8080
 
 # How many unprocessed requests can queue before the capture port starts
 # dropping. The default (1024) is fine for most workloads.
 queue_size: 1024
 
-# Maximum request/response body stored per record (bytes). 0 disables capture.
+# Maximum request/response body stored per record (bytes). 0 disables the size limit.
 body_cap: 1048576  # 1 MiB
+
+# Maximum number of items in a single POST /events array batch. Batches larger
+# than this are rejected with 413 before per-item allocation. 0 disables the
+# count cap (any batch size accepted).
+# max_events_per_batch: 1000
 
 workers: 2
 
 # Log output format: "text" (default, human-readable) or "json" (structured).
 # Can also be set via HTTPCATCH_LOG_FORMAT env var.
 # log_format: json
+
+# HTTP server timeouts, applied to both the capture port and the admin port.
+# read_header bounds how long a client may take to send request headers (the
+# slow-loris defence); read bounds the full request including body; write
+# bounds the response; idle bounds keep-alive idle time. A value of 0 disables
+# the corresponding timeout. Defaults shown below.
+timeouts:
+  read_header: 10s
+  read: 60s
+  write: 30s
+  idle: 120s
 
 sinks:
   stdout: true
@@ -20,7 +40,30 @@ sinks:
   sqlite: true
   sqlite_path: ./httpcatch.db
 
+  # Retention trims the SQLite store on a background schedule.
+  # max_age and max_count are mutually exclusive — set at most one.
+  # max_age deletes rows older than the given duration from both tables.
+  # max_count keeps only the N most-recent rows in each table.
+  # interval controls how often the trim runs (default: 1m).
+  #
+  # retention:
+  #   max_age: 168h    # keep 7 days of data
+  #   # max_count: 1000  # alternative: keep the 1000 most-recent rows
+  #   interval: 15m
+
 admin:
   bind: 127.0.0.1:8081
-  token: changeme
+  # token comes from HTTPCATCH_ADMIN_TOKEN env var
   session_ttl: 8h
+  # When the admin port is fronted by HTTPS (e.g. a reverse proxy terminating
+  # TLS), set session_secure: true so the session cookie is only sent over
+  # https. Leave false for plaintext loopback dev. httpcatch logs a warning at
+  # startup if the bind is non-loopback and session_secure is false.
+  # session_secure: true
+
+# inspect:
+#   # Maximum time allowed for a single /requests or /requests/aggregate read.
+#   # Leading-wildcard queries trigger full-table scans; this deadline limits
+#   # how long one query can hold the SQLite connection. Set to 0 to disable.
+#   # Can also be set via HTTPCATCH_INSPECT_QUERY_TIMEOUT env var.
+#   query_timeout: 5s

@@ -24,7 +24,7 @@ const (
 func Guard(bind string, tokenConfigured, insecureListen bool) (Reason, error) {
 	host, _, err := net.SplitHostPort(bind)
 	if err != nil {
-		return "", fmt.Errorf("%w: %s: %v", ErrInvalidBind, bind, err)
+		return "", fmt.Errorf("%w: %s: %w", ErrInvalidBind, bind, err)
 	}
 
 	if isLoopback(host) {

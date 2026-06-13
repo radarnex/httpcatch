@@ -11,14 +11,14 @@
   <a href="/ui/requests" class="back-link">← Back</a>
   {{if .Root.IsResponseEvent}}
     <span class="badge badge-neutral">Response event</span>
-    <span class="mono" style="font-size:12.5px; color:var(--text-2);">{{if .HasRequestSibling}}correlated response{{else}}orphan response event{{end}}</span>
+    <span class="mono detail-subtitle">{{if .HasRequestSibling}}correlated response{{else}}orphan response event{{end}}</span>
   {{else if .Root.IsOutboundEvent}}
     <span class="badge badge-neutral">Outbound event</span>
-    <span class="mono" style="font-size:12.5px; color:var(--text-2);">{{if .HasRequestSibling}}correlated outbound{{else}}orphan outbound event{{end}}</span>
+    <span class="mono detail-subtitle">{{if .HasRequestSibling}}correlated outbound{{else}}orphan outbound event{{end}}</span>
   {{end}}
 </div>
 
-<div class="drawer-body" style="height:auto; overflow:visible;">
+<div class="drawer-body drawer-body-expand">
   <dl class="meta-grid">
     <dt>Timestamp</dt>
     <dd>{{.Root.Timestamp.Format "2006-01-02T15:04:05.000Z07:00"}}</dd>
@@ -43,7 +43,7 @@
   </table>
   {{if .Root.Body}}
   <div class="section-h">Body
-    {{if .Root.BodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.BodyOriginalSize}} bytes</span>{{end}}
+    {{if .Root.BodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.BodyOriginalSizeLabel}} bytes</span>{{end}}
   </div>
   <pre class="body-block{{if .Root.IsJSON}} body-json{{end}}">{{.Root.BodyText}}</pre>
   {{end}}
@@ -67,7 +67,7 @@
     </table>
     {{if .Root.OutboundRequestBody}}
     <div class="body-label">Body
-      {{if .Root.OutboundRequestBodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.OutboundRequestBodyOriginalSize}} bytes</span>{{end}}
+      {{if .Root.OutboundRequestBodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.OutboundRequestBodyOriginalSizeLabel}} bytes</span>{{end}}
     </div>
     <pre class="body-block{{if .Root.OutboundRequestIsJSON}} body-json{{end}}">{{.Root.OutboundRequestBodyText}}</pre>
     {{end}}
@@ -88,7 +88,7 @@
     </table>
     {{if .Root.OutboundResponseBody}}
     <div class="body-label">Body
-      {{if .Root.OutboundResponseBodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.OutboundResponseBodyOriginalSize}} bytes</span>{{end}}
+      {{if .Root.OutboundResponseBodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.OutboundResponseBodyOriginalSizeLabel}} bytes</span>{{end}}
     </div>
     <pre class="body-block{{if .Root.OutboundResponseIsJSON}} body-json{{end}}">{{.Root.OutboundResponseBodyText}}</pre>
     {{end}}
@@ -120,7 +120,7 @@
       </table>
       {{if .Body}}
       <div class="body-label">Body
-        {{if .BodyTruncated}}<span class="truncation-badge">truncated — original {{.BodyOriginalSize}} bytes</span>{{end}}
+        {{if .BodyTruncated}}<span class="truncation-badge">truncated — original {{.BodyOriginalSizeLabel}} bytes</span>{{end}}
       </div>
       <pre class="body-block{{if .IsJSON}} body-json{{end}}">{{.BodyText}}</pre>
       {{end}}

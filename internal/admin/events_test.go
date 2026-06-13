@@ -18,13 +18,19 @@ import (
 )
 
 const (
-	defaultBodyCap      = 1 << 20 // 1 MiB
-	defaultMaxEvents    = 1 << 20 // 1 MiB
+	defaultBodyCap   = 1 << 20 // 1 MiB
+	defaultMaxEvents = 1 << 20 // 1 MiB
 )
 
 // newEventsServer builds a test server with the given queue, body cap, and max payload.
 // If readers is non-nil it is also wired so tests can read back enqueued events.
 func newEventsServer(t *testing.T, queue *capture.Queue, bodyCap, maxPayload int, readers ...admin.ReadSources) (*httptest.Server, *admin.EventsCounters) {
+	t.Helper()
+	return newEventsServerFull(t, queue, bodyCap, maxPayload, 0, readers...)
+}
+
+// newEventsServerFull builds a test server with the full set of configurable limits.
+func newEventsServerFull(t *testing.T, queue *capture.Queue, bodyCap, maxPayload, maxBatch int, readers ...admin.ReadSources) (*httptest.Server, *admin.EventsCounters) {
 	t.Helper()
 	cfg := config.AdminConfig{
 		Bind:       "127.0.0.1:0",
@@ -33,10 +39,11 @@ func newEventsServer(t *testing.T, queue *capture.Queue, bodyCap, maxPayload int
 	}
 	counters := admin.NewEventsCounters()
 	es := admin.EventsSources{
-		Queue:            queue,
-		BodyCap:          bodyCap,
-		MaxEventsPayload: maxPayload,
-		Counters:         counters,
+		Queue:             queue,
+		BodyCap:           bodyCap,
+		MaxEventsPayload:  maxPayload,
+		MaxEventsPerBatch: maxBatch,
+		Counters:          counters,
 	}
 	var rs admin.ReadSources
 	if len(readers) > 0 {
@@ -273,6 +280,44 @@ func TestEvents_ResponseEvent_MissingService_Returns400(t *testing.T) {
 	}
 	if counters.EventsRejectedMissingRequiredFieldTotal() != 1 {
 		t.Errorf("missing_required_field counter: got %d want 1", counters.EventsRejectedMissingRequiredFieldTotal())
+	}
+}
+
+func TestEvents_ResponseEvent_InvalidService_Returns400(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, counters := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+	resp := postEvents(t, ts, `{"type":"response","service":"bad\u0001svc","status":200,"duration_ms":1}`, testAdminToken)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("invalid service: got %d want 400", resp.StatusCode)
+	}
+	if counters.EventsRejectedMissingRequiredFieldTotal() != 1 {
+		t.Errorf("missing_required_field counter: got %d want 1", counters.EventsRejectedMissingRequiredFieldTotal())
+	}
+}
+
+func TestEvents_ResponseEvent_ServiceNormalised(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, _ := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+	resp := postEvents(t, ts, `{"type":"response","service":" Billing-API ","status":200,"duration_ms":1}`, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202", resp.StatusCode)
+	}
+
+	recs := drainQueue(t, q, 1)
+	re, ok := recs[0].(*capture.ResponseEvent)
+	if !ok {
+		t.Fatalf("record is %T, want *capture.ResponseEvent", recs[0])
+	}
+	if re.Service != "billing-api" {
+		t.Errorf("service: got %q want billing-api", re.Service)
 	}
 }
 
@@ -594,13 +639,13 @@ func TestEvents_PayloadExceedsCap_Returns413(t *testing.T) {
 
 // ---- Per-event body cap ----
 
-func TestEvents_BodyExceedsBodyCap_Truncated_StillAccepted(t *testing.T) {
+func TestEvents_BodyExceedsBodyCap_Rejected(t *testing.T) {
 	t.Parallel()
 
-	// Set body cap to 5 bytes.
+	// When bodyCap > 0, a body exceeding the cap is rejected with 400.
 	bodyCap := 5
 	q := capture.NewQueue(10)
-	ts, _ := newEventsServer(t, q, bodyCap, defaultMaxEvents)
+	ts, counters := newEventsServer(t, q, bodyCap, defaultMaxEvents)
 
 	resp := postEvents(t, ts, `{
 		"type":"response",
@@ -610,31 +655,22 @@ func TestEvents_BodyExceedsBodyCap_Truncated_StillAccepted(t *testing.T) {
 		"duration_ms":1,
 		"body":"this body is definitely longer than five bytes"
 	}`, testAdminToken)
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		t.Errorf("truncated body: got %d want 202", resp.StatusCode)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("body over cap: got %d want 400", resp.StatusCode)
 	}
-
-	recs := drainQueue(t, q, 1)
-	re := recs[0].(*capture.ResponseEvent)
-	if !re.BodyTruncated {
-		t.Error("body_truncated: expected true")
-	}
-	if re.BodyOriginalSize <= bodyCap {
-		t.Errorf("body_original_size: got %d, expected > %d", re.BodyOriginalSize, bodyCap)
-	}
-	if len(re.Body) > bodyCap {
-		t.Errorf("stored body length %d exceeds cap %d", len(re.Body), bodyCap)
+	if counters.EventsRejectedBodyTooLargeTotal() != 1 {
+		t.Errorf("body_too_large counter: got %d want 1", counters.EventsRejectedBodyTooLargeTotal())
 	}
 }
 
-func TestEvents_OutboundBodyCap_BothHalvesTruncated(t *testing.T) {
+func TestEvents_OutboundBodyCap_Rejected(t *testing.T) {
 	t.Parallel()
 
+	// When bodyCap > 0, outbound bodies exceeding the cap are rejected.
 	bodyCap := 3
 	q := capture.NewQueue(10)
-	ts, _ := newEventsServer(t, q, bodyCap, defaultMaxEvents)
+	ts, counters := newEventsServer(t, q, bodyCap, defaultMaxEvents)
 
 	resp := postEvents(t, ts, `{
 		"type":"outbound",
@@ -644,19 +680,39 @@ func TestEvents_OutboundBodyCap_BothHalvesTruncated(t *testing.T) {
 		"response":{"status":200,"body":"response body here"},
 		"duration_ms":1
 	}`, testAdminToken)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("outbound body over cap: got %d want 400", resp.StatusCode)
+	}
+	if counters.EventsRejectedBodyTooLargeTotal() != 1 {
+		t.Errorf("body_too_large counter: got %d want 1", counters.EventsRejectedBodyTooLargeTotal())
+	}
+}
+
+func TestEvents_BodyWithinCap_Accepted(t *testing.T) {
+	t.Parallel()
+
+	// A body exactly at the cap should be accepted and stored without truncation.
+	q := capture.NewQueue(10)
+	ts, _ := newEventsServer(t, q, 5, defaultMaxEvents)
+
+	resp := postEvents(t, ts, `{
+		"type":"response",
+		"service":"svc",
+		"status":200,
+		"duration_ms":1,
+		"body":"hello"
+	}`, testAdminToken)
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
-		t.Errorf("outbound body cap: got %d want 202", resp.StatusCode)
+		t.Errorf("body at cap: got %d want 202", resp.StatusCode)
 	}
 
 	recs := drainQueue(t, q, 1)
-	oe := recs[0].(*capture.OutboundEvent)
-	if !oe.Request.BodyTruncated {
-		t.Error("request body_truncated: expected true")
-	}
-	if !oe.Response.BodyTruncated {
-		t.Error("response body_truncated: expected true")
+	re := recs[0].(*capture.ResponseEvent)
+	if re.BodyTruncated {
+		t.Error("body_truncated: expected false for body at exactly cap")
 	}
 }
 
@@ -978,6 +1034,156 @@ func TestEvents_Integration_EndsUpInSinks(t *testing.T) {
 	}
 }
 
+// ---- S-EVT-01: ContentType population from wire field or headers ----
+
+func TestEvents_ContentType_FromWireField(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, _ := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	resp := postEvents(t, ts, `{
+		"type":"response",
+		"service":"svc",
+		"status":200,
+		"duration_ms":1,
+		"body":"hello",
+		"content_type":"application/json"
+	}`, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202", resp.StatusCode)
+	}
+
+	recs := drainQueue(t, q, 1)
+	re := recs[0].(*capture.ResponseEvent)
+	if re.ContentType != "application/json" {
+		t.Errorf("ContentType: got %q, want application/json", re.ContentType)
+	}
+}
+
+func TestEvents_ContentType_FallbackFromHeader(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, _ := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	// No content_type wire field; Content-Type header should be used as fallback.
+	resp := postEvents(t, ts, `{
+		"type":"response",
+		"service":"svc",
+		"status":200,
+		"duration_ms":1,
+		"body":"hello",
+		"headers":{"Content-Type":["text/plain"]}
+	}`, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202", resp.StatusCode)
+	}
+
+	recs := drainQueue(t, q, 1)
+	re := recs[0].(*capture.ResponseEvent)
+	if re.ContentType != "text/plain" {
+		t.Errorf("ContentType: got %q, want text/plain", re.ContentType)
+	}
+}
+
+func TestEvents_ContentType_EmptyWhenNeitherPresent(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, _ := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	resp := postEvents(t, ts, `{
+		"type":"response",
+		"service":"svc",
+		"status":200,
+		"duration_ms":1,
+		"body":"hello"
+	}`, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202", resp.StatusCode)
+	}
+
+	recs := drainQueue(t, q, 1)
+	re := recs[0].(*capture.ResponseEvent)
+	if re.ContentType != "" {
+		t.Errorf("ContentType: got %q, want empty string", re.ContentType)
+	}
+}
+
+func TestEvents_ContentType_WireFieldTakesPrecedenceOverHeader(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, _ := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	// Wire field wins when both are present.
+	resp := postEvents(t, ts, `{
+		"type":"response",
+		"service":"svc",
+		"status":200,
+		"duration_ms":1,
+		"content_type":"application/json",
+		"headers":{"Content-Type":["text/plain"]}
+	}`, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202", resp.StatusCode)
+	}
+
+	recs := drainQueue(t, q, 1)
+	re := recs[0].(*capture.ResponseEvent)
+	if re.ContentType != "application/json" {
+		t.Errorf("ContentType: got %q, want application/json (wire field)", re.ContentType)
+	}
+}
+
+func TestEvents_Outbound_ContentType_PopulatedOnBothHalves(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, _ := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	resp := postEvents(t, ts, `{
+		"type":"outbound",
+		"service":"svc",
+		"duration_ms":5,
+		"request":{
+			"method":"POST",
+			"path":"/api",
+			"content_type":"application/json",
+			"body":"{}"
+		},
+		"response":{
+			"status":200,
+			"headers":{"Content-Type":["text/html"]},
+			"body":"ok"
+		}
+	}`, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202", resp.StatusCode)
+	}
+
+	recs := drainQueue(t, q, 1)
+	oe := recs[0].(*capture.OutboundEvent)
+	if oe.Request.ContentType != "application/json" {
+		t.Errorf("request ContentType: got %q, want application/json", oe.Request.ContentType)
+	}
+	// Response has no wire content_type but has a Content-Type header.
+	if oe.Response.ContentType != "text/html" {
+		t.Errorf("response ContentType: got %q, want text/html", oe.Response.ContentType)
+	}
+}
+
 func TestEvents_Integration_OutboundWithNullResponse_InSinks(t *testing.T) {
 	t.Parallel()
 
@@ -1024,5 +1230,477 @@ func TestEvents_Integration_OutboundWithNullResponse_InSinks(t *testing.T) {
 	}
 	if found.Response != nil {
 		t.Errorf("response: expected nil, got %+v", found.Response)
+	}
+}
+
+// ---- Batch count cap ----
+
+// validResponseItem returns a minimal valid response-event JSON string.
+func validResponseItem(service string) string {
+	return fmt.Sprintf(`{"type":"response","service":%q,"status":200,"duration_ms":1}`, service)
+}
+
+// buildBatch encodes n copies of item as a JSON array string.
+func buildBatch(item string, n int) string {
+	items := make([]string, n)
+	for i := range items {
+		items[i] = item
+	}
+	return "[" + strings.Join(items, ",") + "]"
+}
+
+func TestEventsHandler_Batch_AtCount_Accepted(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, counters := newEventsServerFull(t, q, defaultBodyCap, defaultMaxEvents, 3)
+
+	body := buildBatch(validResponseItem("svc"), 3)
+	resp := postEvents(t, ts, body, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("batch at cap: got %d want 202", resp.StatusCode)
+	}
+	if counters.EventsRejectedBatchTooLargeTotal() != 0 {
+		t.Errorf("batch_too_large counter: got %d want 0", counters.EventsRejectedBatchTooLargeTotal())
+	}
+	drainQueue(t, q, 3)
+}
+
+func TestEventsHandler_Batch_OverCount_Rejected(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, counters := newEventsServerFull(t, q, defaultBodyCap, defaultMaxEvents, 3)
+
+	body := buildBatch(validResponseItem("svc"), 4)
+	resp := postEvents(t, ts, body, testAdminToken)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("batch over cap: got %d want 413", resp.StatusCode)
+	}
+
+	var errBody struct {
+		Errors []map[string]any `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&errBody); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if len(errBody.Errors) == 0 {
+		t.Fatal("expected errors in body")
+	}
+	msg, _ := errBody.Errors[0]["message"].(string)
+	if !strings.Contains(msg, "batch too large") {
+		t.Errorf("error message: got %q, want to contain 'batch too large'", msg)
+	}
+	if counters.EventsRejectedBatchTooLargeTotal() != 1 {
+		t.Errorf("batch_too_large counter: got %d want 1", counters.EventsRejectedBatchTooLargeTotal())
+	}
+	if counters.EventsIngestedResponseTotal() != 0 {
+		t.Errorf("ingested after rejection: got %d want 0", counters.EventsIngestedResponseTotal())
+	}
+
+	// Queue must be untouched: attempt to read would time out; verify via counter.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	select {
+	case _, ok := <-q.Receive():
+		if ok {
+			t.Error("queue received a record despite batch being rejected")
+		}
+	case <-ctx.Done():
+		// Expected: nothing in queue.
+	}
+}
+
+func TestEventsHandler_Batch_NoCountCap_AllowsLarge(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(100)
+	// maxBatch = 0 disables the count cap.
+	ts, counters := newEventsServerFull(t, q, defaultBodyCap, 0, 0)
+
+	body := buildBatch(validResponseItem("svc"), 50)
+	resp := postEvents(t, ts, body, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("large batch with no cap: got %d want 202", resp.StatusCode)
+	}
+	if counters.EventsRejectedBatchTooLargeTotal() != 0 {
+		t.Errorf("batch_too_large counter: got %d want 0", counters.EventsRejectedBatchTooLargeTotal())
+	}
+	drainQueue(t, q, 50)
+}
+
+func TestEventsHandler_Batch_NonBatchUnaffected(t *testing.T) {
+	t.Parallel()
+
+	// maxBatch = 1 would reject any array with > 1 item, but a single-object POST
+	// must pass through untouched regardless.
+	q := capture.NewQueue(10)
+	ts, counters := newEventsServerFull(t, q, defaultBodyCap, defaultMaxEvents, 1)
+
+	resp := postEvents(t, ts, validResponseItem("svc"), testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("single-object POST with maxBatch=1: got %d want 202", resp.StatusCode)
+	}
+	if counters.EventsRejectedBatchTooLargeTotal() != 0 {
+		t.Errorf("batch_too_large counter: got %d want 0", counters.EventsRejectedBatchTooLargeTotal())
+	}
+	drainQueue(t, q, 1)
+}
+
+// ---- Correlation ID validation ----
+
+func TestEvents_OversizedCorrelationID_FallsThrough(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, _ := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	// Build a correlation_id longer than maxExplicitCorrelationID (256 bytes).
+	oversized := strings.Repeat("a", 257)
+	body := fmt.Sprintf(`{"type":"response","service":"svc","correlation_id":%q,"status":200,"duration_ms":1}`, oversized)
+	resp := postEvents(t, ts, body, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("oversized correlation_id: got %d want 202", resp.StatusCode)
+	}
+
+	recs := drainQueue(t, q, 1)
+	re := recs[0].(*capture.ResponseEvent)
+	// Must not have stored the oversized value.
+	if re.CorrelationID == oversized {
+		t.Error("oversized correlation_id was stored verbatim; expected fall-through to synthesized")
+	}
+	if re.CorrelationSource == capture.CorrelationSourceExplicit {
+		t.Errorf("correlation_source: got explicit, expected synthesized or header-derived")
+	}
+}
+
+func TestEvents_ControlCharCorrelationID_FallsThrough(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, _ := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	// Embed a control character inside the correlation_id via JSON unicode escape.
+	body := `{"type":"response","service":"svc","correlation_id":"bad\u0001value","status":200,"duration_ms":1}`
+	resp := postEvents(t, ts, body, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("control-char correlation_id: got %d want 202", resp.StatusCode)
+	}
+
+	recs := drainQueue(t, q, 1)
+	re := recs[0].(*capture.ResponseEvent)
+	if re.CorrelationSource == capture.CorrelationSourceExplicit {
+		t.Errorf("correlation_source: got explicit, expected synthesized (control char should be rejected)")
+	}
+}
+
+// ---- Per-event body cap rejection (S-EVT-04) ----
+
+func TestEvents_ResponseEvent_BodyTooLarge(t *testing.T) {
+	t.Parallel()
+
+	bodyCap := 10
+	q := capture.NewQueue(10)
+	ts, counters := newEventsServer(t, q, bodyCap, defaultMaxEvents)
+
+	// Body is 11 bytes, cap is 10.
+	resp := postEvents(t, ts, `{
+		"type":"response",
+		"service":"svc",
+		"status":200,
+		"duration_ms":1,
+		"body":"hello world"
+	}`, testAdminToken)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("body too large response event: got %d want 400", resp.StatusCode)
+	}
+	var body struct {
+		Errors []map[string]any `json:"errors"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if len(body.Errors) == 0 {
+		t.Fatal("expected errors in body")
+	}
+	if body.Errors[0]["field"] != "body" {
+		t.Errorf("error field: got %v want body", body.Errors[0]["field"])
+	}
+	if counters.EventsRejectedBodyTooLargeTotal() != 1 {
+		t.Errorf("body_too_large counter: got %d want 1", counters.EventsRejectedBodyTooLargeTotal())
+	}
+	// Nothing enqueued.
+	if counters.EventsIngestedResponseTotal() != 0 {
+		t.Errorf("ingested after rejection: got %d want 0", counters.EventsIngestedResponseTotal())
+	}
+}
+
+func TestEvents_OutboundEvent_RequestBodyTooLarge(t *testing.T) {
+	t.Parallel()
+
+	bodyCap := 5
+	q := capture.NewQueue(10)
+	ts, counters := newEventsServer(t, q, bodyCap, defaultMaxEvents)
+
+	resp := postEvents(t, ts, `{
+		"type":"outbound",
+		"service":"svc",
+		"request":{"method":"POST","path":"/","body":"toolarge"},
+		"duration_ms":1
+	}`, testAdminToken)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("outbound request body too large: got %d want 400", resp.StatusCode)
+	}
+	var body struct {
+		Errors []map[string]any `json:"errors"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if len(body.Errors) == 0 {
+		t.Fatal("expected errors in body")
+	}
+	if body.Errors[0]["field"] != "request.body" {
+		t.Errorf("error field: got %v want request.body", body.Errors[0]["field"])
+	}
+	if counters.EventsRejectedBodyTooLargeTotal() != 1 {
+		t.Errorf("body_too_large counter: got %d want 1", counters.EventsRejectedBodyTooLargeTotal())
+	}
+}
+
+func TestEvents_OutboundEvent_ResponseBodyTooLarge(t *testing.T) {
+	t.Parallel()
+
+	bodyCap := 5
+	q := capture.NewQueue(10)
+	ts, counters := newEventsServer(t, q, bodyCap, defaultMaxEvents)
+
+	resp := postEvents(t, ts, `{
+		"type":"outbound",
+		"service":"svc",
+		"request":{"method":"GET","path":"/"},
+		"response":{"status":200,"body":"toolarge"},
+		"duration_ms":1
+	}`, testAdminToken)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("outbound response body too large: got %d want 400", resp.StatusCode)
+	}
+	var body struct {
+		Errors []map[string]any `json:"errors"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if len(body.Errors) == 0 {
+		t.Fatal("expected errors in body")
+	}
+	if body.Errors[0]["field"] != "response.body" {
+		t.Errorf("error field: got %v want response.body", body.Errors[0]["field"])
+	}
+	if counters.EventsRejectedBodyTooLargeTotal() != 1 {
+		t.Errorf("body_too_large counter: got %d want 1", counters.EventsRejectedBodyTooLargeTotal())
+	}
+}
+
+func TestEvents_BodyTooLarge_BodyCapZeroDisabled(t *testing.T) {
+	t.Parallel()
+
+	// bodyCap == 0 disables per-event body rejection; large body is truncated as before.
+	q := capture.NewQueue(10)
+	ts, counters := newEventsServer(t, q, 0, defaultMaxEvents)
+
+	resp := postEvents(t, ts, `{
+		"type":"response",
+		"service":"svc",
+		"status":200,
+		"duration_ms":1,
+		"body":"this is a very long body that would exceed a nonzero cap"
+	}`, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("bodyCap=0 should accept any body size: got %d want 202", resp.StatusCode)
+	}
+	if counters.EventsRejectedBodyTooLargeTotal() != 0 {
+		t.Errorf("body_too_large counter should be 0 when bodyCap=0: got %d", counters.EventsRejectedBodyTooLargeTotal())
+	}
+	drainQueue(t, q, 1)
+}
+
+// ---- Queue-full semantics (S-EVT-06) ----
+
+// fillQueue enqueues n minimal records to saturate the queue.
+func fillQueue(t *testing.T, q *capture.Queue, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		ok := q.Enqueue(&capture.ResponseEvent{ID: fmt.Sprintf("fill-%d", i)})
+		if !ok {
+			t.Fatalf("fillQueue: enqueue %d failed", i)
+		}
+	}
+}
+
+func TestEvents_SingleEvent_QueueFull_Returns503(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(1)
+	fillQueue(t, q, 1)
+	ts, counters := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	resp := postEvents(t, ts, `{"type":"response","service":"svc","status":200,"duration_ms":1}`, testAdminToken)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("queue full single event: got %d want 503", resp.StatusCode)
+	}
+	var body struct {
+		Errors []map[string]any `json:"errors"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if len(body.Errors) == 0 || body.Errors[0]["field"] != "queue" {
+		t.Errorf("expected queue field error, got %v", body.Errors)
+	}
+	if counters.EventsDroppedQueueFullTotal() != 1 {
+		t.Errorf("dropped_queue_full counter: got %d want 1", counters.EventsDroppedQueueFullTotal())
+	}
+	if counters.EventsIngestedResponseTotal() != 0 {
+		t.Errorf("ingested should be 0 on drop: got %d", counters.EventsIngestedResponseTotal())
+	}
+}
+
+func TestEvents_Batch_AllDropped_Returns503(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(1)
+	fillQueue(t, q, 1)
+	ts, counters := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	body := buildBatch(validResponseItem("svc"), 3)
+	resp := postEvents(t, ts, body, testAdminToken)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("all dropped batch: got %d want 503", resp.StatusCode)
+	}
+	if counters.EventsDroppedQueueFullTotal() != 3 {
+		t.Errorf("dropped_queue_full counter: got %d want 3", counters.EventsDroppedQueueFullTotal())
+	}
+	if counters.EventsIngestedResponseTotal() != 0 {
+		t.Errorf("ingested should be 0 when all dropped: got %d", counters.EventsIngestedResponseTotal())
+	}
+}
+
+func TestEvents_Batch_PartialDrop_Returns207(t *testing.T) {
+	t.Parallel()
+
+	// Queue cap=2, pre-fill 1 slot; 3 events → 1 accepted, 2 dropped.
+	q := capture.NewQueue(2)
+	fillQueue(t, q, 1)
+	ts, counters := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	body := buildBatch(validResponseItem("svc"), 3)
+	resp := postEvents(t, ts, body, testAdminToken)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMultiStatus {
+		t.Errorf("partial drop batch: got %d want 207", resp.StatusCode)
+	}
+	var result struct {
+		Accepted int `json:"accepted"`
+		Dropped  int `json:"dropped"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.Accepted != 1 {
+		t.Errorf("accepted: got %d want 1", result.Accepted)
+	}
+	if result.Dropped != 2 {
+		t.Errorf("dropped: got %d want 2", result.Dropped)
+	}
+	if counters.EventsDroppedQueueFullTotal() != 2 {
+		t.Errorf("dropped_queue_full counter: got %d want 2", counters.EventsDroppedQueueFullTotal())
+	}
+	if counters.EventsIngestedResponseTotal() != 1 {
+		t.Errorf("ingested: got %d want 1", counters.EventsIngestedResponseTotal())
+	}
+}
+
+func TestEvents_Batch_NoneDropped_Returns202(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(10)
+	ts, counters := newEventsServer(t, q, defaultBodyCap, defaultMaxEvents)
+
+	body := buildBatch(validResponseItem("svc"), 2)
+	resp := postEvents(t, ts, body, testAdminToken)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("no drop batch: got %d want 202", resp.StatusCode)
+	}
+	if counters.EventsDroppedQueueFullTotal() != 0 {
+		t.Errorf("dropped_queue_full should be 0: got %d", counters.EventsDroppedQueueFullTotal())
+	}
+	if counters.EventsIngestedResponseTotal() != 2 {
+		t.Errorf("ingested: got %d want 2", counters.EventsIngestedResponseTotal())
+	}
+	drainQueue(t, q, 2)
+}
+
+// TestMetrics_EventsDroppedQueueFullAndBodyTooLarge verifies the new counters
+// appear in /metrics output.
+func TestMetrics_EventsDroppedQueueFullAndBodyTooLarge(t *testing.T) {
+	t.Parallel()
+
+	q := capture.NewQueue(1)
+	counters := admin.NewEventsCounters()
+	cfg := config.AdminConfig{
+		Bind:       "127.0.0.1:0",
+		Token:      testAdminToken,
+		SessionTTL: time.Hour,
+	}
+	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{
+		EventsRejectedBodyTooLargeTotal: counters.EventsRejectedBodyTooLargeTotal,
+		EventsDroppedQueueFullTotal:     counters.EventsDroppedQueueFullTotal,
+	}, admin.ServerOptions{
+		Events: admin.EventsSources{
+			Queue:            q,
+			BodyCap:          defaultBodyCap,
+			MaxEventsPayload: defaultMaxEvents,
+			Counters:         counters,
+		},
+	})
+	if err != nil {
+		t.Fatalf("admin.New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	mResp, _ := http.Get(ts.URL + "/metrics")
+	body, _ := io.ReadAll(mResp.Body)
+	mResp.Body.Close()
+
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `httpcatch_events_rejected_total{reason="body_too_large"}`) {
+		t.Errorf("/metrics missing body_too_large rejection counter\n%s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "httpcatch_events_dropped_queue_full_total") {
+		t.Errorf("/metrics missing httpcatch_events_dropped_queue_full_total\n%s", bodyStr)
 	}
 }

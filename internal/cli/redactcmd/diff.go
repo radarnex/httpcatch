@@ -7,6 +7,7 @@ import (
 	"net/textproto"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/radarnex/httpcatch/internal/capture"
 )
@@ -29,7 +30,13 @@ const (
 // diffRecords compares two records field-by-field and returns one entry per
 // modified field. Pure function: no I/O. Output is sorted by Path so callers
 // can rely on byte-stable rendering.
-func diffRecords(before, after *capture.CapturedRequest) []DiffEntry {
+//
+// When maskBefore is true, header, query-parameter, and cookie values on the
+// before-side are replaced with "<masked: N chars>" rather than rendered in
+// cleartext. The after-side is always rendered cleartext so that redaction
+// rule effects remain visible. Body is always summarised as "%d bytes" on
+// both sides regardless of maskBefore.
+func diffRecords(before, after *capture.CapturedRequest, maskBefore bool) []DiffEntry {
 	var entries []DiffEntry
 
 	if before.Path != after.Path {
@@ -40,9 +47,9 @@ func diffRecords(before, after *capture.CapturedRequest) []DiffEntry {
 		})
 	}
 
-	entries = append(entries, diffStringSliceMap("headers", before.Headers, after.Headers, canonicalHeaderKey)...)
-	entries = append(entries, diffStringSliceMap("query", before.Query, after.Query, identityKey)...)
-	entries = append(entries, diffCookieSlice(before.Cookies, after.Cookies)...)
+	entries = append(entries, diffStringSliceMap("headers", before.Headers, after.Headers, canonicalHeaderKey, maskBefore)...)
+	entries = append(entries, diffStringSliceMap("query", before.Query, after.Query, identityKey, maskBefore)...)
+	entries = append(entries, diffCookieSlice(before.Cookies, after.Cookies, maskBefore)...)
 
 	if !bytes.Equal(before.Body, after.Body) {
 		entries = append(entries, DiffEntry{
@@ -84,7 +91,7 @@ func identityKey(k string) string        { return k }
 // keys (e.g. canonicalising header names) so an entry like
 // "Authorization" -> "authorization" does not show up as one add and one
 // remove. The original display key is preserved for the output line.
-func diffStringSliceMap(section string, before, after map[string][]string, normaliseKey func(string) string) []DiffEntry {
+func diffStringSliceMap(section string, before, after map[string][]string, normaliseKey func(string) string, maskBefore bool) []DiffEntry {
 	type side struct {
 		display string
 		vals    []string
@@ -126,8 +133,8 @@ func diffStringSliceMap(section string, before, after map[string][]string, norma
 		}
 		entries = append(entries, DiffEntry{
 			Path:   section + "." + display,
-			Before: formatSliceSide(p.left.vals, p.left.present, addedMarker),
-			After:  formatSliceSide(p.right.vals, p.right.present, removedMarker),
+			Before: formatSliceSide(p.left.vals, p.left.present, addedMarker, maskBefore),
+			After:  formatSliceSide(p.right.vals, p.right.present, removedMarker, false),
 		})
 	}
 	return entries
@@ -137,7 +144,11 @@ func diffStringSliceMap(section string, before, after map[string][]string, norma
 // caller-supplied sentinel (`<removed>` for the before-side, `<added>` for
 // the after-side); a present-but-empty slice renders as `""`; otherwise the
 // values are quoted and joined with `, `.
-func formatSliceSide(vals []string, present bool, absentMarker string) string {
+//
+// When mask is true each value is rendered as `<masked: N chars>` (where N is
+// the UTF-8 character count) rather than the cleartext quoted value. Empty
+// values and absent keys are unaffected by mask.
+func formatSliceSide(vals []string, present bool, absentMarker string, mask bool) string {
 	if !present {
 		return absentMarker
 	}
@@ -146,12 +157,16 @@ func formatSliceSide(vals []string, present bool, absentMarker string) string {
 	}
 	parts := make([]string, len(vals))
 	for i, v := range vals {
-		parts[i] = fmt.Sprintf("%q", v)
+		if mask {
+			parts[i] = fmt.Sprintf("<masked: %d chars>", utf8.RuneCountInString(v))
+		} else {
+			parts[i] = fmt.Sprintf("%q", v)
+		}
 	}
 	return strings.Join(parts, ", ")
 }
 
-func diffCookieSlice(before, after []capture.Cookie) []DiffEntry {
+func diffCookieSlice(before, after []capture.Cookie, maskBefore bool) []DiffEntry {
 	beforeMap := make(map[string]string, len(before))
 	afterMap := make(map[string]string, len(after))
 	for _, c := range before {
@@ -183,7 +198,11 @@ func diffCookieSlice(before, after []capture.Cookie) []DiffEntry {
 		beforeStr := addedMarker
 		afterStr := removedMarker
 		if bok {
-			beforeStr = bv
+			if maskBefore {
+				beforeStr = fmt.Sprintf("<masked: %d chars>", utf8.RuneCountInString(bv))
+			} else {
+				beforeStr = bv
+			}
 		}
 		if aok {
 			afterStr = av

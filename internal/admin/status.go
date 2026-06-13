@@ -39,7 +39,7 @@ func statusHandler(src MetricSources) http.HandlerFunc {
 			BuildTime: buildinfo.BuildTime,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(resp)

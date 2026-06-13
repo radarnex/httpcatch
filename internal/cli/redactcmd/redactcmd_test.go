@@ -97,10 +97,11 @@ func TestRun_Success_DiffListsAllChanges(t *testing.T) {
 	}
 
 	out := stdout.String()
+	// Default invocation masks the before-side values.
 	wantLines := []string{
-		`headers.Authorization: "Bearer abc" -> "[REDACTED]"`,
-		`query.token: "shhh" -> "[REDACTED]"`,
-		`cookies.session_id: xyz -> [REDACTED]`,
+		`headers.Authorization: <masked: 10 chars> -> "[REDACTED]"`,
+		`query.token: <masked: 4 chars> -> "[REDACTED]"`,
+		`cookies.session_id: <masked: 3 chars> -> [REDACTED]`,
 	}
 	for _, line := range wantLines {
 		if !strings.Contains(out, line) {
@@ -321,6 +322,68 @@ type failReader struct{ t *testing.T }
 func (f failReader) Read([]byte) (int, error) {
 	f.t.Errorf("handler must not read stdin")
 	return 0, io.EOF
+}
+
+func TestRun_DefaultMasksBeforeSide(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfgPath := writeConfig(t, dir, fullRulesetYAML)
+	secret := "s3cr3t-bearer-token-value"
+	rec := capture.CapturedRequest{
+		Headers: map[string][]string{
+			"Authorization": {"Bearer " + secret},
+		},
+	}
+	samplePath := writeSample(t, dir, rec)
+
+	var stdout, stderr bytes.Buffer
+	code := redactcmd.Run(
+		[]string{"--config", cfgPath, "--test", samplePath},
+		strings.NewReader(""), &stdout, &stderr, emptyEnv,
+	)
+	if code != 0 {
+		t.Fatalf("exit code: got %d want 0, stderr=%q", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, secret) {
+		t.Errorf("stdout must not contain cleartext secret %q\nfull stdout:\n%s", secret, out)
+	}
+	if !strings.Contains(out, "<masked:") {
+		t.Errorf("stdout must contain a masked sentinel\nfull stdout:\n%s", out)
+	}
+}
+
+func TestRun_ShowValuesFlagEnablesCleartext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfgPath := writeConfig(t, dir, fullRulesetYAML)
+	secret := "s3cr3t-bearer-token-value"
+	rec := capture.CapturedRequest{
+		Headers: map[string][]string{
+			"Authorization": {"Bearer " + secret},
+		},
+	}
+	samplePath := writeSample(t, dir, rec)
+
+	var stdout, stderr bytes.Buffer
+	code := redactcmd.Run(
+		[]string{"--config", cfgPath, "--test", samplePath, "--show-values"},
+		strings.NewReader(""), &stdout, &stderr, emptyEnv,
+	)
+	if code != 0 {
+		t.Fatalf("exit code: got %d want 0, stderr=%q", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, secret) {
+		t.Errorf("stdout must contain cleartext secret when --show-values is set\nfull stdout:\n%s", out)
+	}
+	if strings.Contains(out, "<masked:") {
+		t.Errorf("stdout must not contain masked sentinels when --show-values is set\nfull stdout:\n%s", out)
+	}
 }
 
 // sortedLines verifies that the diff lines are sorted lexicographically. It

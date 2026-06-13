@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -30,7 +31,7 @@ const sessionCookieName = "httpcatch_session"
 // handler behind admin auth. By default it accepts either a valid
 // Authorization: Bearer token or a valid session cookie. Pass WithCookieAuth(false)
 // to restrict a route to bearer-only authentication.
-func Middleware(adminToken string, store *SessionStore, opts ...Option) func(http.Handler) http.Handler {
+func Middleware(adminToken string, store *SessionStore, limiter *AuthLimiter, opts ...Option) func(http.Handler) http.Handler {
 	cfg := &middlewareCfg{cookieAuth: true}
 	for _, o := range opts {
 		o(cfg)
@@ -38,10 +39,25 @@ func Middleware(adminToken string, store *SessionStore, opts ...Option) func(htt
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := ClientIP(r.RemoteAddr)
+
+			if !limiter.Allowed(ip) {
+				limiter.RecordRateLimited()
+				retryAfter := limiter.RetryAfter(ip)
+				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte("rate limited\n"))
+				return
+			}
+
 			if authenticate(r, adminToken, store, cfg) {
 				next.ServeHTTP(w, r)
 				return
 			}
+
+			limiter.RegisterFailure(ip)
+			limiter.RecordInvalidToken()
 			denyRequest(w, r)
 		})
 	}
@@ -83,9 +99,6 @@ func extractBearer(r *http.Request) string {
 // so that an unconfigured admin port never grants access via an empty bearer.
 func checkBearer(presented, adminToken string) bool {
 	if adminToken == "" {
-		return false
-	}
-	if len(presented) != len(adminToken) {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(adminToken)) == 1

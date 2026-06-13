@@ -23,26 +23,32 @@ const shutdownDrainTimeout = 5 * time.Second
 // Server holds the admin HTTP server and its router so later slices can mount
 // additional routes without re-implementing bind policy or server lifecycle.
 type Server struct {
-	cfg    config.AdminConfig
-	logger *slog.Logger
-	router chi.Router
-	store  *SessionStore
+	cfg      config.AdminConfig
+	timeouts config.TimeoutsConfig
+	logger   *slog.Logger
+	router   chi.Router
+	store    *SessionStore
+	limiter  *AuthLimiter
 }
 
 // ReadSources holds the optional Reader implementations wired at app
 // composition time. Fields may be nil; the inspect handler degrades gracefully.
+// QueryTimeout is the per-request deadline applied to inspect reads; zero
+// disables the timeout.
 type ReadSources struct {
-	Memory inspect.Reader
-	SQLite inspect.Reader
+	Memory       inspect.Reader
+	SQLite       inspect.Reader
+	QueryTimeout time.Duration
 }
 
 // EventsSources wires the queue and configuration the Events API handler needs.
 // Queue may be nil; the events handler returns 503 when no queue is configured.
 type EventsSources struct {
-	Queue            *capture.Queue
-	BodyCap          int
-	MaxEventsPayload int
-	Counters         *EventsCounters
+	Queue             *capture.Queue
+	BodyCap           int
+	MaxEventsPayload  int
+	MaxEventsPerBatch int
+	Counters          *EventsCounters
 }
 
 // ServerOptions bundles the optional dependencies that various route groups need.
@@ -75,7 +81,15 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 	}
 
 	store := NewSessionStore(time.Now)
-	auth := &authHandlers{cfg: cfg, store: store, logger: logger}
+	limiter := NewAuthLimiter()
+
+	// Wire auth failure counters into metric sources before registering the
+	// metrics handler.
+	sources.AuthFailuresInvalidTokenTotal = limiter.InvalidTokenTotal
+	sources.AuthFailuresRateLimitedTotal = limiter.RateLimitedTotal
+	sources.AuthFailuresCSRFBlockedTotal = limiter.CSRFBlockedTotal
+
+	auth := &authHandlers{cfg: cfg, store: store, logger: logger, limiter: limiter}
 
 	etags := buildEtags(uiFS)
 
@@ -89,42 +103,50 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 	sources.normalize()
 
 	r := chi.NewRouter()
-	r.Get("/healthz", healthzHandler)
-	r.Get("/metrics", metricsHandler(sources))
-	r.Get("/login", auth.loginPageHandler)
-	r.Post("/auth/login", auth.loginPostHandler)
-	r.Post("/auth/logout", auth.logoutHandler)
-	r.Get("/static/*", staticHandler(etags))
+	r.With(jsonSecurityHeaders()).Get("/healthz", healthzHandler)
+	r.With(jsonSecurityHeaders()).Get("/metrics", metricsHandler(sources))
+	r.With(htmlSecurityHeaders()).Get("/login", auth.loginPageHandler)
+	r.With(htmlSecurityHeaders(), csrfOriginCheck(limiter)).Post("/auth/login", auth.loginPostHandler)
+	r.With(htmlSecurityHeaders(), csrfOriginCheck(limiter)).Post("/auth/logout", auth.logoutHandler)
+	r.With(jsonSecurityHeaders()).Get("/static/*", staticHandler(etags))
 
 	r.Group(func(r chi.Router) {
-		r.Use(Middleware(cfg.Token, store))
+		r.Use(htmlSecurityHeaders())
+		r.Use(Middleware(cfg.Token, store, limiter))
 		r.Get("/", rootRedirectHandler())
 		r.Get("/status", statusHandler(sources))
-		r.Get("/requests", requestsHandler(rs.Memory, rs.SQLite))
-		r.Get("/requests/aggregate", requestsAggregateHandler(rs.Memory, rs.SQLite))
-		r.Get("/requests/{id}", requestDetailHandler(rs.Memory, rs.SQLite))
-		r.Get("/ui/requests", requestListHandler(rs.Memory, rs.SQLite))
-		r.Get("/ui/requests/{id}", requestDetailUIHandler(rs.Memory, rs.SQLite))
-		r.Get("/ui/services", servicesUIHandler(rs.Memory, rs.SQLite))
+		r.Get("/requests", requestsHandler(rs))
+		r.Get("/requests/aggregate", requestsAggregateHandler(rs))
+		r.Get("/requests/{id}", requestDetailHandler(rs))
+		r.Get("/ui/requests", requestListHandler(rs))
+		r.Get("/ui/requests/{id}", requestDetailUIHandler(rs))
+		r.Get("/ui/services", servicesUIHandler(rs))
 		r.Get("/ui/configuration", configurationUIHandler(serverOpts.Effective, sources.Unredacted))
 	})
 
 	// POST /events uses bearer-only auth (no session cookie) to eliminate CSRF risk.
 	// App middleware calling this endpoint always uses a bearer token, never a browser cookie.
-	r.With(Middleware(cfg.Token, store, WithCookieAuth(false))).
-		Post("/events", eventsHandler(es.Queue, es.BodyCap, es.MaxEventsPayload, es.Counters))
+	r.With(jsonSecurityHeaders(), Middleware(cfg.Token, store, limiter, WithCookieAuth(false))).
+		Post("/events", eventsHandler(es.Queue, es.BodyCap, es.MaxEventsPayload, es.MaxEventsPerBatch, es.Counters))
 
 	return &Server{
-		cfg:    cfg,
-		logger: logger,
-		router: r,
-		store:  store,
+		cfg:      cfg,
+		timeouts: serverOpts.Effective.Timeouts,
+		logger:   logger,
+		router:   r,
+		store:    store,
+		limiter:  limiter,
 	}, nil
 }
 
 // Router returns the chi router so later slices can register additional routes.
 func (s *Server) Router() chi.Router {
 	return s.router
+}
+
+// AuthLimiter returns the rate limiter used by this server's auth handlers.
+func (s *Server) AuthLimiter() *AuthLimiter {
+	return s.limiter
 }
 
 // Serve binds the admin port and runs until ctx is cancelled or the server
@@ -137,8 +159,15 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 
 	s.store.StartSweeper(ctx, time.Minute)
+	s.limiter.StartSweeper(ctx, 5*time.Minute)
 
-	srv := &http.Server{Handler: s.router}
+	srv := &http.Server{
+		Handler:           s.router,
+		ReadHeaderTimeout: s.timeouts.ReadHeader,
+		ReadTimeout:       s.timeouts.Read,
+		WriteTimeout:      s.timeouts.Write,
+		IdleTimeout:       s.timeouts.Idle,
+	}
 	s.logger.Info("admin port listening", "addr", ln.Addr().String())
 
 	errCh := make(chan error, 1)

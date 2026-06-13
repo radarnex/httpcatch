@@ -2,6 +2,7 @@ package capture
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -29,6 +30,30 @@ func TestIdentifyService(t *testing.T) {
 			configuredHeader: "X-Service-Tag",
 			wantValue:        "billing",
 			wantSource:       ServiceSourceHeader,
+		},
+		{
+			name:       "mixed-case header value is lowercased",
+			headers:    mk("X-Httpcatch-Service", "Orders-API"),
+			wantValue:  "orders-api",
+			wantSource: ServiceSourceHeader,
+		},
+		{
+			name:       "oversized header value falls through to unknown",
+			headers:    mk("X-Httpcatch-Service", strings.Repeat("a", 257)),
+			wantValue:  UnknownService,
+			wantSource: ServiceSourceUnknown,
+		},
+		{
+			name:       "control-char header value falls through to unknown",
+			headers:    mk("X-Httpcatch-Service", "bad\x01value"),
+			wantValue:  UnknownService,
+			wantSource: ServiceSourceUnknown,
+		},
+		{
+			name:       "whitespace-only service header falls through to host",
+			headers:    mk("X-Httpcatch-Service", "   ", "Host", "fallback.example.com"),
+			wantValue:  "fallback.example.com",
+			wantSource: ServiceSourceHost,
 		},
 		{
 			name:             "default header ignored when custom configured",

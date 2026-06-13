@@ -111,8 +111,8 @@ func TestRequests_ContentTypeJSON(t *testing.T) {
 	resp := getRequests(t, ts, "")
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type: got %q want application/json", ct)
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Errorf("Content-Type: got %q want application/json; charset=utf-8", ct)
 	}
 }
 
@@ -289,18 +289,18 @@ func TestRequests_ReadSourceHeader_MemoryAndSQLite(t *testing.T) {
 
 	for i := range 3 {
 		r := &capture.CapturedRequest{
-			ID:               fmt.Sprintf("r%d", i),
-			Timestamp:        base.Add(time.Duration(i) * time.Second),
-			Service:          "svc",
-			Method:           "GET",
-			Path:             "/",
-			CorrelationID:    fmt.Sprintf("c%d", i),
-			SourceIP:         "x",
-			Headers:          map[string][]string{"Host": {"example.com"}},
-			Query:            map[string][]string{},
-			Cookies:          []capture.Cookie{},
-			Body:             []byte{},
-			ServiceSource:    capture.ServiceSourceHeader,
+			ID:                fmt.Sprintf("r%d", i),
+			Timestamp:         base.Add(time.Duration(i) * time.Second),
+			Service:           "svc",
+			Method:            "GET",
+			Path:              "/",
+			CorrelationID:     fmt.Sprintf("c%d", i),
+			SourceIP:          "x",
+			Headers:           map[string][]string{"Host": {"example.com"}},
+			Query:             map[string][]string{},
+			Cookies:           []capture.Cookie{},
+			Body:              []byte{},
+			ServiceSource:     capture.ServiceSourceHeader,
 			CorrelationSource: capture.CorrelationSourceTraceparent,
 		}
 		if err := mem.Write(ctx, r); err != nil {
@@ -347,18 +347,18 @@ func TestRequests_DeduplicatesAcrossMemoryAndSQLite(t *testing.T) {
 	t.Cleanup(func() { _ = sqliteSink.Close() })
 
 	r := &capture.CapturedRequest{
-		ID:               "shared-id",
-		Timestamp:        ts2,
-		Service:          "svc",
-		Method:           "GET",
-		Path:             "/",
-		CorrelationID:    "corr",
-		SourceIP:         "x",
-		Headers:          map[string][]string{"Host": {"example.com"}},
-		Query:            map[string][]string{},
-		Cookies:          []capture.Cookie{},
-		Body:             []byte{},
-		ServiceSource:    capture.ServiceSourceHeader,
+		ID:                "shared-id",
+		Timestamp:         ts2,
+		Service:           "svc",
+		Method:            "GET",
+		Path:              "/",
+		CorrelationID:     "corr",
+		SourceIP:          "x",
+		Headers:           map[string][]string{"Host": {"example.com"}},
+		Query:             map[string][]string{},
+		Cookies:           []capture.Cookie{},
+		Body:              []byte{},
+		ServiceSource:     capture.ServiceSourceHeader,
 		CorrelationSource: capture.CorrelationSourceTraceparent,
 	}
 	if err := mem.Write(ctx, r); err != nil {
@@ -476,29 +476,35 @@ func TestRequests_RowFieldsPresent(t *testing.T) {
 // TestRequests_ScanHeader walks the case table for the unindexed-scan response
 // header. The handler must set X-Httpcatch-Scan: leading-wildcard-indexed iff
 // IsUnindexedScan() returns true for the parsed query; absent otherwise.
+// Unindexed-scan queries must carry a narrowing constraint (since/until or an
+// exact service: term) to pass the guard; this test supplies since/until for
+// those cases.
 func TestRequests_ScanHeader(t *testing.T) {
 	t.Parallel()
 
+	narrowing := "since=2026-01-01T00:00:00Z&until=2026-12-31T23:59:59Z"
+
 	cases := []struct {
-		name   string
-		q      string
-		expect bool
+		name    string
+		q       string
+		extra   string // additional query params
+		expect  bool
 	}{
-		{"freeform_substring", "*foo*", true},
-		{"freeform_leading_only", "*foo", true},
-		{"host_substring", "host:*api*", true},
-		{"service_leading_only", "service:*svc", true},
-		{"path_substring", "path:*signup*", true},
-		{"trailing_only_no_header", "billing-api*", false},
-		{"host_trailing_only_no_header", "host:billing-api*", false},
-		{"host_exact_no_header", "host:billing-api", false},
-		{"body_scanned_no_header", "body:*foo*", false},
-		{"headers_keyword_no_header", "headers:foo", false},
-		{"per_header_no_header", "header.user-agent:foo", false},
-		{"negated_substring_still_scans", "-host:*foo*", true},
-		{"multi_term_with_scan", "service:foo host:*api*", true},
-		{"multi_term_no_scan", "service:foo host:api*", false},
-		{"empty_query_no_header", "", false},
+		{"freeform_substring", "*foo*", narrowing, true},
+		{"freeform_leading_only", "*foo", narrowing, true},
+		{"host_substring", "host:*api*", narrowing, true},
+		{"service_leading_only", "service:*svc", narrowing, true},
+		{"path_substring", "path:*signup*", narrowing, true},
+		{"trailing_only_no_header", "billing-api*", "", false},
+		{"host_trailing_only_no_header", "host:billing-api*", "", false},
+		{"host_exact_no_header", "host:billing-api", "", false},
+		{"body_scanned_no_header", "body:*foo*", "", false},
+		{"headers_keyword_no_header", "headers:foo", "", false},
+		{"per_header_no_header", "header.user-agent:foo", "", false},
+		{"negated_substring_still_scans", "-host:*foo*", narrowing, true},
+		{"multi_term_with_scan", "service:foo host:*api*", "", true},   // exact service: satisfies guard
+		{"multi_term_no_scan", "service:foo host:api*", "", false},
+		{"empty_query_no_header", "", "", false},
 	}
 
 	ts := newInspectServer(t, admin.ReadSources{})
@@ -508,6 +514,12 @@ func TestRequests_ScanHeader(t *testing.T) {
 			var qp string
 			if tc.q != "" {
 				qp = "q=" + url.QueryEscape(tc.q)
+			}
+			if tc.extra != "" {
+				if qp != "" {
+					qp += "&"
+				}
+				qp += tc.extra
 			}
 			resp := getRequests(t, ts, qp)
 			io.Copy(io.Discard, resp.Body)
@@ -1053,5 +1065,157 @@ func TestRequestsAggregate_InvalidBuckets(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status: got %d want 400", resp.StatusCode)
+	}
+}
+
+// getAggregate sends an authenticated GET /requests/aggregate request.
+func getAggregate(t *testing.T, ts *httptest.Server, query string) *http.Response {
+	t.Helper()
+	u := ts.URL + "/requests/aggregate"
+	if query != "" {
+		u += "?" + query
+	}
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /requests/aggregate: %v", err)
+	}
+	return resp
+}
+
+// TestRequests_UnindexedScan_WithoutNarrowing_Returns400 verifies that a
+// leading-wildcard query without a time range or exact service: term is
+// rejected before the read path runs.
+func TestRequests_UnindexedScan_WithoutNarrowing_Returns400(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+
+	cases := []struct {
+		name string
+		q    string
+	}{
+		{"freeform_leading_wildcard", "*foo*"},
+		{"host_leading_wildcard", "host:*api*"},
+		{"service_leading_wildcard", "service:*svc"},
+		{"path_leading_wildcard", "path:*signup*"},
+		{"negated_leading_wildcard", "-host:*foo*"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			resp := getRequests(t, ts, "q="+url.QueryEscape(tc.q))
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status: got %d want 400", resp.StatusCode)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body["field"] != "q" {
+				t.Errorf("field: got %v want q", body["field"])
+			}
+		})
+	}
+}
+
+// TestRequests_UnindexedScan_WithTimeRange_Succeeds verifies that a
+// leading-wildcard query accompanied by since/until passes the narrowing guard.
+func TestRequests_UnindexedScan_WithTimeRange_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	q := url.Values{
+		"q":     {"*foo*"},
+		"since": {"2026-01-01T00:00:00Z"},
+		"until": {"2026-12-31T23:59:59Z"},
+	}.Encode()
+	resp := getRequests(t, ts, q)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d want 200", resp.StatusCode)
+	}
+}
+
+// TestRequests_UnindexedScan_WithExactService_Succeeds verifies that a
+// leading-wildcard query accompanied by an exact service: term passes the guard.
+func TestRequests_UnindexedScan_WithExactService_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	// "service:billing" is exact; combined with host:*api* (unindexed-scan)
+	// the exact service term satisfies the narrowing requirement.
+	q := url.Values{
+		"q": {"service:billing host:*api*"},
+	}.Encode()
+	resp := getRequests(t, ts, q)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d want 200", resp.StatusCode)
+	}
+}
+
+// TestAggregate_UnindexedScan_WithoutNarrowing_Returns400 verifies the same
+// narrowing guard applies to the aggregate endpoint.
+func TestAggregate_UnindexedScan_WithoutNarrowing_Returns400(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	resp := getAggregate(t, ts, "q="+url.QueryEscape("*foo*"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status: got %d want 400", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["field"] != "q" {
+		t.Errorf("field: got %v want q", body["field"])
+	}
+}
+
+// TestAggregate_ScanHeader_SetWhenUnindexed verifies that the aggregate handler
+// emits X-Httpcatch-Scan when the query is an unindexed scan.
+func TestAggregate_ScanHeader_SetWhenUnindexed(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	q := url.Values{
+		"q":     {"host:*api*"},
+		"since": {"2026-01-01T00:00:00Z"},
+		"until": {"2026-12-31T23:59:59Z"},
+	}.Encode()
+	resp := getAggregate(t, ts, q)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Httpcatch-Scan"); got != "leading-wildcard-indexed" {
+		t.Errorf("X-Httpcatch-Scan: got %q want leading-wildcard-indexed", got)
+	}
+}
+
+// TestAggregate_ScanHeader_AbsentWhenNormal verifies that the aggregate handler
+// does not set X-Httpcatch-Scan on a non-scanning query.
+func TestAggregate_ScanHeader_AbsentWhenNormal(t *testing.T) {
+	t.Parallel()
+
+	ts := newInspectServer(t, admin.ReadSources{})
+	q := url.Values{
+		"since": {"2026-01-01T00:00:00Z"},
+		"until": {"2026-12-31T23:59:59Z"},
+	}.Encode()
+	resp := getAggregate(t, ts, q)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Httpcatch-Scan"); got != "" {
+		t.Errorf("X-Httpcatch-Scan: got %q want empty", got)
 	}
 }

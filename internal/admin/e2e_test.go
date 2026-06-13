@@ -409,7 +409,7 @@ func TestE2E_WithCookieAuth_False_SmokeTest(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	mw := admin.Middleware(testAdminToken, store, admin.WithCookieAuth(false))
+	mw := admin.Middleware(testAdminToken, store, noopLimiter(), admin.WithCookieAuth(false))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))

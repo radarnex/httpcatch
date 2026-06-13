@@ -206,9 +206,10 @@ type listPageData struct {
 }
 
 // requestListHandler returns an http.HandlerFunc for GET /ui/requests.
-func requestListHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
+func requestListHandler(rs ReadSources) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
+		ctx, cancel := withInspectTimeout(r.Context(), rs.QueryTimeout)
+		defer cancel()
 
 		data := listPageData{
 			Page:    "explorer",
@@ -216,9 +217,9 @@ func requestListHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 		}
 
 		// Populate the service dropdown from whichever reader is available.
-		rd := memReader
+		rd := rs.Memory
 		if rd == nil {
-			rd = sqlReader
+			rd = rs.SQLite
 		}
 		if rd != nil {
 			since := time.Now().Add(-servicesSince)
@@ -256,8 +257,13 @@ func requestListHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 		}
 		data.Query.Chips = chipsFromQuery(q.Query)
 		data.UnindexedScan = q.Query.IsUnindexedScan()
+		if q.Query.IsUnindexedScan() && !requiresNarrowing(q) {
+			data.Error = "leading-wildcard queries require a time range (since/until) or an exact service: term"
+			renderList(w, data, http.StatusBadRequest)
+			return
+		}
 
-		rows, nextCur, _, err := gatherRoots(ctx, q, memReader, sqlReader)
+		rows, nextCur, _, err := gatherRoots(ctx, q, rs.Memory, rs.SQLite)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("read error: %v", err), http.StatusInternalServerError)
 			return
@@ -329,6 +335,15 @@ func (v rootView) BodyText() string {
 // IsJSON reports whether the request body is JSON.
 func (v rootView) IsJSON() bool {
 	return isJSONContentType(v.ContentType)
+}
+
+// BodyOriginalSizeLabel returns the body size for display. When BodyTruncated
+// is true, the value is a lower bound and is prefixed with "≥".
+func (v rootView) BodyOriginalSizeLabel() string {
+	if v.BodyTruncated {
+		return fmt.Sprintf("≥ %d", v.BodyOriginalSize)
+	}
+	return fmt.Sprintf("%d", v.BodyOriginalSize)
 }
 
 // eventView wraps any event record (ResponseEvent or OutboundEvent) for the
@@ -422,6 +437,15 @@ func (ev eventView) BodyOriginalSize() int {
 	return 0
 }
 
+// BodyOriginalSizeLabel returns the body size for display. When BodyTruncated
+// is true, the value is a lower bound and is prefixed with "≥".
+func (ev eventView) BodyOriginalSizeLabel() string {
+	if ev.BodyTruncated() {
+		return fmt.Sprintf("≥ %d", ev.BodyOriginalSize())
+	}
+	return fmt.Sprintf("%d", ev.BodyOriginalSize())
+}
+
 // OutboundEvent field accessors.
 
 func (ev eventView) HasOutboundResponse() bool {
@@ -487,6 +511,16 @@ func (ev eventView) OutboundRequestBodyOriginalSize() int {
 	return 0
 }
 
+// OutboundRequestBodyOriginalSizeLabel returns the outbound request body size
+// for display. When BodyTruncated is true, the value is a lower bound and is
+// prefixed with "≥".
+func (ev eventView) OutboundRequestBodyOriginalSizeLabel() string {
+	if ev.OutboundRequestBodyTruncated() {
+		return fmt.Sprintf("≥ %d", ev.OutboundRequestBodyOriginalSize())
+	}
+	return fmt.Sprintf("%d", ev.OutboundRequestBodyOriginalSize())
+}
+
 func (ev eventView) OutboundStatus() int {
 	if r, ok := ev.record.(*capture.OutboundEvent); ok && r.Response != nil {
 		return r.Response.Status
@@ -538,6 +572,16 @@ func (ev eventView) OutboundResponseBodyOriginalSize() int {
 		return r.Response.BodyOriginalSize
 	}
 	return 0
+}
+
+// OutboundResponseBodyOriginalSizeLabel returns the outbound response body size
+// for display. When BodyTruncated is true, the value is a lower bound and is
+// prefixed with "≥".
+func (ev eventView) OutboundResponseBodyOriginalSizeLabel() string {
+	if ev.OutboundResponseBodyTruncated() {
+		return fmt.Sprintf("≥ %d", ev.OutboundResponseBodyOriginalSize())
+	}
+	return fmt.Sprintf("%d", ev.OutboundResponseBodyOriginalSize())
 }
 
 // Common accessors for event-as-root rendering.
@@ -627,20 +671,21 @@ func (d detailPageData) FirstResponse() *eventView {
 }
 
 // requestDetailUIHandler returns an http.HandlerFunc for GET /ui/requests/{id}.
-func requestDetailUIHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
+func requestDetailUIHandler(rs ReadSources) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
-		ctx := r.Context()
+		ctx, cancel := withInspectTimeout(r.Context(), rs.QueryTimeout)
+		defer cancel()
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 
-		if memReader == nil && sqlReader == nil {
+		if rs.Memory == nil && rs.SQLite == nil {
 			renderDetailNotFound(w, id)
 			return
 		}
 
-		detail, err := gatherDetail(ctx, id, memReader, sqlReader)
+		detail, err := gatherDetail(ctx, id, rs.Memory, rs.SQLite)
 		if errors.Is(err, inspect.ErrNotFound) {
 			renderDetailNotFound(w, id)
 			return
@@ -701,14 +746,15 @@ type servicesPageData struct {
 // servicesUIHandler returns an http.HandlerFunc for GET /ui/services.
 // It lists the services seen by either reader over the last `servicesSince`
 // window, sorted alphabetically.
-func servicesUIHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
+func servicesUIHandler(rs ReadSources) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
+		ctx, cancel := withInspectTimeout(r.Context(), rs.QueryTimeout)
+		defer cancel()
 		data := servicesPageData{Page: "services"}
 
-		rd := memReader
+		rd := rs.Memory
 		if rd == nil {
-			rd = sqlReader
+			rd = rs.SQLite
 		}
 		if rd != nil {
 			since := time.Now().Add(-servicesSince)

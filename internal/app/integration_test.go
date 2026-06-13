@@ -204,7 +204,7 @@ func TestIntegration_EndToEnd_BodyCapShape(t *testing.T) {
 	for i := range 30 {
 		cases = append(cases, fired{
 			marker: fmt.Sprintf("over-%d", i), bodyLen: cap + 512,
-			wantOrig: cap + 512, wantTrunc: true, wantCapped: cap,
+			wantOrig: cap + 1, wantTrunc: true, wantCapped: cap,
 		})
 	}
 	for i := range 10 {
@@ -2548,11 +2548,475 @@ func TestIntegration_GetRequests_Auth(t *testing.T) {
 	if resp2.StatusCode != http.StatusOK {
 		t.Errorf("bearer: got %d want 200", resp2.StatusCode)
 	}
-	if ct := resp2.Header.Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type: got %q want application/json", ct)
+	if ct := resp2.Header.Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Errorf("Content-Type: got %q want application/json; charset=utf-8", ct)
+	}
+}
+
+func TestIntegration_StartupWarnings_UnboundedBodyCap(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.BodyCap = 0
+	cfg.Sinks.Stdout = true
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	a.EmitStartupWarnings()
+
+	out := logBuf.String()
+	if !strings.Contains(out, app.UnboundedBodyCapWarning) {
+		t.Errorf("expected unbounded-body-cap warning when body_cap=0, got:\n%s", out)
+	}
+}
+
+func TestIntegration_StartupWarnings_UnboundedBodyCap_DoesNotFireOnDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Sinks.Stdout = true
+	cfg.Redaction.Headers = []string{"authorization"}
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	a.EmitStartupWarnings()
+
+	if strings.Contains(logBuf.String(), app.UnboundedBodyCapWarning) {
+		t.Errorf("unbounded-body-cap warning must not fire at default body_cap (%d), got:\n%s",
+			cfg.BodyCap, logBuf.String())
+	}
+}
+
+func TestIntegration_StartupWarnings_UnboundedEventsPayload(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.MaxEventsPayload = 0
+	cfg.Sinks.Stdout = true
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	a.EmitStartupWarnings()
+
+	out := logBuf.String()
+	if !strings.Contains(out, app.UnboundedEventsPayloadWarning) {
+		t.Errorf("expected unbounded-events-payload warning when max_events_payload=0, got:\n%s", out)
+	}
+}
+
+func TestIntegration_StartupWarnings_UnboundedEventsPayload_DoesNotFireOnDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Sinks.Stdout = true
+	cfg.Redaction.Headers = []string{"authorization"}
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	a.EmitStartupWarnings()
+
+	if strings.Contains(logBuf.String(), app.UnboundedEventsPayloadWarning) {
+		t.Errorf("unbounded-events-payload warning must not fire at default max_events_payload (%d), got:\n%s",
+			cfg.MaxEventsPayload, logBuf.String())
+	}
+}
+
+func TestIntegration_StartupWarnings_PlaintextSessionCookie(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Sinks.Stdout = true
+	cfg.Admin.Bind = freeAddr(t) // 127.0.0.1:N — adjusted below.
+	// Force a non-loopback host so the bind reason is token-configured.
+	cfg.Admin.Bind = "0.0.0.0" + cfg.Admin.Bind[strings.LastIndex(cfg.Admin.Bind, ":"):]
+	cfg.Admin.Token = "x" //nolint:gosec // test fixture, not a real secret
+	cfg.Admin.SessionSecure = false
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	a.EmitStartupWarnings()
+
+	out := logBuf.String()
+	if !strings.Contains(out, app.PlaintextSessionCookieWarning) {
+		t.Errorf("expected plaintext-session-cookie warning on non-loopback bind with session_secure=false, got:\n%s", out)
+	}
+}
+
+func TestIntegration_StartupWarnings_PlaintextSessionCookie_DoesNotFireOnLoopback(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults() // bind defaults to 127.0.0.1:8081
+	cfg.Sinks.Stdout = true
+	cfg.Admin.SessionSecure = false
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	a.EmitStartupWarnings()
+
+	if strings.Contains(logBuf.String(), app.PlaintextSessionCookieWarning) {
+		t.Errorf("plaintext-session-cookie warning must not fire on loopback bind, got:\n%s", logBuf.String())
+	}
+}
+
+func TestIntegration_StartupWarnings_PlaintextSessionCookie_DoesNotFireWhenSecure(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Sinks.Stdout = true
+	cfg.Admin.Bind = freeAddr(t)
+	cfg.Admin.Bind = "0.0.0.0" + cfg.Admin.Bind[strings.LastIndex(cfg.Admin.Bind, ":"):]
+	cfg.Admin.Token = "x" //nolint:gosec // test fixture, not a real secret
+	cfg.Admin.SessionSecure = true
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	a.EmitStartupWarnings()
+
+	if strings.Contains(logBuf.String(), app.PlaintextSessionCookieWarning) {
+		t.Errorf("plaintext-session-cookie warning must not fire when session_secure=true, got:\n%s", logBuf.String())
+	}
+}
+
+func TestIntegration_StartupWarnings_UnboundedEventsBatch(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.MaxEventsPerBatch = 0
+	cfg.Sinks.Stdout = true
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	a.EmitStartupWarnings()
+
+	out := logBuf.String()
+	if !strings.Contains(out, app.UnboundedEventsBatchWarning) {
+		t.Errorf("expected unbounded-events-batch warning when max_events_per_batch=0, got:\n%s", out)
+	}
+}
+
+func TestIntegration_StartupWarnings_UnboundedEventsBatch_DoesNotFireOnDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Sinks.Stdout = true
+	cfg.Redaction.Headers = []string{"authorization"}
+
+	var logBuf bytes.Buffer
+	a, err := app.Build(cfg, testLogger(&logBuf), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+	a.EmitStartupWarnings()
+
+	if strings.Contains(logBuf.String(), app.UnboundedEventsBatchWarning) {
+		t.Errorf("unbounded-events-batch warning must not fire at default max_events_per_batch (%d), got:\n%s",
+			cfg.MaxEventsPerBatch, logBuf.String())
 	}
 }
 
 // Ensure the redact package is used via the ruleset wiring in Build; this
 // compile-time reference keeps the import alive if test helpers above change.
 var _ = (*redact.Ruleset)(nil)
+
+// adminAddr starts a real admin server and returns its base URL plus the App.
+func adminAddr(t *testing.T, token string) (string, *app.App) {
+	t.Helper()
+	addr := freeAddr(t)
+	cfg := config.Defaults()
+	cfg.Admin.Bind = addr
+	cfg.Admin.Token = token
+	cfg.Admin.SessionTTL = time.Hour
+	cfg.Sinks.Stdout = true
+
+	a, err := app.Build(cfg, testLogger(io.Discard), io.Discard)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+
+	ctx := t.Context()
+	go func() { _ = a.Admin.Serve(ctx) }()
+
+	// Wait for the admin server to become reachable.
+	base := "http://" + addr
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err2 := http.Get(base + "/healthz")
+		if err2 == nil {
+			resp.Body.Close()
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return base, a
+}
+
+// TestIntegration_AuthLimiter_LoopbackRateLimited confirms that repeated
+// failed login attempts from 127.0.0.1 are still throttled.
+func TestIntegration_AuthLimiter_LoopbackRateLimited(t *testing.T) {
+	t.Parallel()
+
+	const token = "a-very-long-admin-token-for-integration-testing-32c"
+	base, _ := adminAddr(t, token)
+
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	for i := range 6 {
+		form := url.Values{"token": {"wrong-token-" + fmt.Sprint(i)}}
+		resp, err := client.PostForm(base+"/auth/login", form)
+		if err != nil {
+			t.Fatalf("POST /auth/login #%d: %v", i+1, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if i < 5 && resp.StatusCode == http.StatusTooManyRequests {
+			t.Fatalf("loopback IP was rate-limited before the bucket was exhausted at attempt %d", i+1)
+		}
+		if i == 5 && resp.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("attempt 6 status: got %d want 429", resp.StatusCode)
+		}
+	}
+}
+
+// TestIntegration_AuthLimiter_BearerFailureCounted verifies that failed bearer
+// auth on a protected route increments the invalid_token counter visible via
+// /metrics.
+func TestIntegration_AuthLimiter_BearerFailureCounted(t *testing.T) {
+	t.Parallel()
+
+	const token = "a-very-long-admin-token-for-integration-testing-32d"
+	base, _ := adminAddr(t, token)
+
+	// Send a request with a wrong bearer token to a protected route.
+	req, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /status: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status: got %d want 401", resp.StatusCode)
+	}
+
+	// Read /metrics and verify invalid_token counter is non-zero.
+	mResp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	body, _ := io.ReadAll(mResp.Body)
+	mResp.Body.Close()
+
+	bodyStr := string(body)
+	// The counter must be present and > 0 (value should be "1").
+	if !strings.Contains(bodyStr, `httpcatch_auth_failures_total{reason="invalid_token"} 1`) {
+		t.Errorf("expected invalid_token counter = 1 in /metrics;\nbody:\n%s", bodyStr)
+	}
+}
+
+// TestIntegration_CaptureBind_HonoredAtListen confirms that setting
+// CaptureBind to a loopback address causes the capture port to listen on that
+// address. The test uses port 0 so the OS assigns an ephemeral port.
+func TestIntegration_CaptureBind_HonoredAtListen(t *testing.T) {
+	t.Parallel()
+
+	adminAddr := freeAddr(t)
+
+	cfg := config.Defaults()
+	cfg.Admin.Bind = adminAddr
+	cfg.CaptureBind = "127.0.0.1:0"
+	cfg.Sinks.Stdout = true
+
+	var stdoutBuf syncBuffer
+	var logBuf syncBuffer
+	a, err := app.Build(cfg, testLogger(&logBuf), &stdoutBuf)
+	if err != nil {
+		t.Fatalf("app.Build: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Serve(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not return after context cancel")
+		}
+	}()
+
+	waitPort(t, adminAddr, 3*time.Second)
+
+	// Read the actual bound address from the log output, which emits
+	// "capture port listening addr=<actual>" after net.Listen succeeds.
+	var captureAddr string
+	if !waitFor(func() bool {
+		out := logBuf.String()
+		for _, line := range strings.Split(out, "\n") {
+			const marker = "addr="
+			idx := strings.Index(line, marker)
+			if idx >= 0 && strings.Contains(line, "capture port listening") {
+				captureAddr = strings.TrimSpace(line[idx+len(marker):])
+				// strip any trailing key=value fields (slog text format)
+				if sp := strings.IndexByte(captureAddr, ' '); sp >= 0 {
+					captureAddr = captureAddr[:sp]
+				}
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second) {
+		t.Fatalf("timed out waiting for capture port address in logs:\n%s", logBuf.String())
+	}
+
+	resp, err := http.Post("http://"+captureAddr+"/bind-test", "text/plain", strings.NewReader("hello"))
+	if err != nil {
+		t.Fatalf("POST to capture: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("capture status: got %d want 202", resp.StatusCode)
+	}
+
+	if !waitFor(func() bool { return stdoutBuf.CountLines() >= 1 }, 5*time.Second) {
+		t.Fatal("timed out waiting for captured record in stdout")
+	}
+}
+
+// TestIntegration_AuthLimiter_MetricsExposed confirms that /metrics always
+// emits both reason= series for httpcatch_auth_failures_total.
+func TestIntegration_AuthLimiter_MetricsExposed(t *testing.T) {
+	t.Parallel()
+
+	const token = "a-very-long-admin-token-for-integration-testing-32e"
+	base, _ := adminAddr(t, token)
+
+	resp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	bodyStr := string(body)
+	checks := []string{
+		`# HELP httpcatch_auth_failures_total`,
+		`# TYPE httpcatch_auth_failures_total counter`,
+		`httpcatch_auth_failures_total{reason="invalid_token"}`,
+		`httpcatch_auth_failures_total{reason="rate_limited"}`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(bodyStr, want) {
+			t.Errorf("body missing %q\nbody:\n%s", want, bodyStr)
+		}
+	}
+}
+
+// TestIntegration_CSRF_LogoutCrossSite_Blocked_SessionSurvives verifies that a
+// cross-site POST to /auth/logout is rejected with 403 and that the session
+// cookie remains valid. It also checks that the csrf_blocked counter appears in
+// /metrics.
+func TestIntegration_CSRF_LogoutCrossSite_Blocked_SessionSurvives(t *testing.T) {
+	t.Parallel()
+
+	const token = "a-very-long-admin-token-for-integration-testing-csrf1"
+	base, _ := adminAddr(t, token)
+
+	noFollow := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// Obtain a session by logging in with the correct token.
+	form := url.Values{"token": {token}}
+	loginResp, err := noFollow.PostForm(base+"/auth/login", form)
+	if err != nil {
+		t.Fatalf("POST /auth/login: %v", err)
+	}
+	io.Copy(io.Discard, loginResp.Body)
+	loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("login status: got %d want 303", loginResp.StatusCode)
+	}
+
+	var sessionCookie *http.Cookie
+	for _, c := range loginResp.Cookies() {
+		if c.Name == "httpcatch_session" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("no session cookie after login")
+	}
+
+	// Attempt a cross-site logout; the CSRF middleware must reject it.
+	logoutReq, _ := http.NewRequest(http.MethodPost, base+"/auth/logout", nil)
+	logoutReq.AddCookie(sessionCookie)
+	logoutReq.Header.Set("Sec-Fetch-Site", "cross-site")
+	logoutResp, err := noFollow.Do(logoutReq)
+	if err != nil {
+		t.Fatalf("POST /auth/logout (cross-site): %v", err)
+	}
+	io.Copy(io.Discard, logoutResp.Body)
+	logoutResp.Body.Close()
+	if logoutResp.StatusCode != http.StatusForbidden {
+		t.Errorf("cross-site logout status: got %d want 403", logoutResp.StatusCode)
+	}
+
+	// Session must still be valid — the logout was blocked before it could revoke.
+	checkReq, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
+	checkReq.AddCookie(sessionCookie)
+	checkResp, err := noFollow.Do(checkReq)
+	if err != nil {
+		t.Fatalf("GET /status after blocked logout: %v", err)
+	}
+	io.Copy(io.Discard, checkResp.Body)
+	checkResp.Body.Close()
+	if checkResp.StatusCode != http.StatusOK {
+		t.Errorf("session after blocked logout: got %d want 200", checkResp.StatusCode)
+	}
+
+	// The csrf_blocked counter must be visible in /metrics.
+	mResp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	mBody, _ := io.ReadAll(mResp.Body)
+	mResp.Body.Close()
+
+	if !strings.Contains(string(mBody), `httpcatch_auth_failures_total{reason="csrf_blocked"} 1`) {
+		t.Errorf("expected csrf_blocked counter = 1 in /metrics;\nbody:\n%s", string(mBody))
+	}
+}

@@ -221,6 +221,7 @@ a { color: inherit; text-decoration: none; }
 }
 .admin-menu-item.danger { color: var(--s-5xx); }
 .admin-menu-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+.admin-menu form { margin: 0; }
 
 /* Theme toggle segmented control inside menu */
 .theme-seg {
@@ -301,6 +302,10 @@ a { color: inherit; text-decoration: none; }
   padding: 4px 8px; border-radius: 5px;
 }
 .page-head .back-link:hover { color: var(--text-1); background: var(--bg-hover); }
+.page-head .detail-subtitle { font-size: 12.5px; color: var(--text-2); }
+.page-head .detail-path { font-size: 13px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; }
+.page-head .svc-count { font-size: 12px; color: var(--text-3); }
+.page-head .svc-count b { color: var(--text-1); }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
@@ -837,6 +842,7 @@ a { color: inherit; text-decoration: none; }
 .drawer-tab.on .tab-badge { color: var(--accent-text); }
 
 .drawer-body { flex: 1; overflow: auto; padding: 12px 14px 24px; }
+.drawer-body-expand { height: auto; overflow: visible; }
 .drawer-loading { padding: 2rem; text-align: center; color: var(--text-3); font-size: 12.5px; }
 
 /* ── Detail sections (full-page and drawer) ───────────────────── */
@@ -912,6 +918,7 @@ a { color: inherit; text-decoration: none; }
 
 /* ── Timeline (correlated events) ──────────────────────────────── */
 .timeline-section { margin-top: 18px; }
+.events-section { padding: 0 16px 24px; }
 .timeline-event {
   border: 1px solid var(--border);
   border-radius: 6px;

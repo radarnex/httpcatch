@@ -86,7 +86,6 @@ func staticHandler(etags map[string]string) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("ETag", etag)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
+		_, _ = w.Write(data) //nolint:gosec // data is the embedded UI asset bytes, not user input
 	}
 }
-

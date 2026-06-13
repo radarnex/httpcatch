@@ -13,13 +13,14 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/radarnex/httpcatch/internal/inspect"
+	"github.com/radarnex/httpcatch/internal/searchql"
 )
 
 const (
-	readSourceMemory      = "memory"
-	readSourceSQLite      = "sqlite"
+	readSourceMemory       = "memory"
+	readSourceSQLite       = "sqlite"
 	readSourceMemorySQLite = "memory+sqlite"
-	readSourceNone        = "none"
+	readSourceNone         = "none"
 
 	defaultLimit = 50
 	maxLimit     = 500
@@ -160,9 +161,31 @@ func gatherDetail(ctx context.Context, id string, memReader, sqlReader inspect.R
 	return detail, nil
 }
 
+// requiresNarrowing reports whether q, when IsUnindexedScan is true, carries
+// at least one narrowing constraint: a time bound (Since or Until) or an exact
+// service term. Callers only invoke this when IsUnindexedScan() is true.
+func requiresNarrowing(q inspect.InspectQuery) bool {
+	if q.Since != nil || q.Until != nil {
+		return true
+	}
+	for _, t := range q.Query.Terms {
+		if t.Field == searchql.FieldService && t.Wildcard == searchql.WildcardNone && !t.Negated {
+			return true
+		}
+	}
+	return false
+}
+
+func withInspectTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 // requestsHandler returns an http.HandlerFunc for GET /requests.
-// memReader and sqlReader may both be nil (stdout-only configuration).
-func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
+// rs.Memory and rs.SQLite may both be nil (stdout-only configuration).
+func requestsHandler(rs ReadSources) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q, fieldErrs := parseInspectQuery(r.URL.Query())
 		if len(fieldErrs) > 0 {
@@ -170,14 +193,21 @@ func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 			return
 		}
 
-		ctx := r.Context()
-		w.Header().Set("Content-Type", "application/json")
+		if q.Query.IsUnindexedScan() && !requiresNarrowing(q) {
+			writeFieldError(w, "q", "leading-wildcard queries require a time range (since/until) or an exact service: term")
+			return
+		}
+
+		ctx, cancel := withInspectTimeout(r.Context(), rs.QueryTimeout)
+		defer cancel()
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if q.Query.IsUnindexedScan() {
 			w.Header().Set("X-Httpcatch-Scan", "leading-wildcard-indexed")
 		}
 
-		rows, nextCur, source, err := gatherRoots(ctx, q, memReader, sqlReader)
+		rows, nextCur, source, err := gatherRoots(ctx, q, rs.Memory, rs.SQLite)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("read error: %v", err), http.StatusInternalServerError)
 			return
@@ -192,7 +222,7 @@ func requestsHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
 // requestsAggregateHandler returns an http.HandlerFunc for
 // GET /requests/aggregate. Accepts the same filters as /requests plus an
 // optional `buckets` parameter; returns total matching rows and a histogram.
-func requestsAggregateHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
+func requestsAggregateHandler(rs ReadSources) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vals := r.URL.Query()
 		bucketCount := histogramBucketCount
@@ -210,14 +240,25 @@ func requestsAggregateHandler(memReader, sqlReader inspect.Reader) http.HandlerF
 			writeParseErrors(w, fieldErrs)
 			return
 		}
+
+		if q.Query.IsUnindexedScan() && !requiresNarrowing(q) {
+			writeFieldError(w, "q", "leading-wildcard queries require a time range (since/until) or an exact service: term")
+			return
+		}
+
 		q.Cursor = nil
 		q.Limit = 0
 
-		ctx := r.Context()
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
+		ctx, cancel := withInspectTimeout(r.Context(), rs.QueryTimeout)
+		defer cancel()
 
-		agg, err := gatherAggregation(ctx, q, bucketCount, memReader, sqlReader)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if q.Query.IsUnindexedScan() {
+			w.Header().Set("X-Httpcatch-Scan", "leading-wildcard-indexed")
+		}
+
+		agg, err := gatherAggregation(ctx, q, bucketCount, rs.Memory, rs.SQLite)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("read error: %v", err), http.StatusInternalServerError)
 			return
@@ -237,7 +278,7 @@ type fieldErrorResponse struct {
 }
 
 func writeFieldError(w http.ResponseWriter, field, msg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusBadRequest)
 	_ = json.NewEncoder(w).Encode(fieldErrorResponse{
 		Error: msg,
@@ -266,20 +307,21 @@ func writeRootsResponse(w http.ResponseWriter, rows []inspect.RootRow, nextCur *
 // requestDetailHandler returns an http.HandlerFunc for GET /requests/{id}.
 // memReader and sqlReader may both be nil (stdout-only configuration), in which
 // case every call returns 404 — stdout-only mode has no read surface.
-func requestDetailHandler(memReader, sqlReader inspect.Reader) http.HandlerFunc {
+func requestDetailHandler(rs ReadSources) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
-		ctx := r.Context()
+		ctx, cancel := withInspectTimeout(r.Context(), rs.QueryTimeout)
+		defer cancel()
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 
-		if memReader == nil && sqlReader == nil {
+		if rs.Memory == nil && rs.SQLite == nil {
 			writeDetailNotFound(w, id)
 			return
 		}
 
-		detail, err := gatherDetail(ctx, id, memReader, sqlReader)
+		detail, err := gatherDetail(ctx, id, rs.Memory, rs.SQLite)
 		if errors.Is(err, inspect.ErrNotFound) {
 			writeDetailNotFound(w, id)
 			return

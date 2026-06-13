@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -121,6 +122,38 @@ func NewSQLiteSink(path string) (*SQLiteSink, error) {
 		return nil, err
 	}
 
+	// Warn when the parent directory is world-writable. On such directories a
+	// local attacker can pre-create the target path as a symlink or replace
+	// it after creation. The check uses Unix permission bits; on Windows
+	// Mode().Perm() may return 0 and the condition is silently skipped.
+	if info, statErr := os.Stat(filepath.Dir(path)); statErr == nil {
+		if info.Mode().Perm()&0o002 != 0 {
+			slog.Default().Warn("sqlite parent directory is world-writable",
+				"path", path,
+				"parent", filepath.Dir(path),
+				"mode", info.Mode().Perm().String())
+		}
+	}
+
+	// Create the DB file with mode 0600 when it does not exist. The SQLite
+	// driver inherits the process umask (typically 0644), which can make the
+	// capture store world-readable. Lstat rejects symlinks before sql.Open so
+	// the driver cannot follow a redirected path.
+	info, statErr := os.Lstat(path)
+	if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("sqlite db file %q must not be a symlink", path)
+	}
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return nil, fmt.Errorf("stat sqlite db file %q: %w", path, statErr)
+	}
+	if os.IsNotExist(statErr) {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|noFollowFlag, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("create sqlite db file %q: %w", path, err)
+		}
+		f.Close()
+	}
+
 	// case_sensitive_like keeps SQLite's LIKE operator case-sensitive on
 	// every pooled connection, which is what unlocks the column-index
 	// optimisation for prefix LIKE patterns ('foo%'). The searchql grammar
@@ -139,6 +172,19 @@ func NewSQLiteSink(path string) (*SQLiteSink, error) {
 	if _, err := db.Exec(sqlitePragmas); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply sqlite pragmas in %q: %w", path, err)
+	}
+	// Restrict the WAL and SHM sidecar files to mode 0600. SQLite creates
+	// these lazily on the first WAL-mode connection; the driver inherits the
+	// process umask (typically 0644) when it does so. Chmod here, immediately
+	// after the PRAGMA that activates WAL, covers the common path. Errors for
+	// non-existent files (ErrNotExist) are ignored — the files may not exist
+	// yet on a first open and will be created 0600-restricted via the
+	// pre-creation logic above.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Chmod(path+suffix, 0o600); err != nil && !os.IsNotExist(err) {
+			db.Close()
+			return nil, fmt.Errorf("chmod %s%s: %w", path, suffix, err)
+		}
 	}
 	if _, err := db.Exec(sqliteSchema); err != nil {
 		db.Close()

@@ -1,3 +1,7 @@
+# Default bind is 0.0.0.0:<capture_port>. Set capture_bind explicitly to restrict
+# the capture port to a specific interface (e.g. 127.0.0.1:8080 for a sidecar
+# topology, or a private NIC). When capture_bind is set, capture_port is ignored.
+# capture_bind: "127.0.0.1:8080"
 capture_port: 8080
 
 queue_size: 1024
@@ -13,7 +17,7 @@ sinks:
 
 admin:
   bind: 127.0.0.1:8081
-  token: changeme
+  # token comes from HTTPCATCH_ADMIN_TOKEN env var
   session_ttl: 8h
 
 redaction:
@@ -27,7 +31,7 @@ redaction:
     - x-access-token
     - x-id-token
 
-  # Query parameter values replaced with [REDACTED] (exact name match).
+  # Query parameter values replaced with [REDACTED] (case-insensitive name match).
   query_params:
     - api_key
     - apikey
@@ -40,8 +44,9 @@ redaction:
     - passwd
     - key
 
-  # JSON body paths replaced with [REDACTED] (gjson dot-notation, only applied
-  # to application/json bodies). Nested paths use dots: "user.password".
+  # JSON body paths replaced with [REDACTED] (gjson dot-notation) whenever the
+  # body parses as JSON, regardless of the declared content type. Nested paths
+  # use dots: "user.password".
   json_paths:
     - password
     - pass
@@ -69,8 +74,8 @@ redaction:
     - card.number
     - card.cvv
 
-  # Regex rules scan text-like bodies (JSON, XML, form-encoded, text/*) and
-  # all header values. Each match is replaced in full with [REDACTED].
+  # Regex rules scan every non-empty body and all header/query values. Each
+  # match is replaced in full with [REDACTED].
   # Patterns use RE2 syntax (no lookaheads).
   regex:
     # password=<value> in URL-encoded form bodies and query strings

@@ -20,8 +20,13 @@ import (
 
 // Greppable substrings that operators and tests can match against logs.
 const (
-	UnredactedWarning = "running in unredacted mode"
-	ZeroSinksWarning  = "zero sinks enabled"
+	UnredactedWarning             = "running in unredacted mode"
+	ZeroSinksWarning              = "zero sinks enabled"
+	UnboundedBodyCapWarning       = "body_cap is 0: body size limit disabled; a single request body is read without bound via io.ReadAll and can exhaust process memory (OOM)"
+	UnboundedEventsPayloadWarning = "max_events_payload is 0: events payload limit disabled; a single POST /events body is read without bound via io.ReadAll and can exhaust process memory (OOM)"
+	UnboundedEventsBatchWarning   = "max_events_per_batch is 0: batch count limit disabled; a single POST /events array may contain an unbounded number of items and force O(N) allocation and decode work"
+	PlaintextSessionCookieWarning = "admin.session_secure is false on a non-loopback bind: the session cookie travels in cleartext, so any on-path observer can capture it and obtain full admin access for the cookie lifetime. Set admin.session_secure: true when fronting admin with HTTPS (e.g. a reverse proxy terminating TLS)."
+	SQLiteUnboundedWarning        = "sqlite retention sweeper not configured — store grows unbounded; set sinks.retention.max_age or sinks.retention.max_count to enable trim"
 )
 
 const shutdownDrainTimeout = 5 * time.Second
@@ -74,7 +79,8 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 
 	q := capture.NewQueue(cfg.QueueSize)
 	counters := capture.NewCounters()
-	workers := pipeline.NewWorkerPool(cfg.Workers, q, ruleset, ss, logger)
+	sinkCounters := pipeline.NewSinkErrorCounters()
+	workers := pipeline.NewWorkerPool(cfg.Workers, q, ruleset, ss, logger, sinkCounters)
 	handler := capture.NewCaptureHandler(capture.HandlerOptions{
 		Queue:         q,
 		Counters:      counters,
@@ -83,7 +89,7 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		Logger:        logger,
 	})
 
-	readers := admin.ReadSources{}
+	readers := admin.ReadSources{QueryTimeout: cfg.Inspect.QueryTimeout}
 	if memSink != nil {
 		readers.Memory = memSink
 	}
@@ -114,24 +120,32 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 		RedactionErrorsTotal:            ruleset.RedactionErrorsTotal,
 		Unredacted:                      ruleset.IsUnredacted,
 
-		EventsIngestedResponseTotal:          eventsCounters.EventsIngestedResponseTotal,
-		EventsIngestedOutboundTotal:          eventsCounters.EventsIngestedOutboundTotal,
-		EventsRejectedInvalidJSONTotal:       eventsCounters.EventsRejectedInvalidJSONTotal,
-		EventsRejectedPayloadTooLargeTotal:   eventsCounters.EventsRejectedPayloadTooLargeTotal,
-		EventsRejectedUnknownTypeTotal:       eventsCounters.EventsRejectedUnknownTypeTotal,
-		EventsRejectedMissingTypeTotal:       eventsCounters.EventsRejectedMissingTypeTotal,
+		EventsIngestedResponseTotal:             eventsCounters.EventsIngestedResponseTotal,
+		EventsIngestedOutboundTotal:             eventsCounters.EventsIngestedOutboundTotal,
+		EventsRejectedInvalidJSONTotal:          eventsCounters.EventsRejectedInvalidJSONTotal,
+		EventsRejectedPayloadTooLargeTotal:      eventsCounters.EventsRejectedPayloadTooLargeTotal,
+		EventsRejectedUnknownTypeTotal:          eventsCounters.EventsRejectedUnknownTypeTotal,
+		EventsRejectedMissingTypeTotal:          eventsCounters.EventsRejectedMissingTypeTotal,
 		EventsRejectedMissingRequiredFieldTotal: eventsCounters.EventsRejectedMissingRequiredFieldTotal,
-		EventsRejectedEmptyBatchTotal:        eventsCounters.EventsRejectedEmptyBatchTotal,
+		EventsRejectedEmptyBatchTotal:           eventsCounters.EventsRejectedEmptyBatchTotal,
+		EventsRejectedBatchTooLargeTotal:        eventsCounters.EventsRejectedBatchTooLargeTotal,
+		EventsRejectedBodyTooLargeTotal:         eventsCounters.EventsRejectedBodyTooLargeTotal,
+		EventsDroppedQueueFullTotal:             eventsCounters.EventsDroppedQueueFullTotal,
 
 		OrphansResponse: orphansResponse,
 		OrphansOutbound: orphansOutbound,
+
+		SinkWriteErrorsMemoryTotal: sinkCounters.MemoryErrorsTotal,
+		SinkWriteErrorsSQLiteTotal: sinkCounters.SQLiteErrorsTotal,
+		SinkWriteErrorsStdoutTotal: sinkCounters.StdoutErrorsTotal,
 	}, admin.ServerOptions{
 		Readers: readers,
 		Events: admin.EventsSources{
-			Queue:            q,
-			BodyCap:          cfg.BodyCap,
-			MaxEventsPayload: cfg.MaxEventsPayload,
-			Counters:         eventsCounters,
+			Queue:             q,
+			BodyCap:           cfg.BodyCap,
+			MaxEventsPayload:  cfg.MaxEventsPayload,
+			MaxEventsPerBatch: cfg.MaxEventsPerBatch,
+			Counters:          eventsCounters,
 		},
 		Effective: cfg,
 	})
@@ -161,6 +175,21 @@ func (a *App) EmitStartupWarnings() {
 	if a.Ruleset.IsUnredacted() {
 		a.Logger.Warn(UnredactedWarning + " — no redaction is applied to captured payloads; configure a redactor before exposing this instance to production traffic")
 	}
+	if a.Cfg.BodyCap == 0 {
+		a.Logger.Warn(UnboundedBodyCapWarning)
+	}
+	if a.Cfg.MaxEventsPayload == 0 {
+		a.Logger.Warn(UnboundedEventsPayloadWarning)
+	}
+	if a.Cfg.MaxEventsPerBatch == 0 {
+		a.Logger.Warn(UnboundedEventsBatchWarning)
+	}
+	// Re-classifying the bind here (admin.Guard already ran during admin.New;
+	// it's pure and idempotent) lets us couple the cookie-secure warning to the
+	// actual bind decision rather than the raw config field.
+	if reason, _ := admin.Guard(a.Cfg.Admin.Bind, a.Cfg.Admin.Token != "", a.Cfg.Admin.InsecureListen); reason == admin.ReasonTokenConfigured && !a.Cfg.Admin.SessionSecure {
+		a.Logger.Warn(PlaintextSessionCookieWarning)
+	}
 }
 
 // Serve binds both the capture port and the admin port, then runs until ctx is
@@ -177,15 +206,40 @@ func (a *App) Serve(ctx context.Context) error {
 	sinkCtx, cancelSinks := context.WithCancel(context.Background())
 	defer cancelSinks()
 
+	if a.SQLite != nil {
+		ret := a.Cfg.Sinks.Retention
+		if ret.MaxAge > 0 || ret.MaxCount > 0 {
+			pol := sinks.SweeperPolicy{MaxAge: ret.MaxAge, MaxCount: ret.MaxCount}
+			interval := ret.Interval
+			a.SQLite.StartSweeper(sinkCtx, pol, interval, a.Logger)
+			a.Logger.Info("sqlite retention sweeper started",
+				"max_age", ret.MaxAge,
+				"max_count", ret.MaxCount,
+				"interval", interval,
+			)
+		} else {
+			a.Logger.Info(SQLiteUnboundedWarning)
+		}
+	}
+
 	a.Workers.Start(sinkCtx)
 
-	addr := fmt.Sprintf("0.0.0.0:%d", a.Cfg.CapturePort)
+	addr := a.Cfg.CaptureBind
+	if addr == "" {
+		addr = fmt.Sprintf("0.0.0.0:%d", a.Cfg.CapturePort)
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		a.shutdown(cancelSinks)
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
-	captureServer := &http.Server{Handler: a.Handler}
+	captureServer := &http.Server{
+		Handler:           a.Handler,
+		ReadHeaderTimeout: a.Cfg.Timeouts.ReadHeader,
+		ReadTimeout:       a.Cfg.Timeouts.Read,
+		WriteTimeout:      a.Cfg.Timeouts.Write,
+		IdleTimeout:       a.Cfg.Timeouts.Idle,
+	}
 	a.Logger.Info("capture port listening", "addr", ln.Addr().String())
 
 	captureErrCh := make(chan error, 1)

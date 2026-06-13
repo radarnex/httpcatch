@@ -4,6 +4,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,9 +17,10 @@ var loginTmpl = template.Must(template.ParseFS(uiFS, "ui/login.html"))
 // and logout handlers so they can be registered as methods rather than deeply
 // nested closures.
 type authHandlers struct {
-	cfg    config.AdminConfig
-	store  *SessionStore
-	logger *slog.Logger
+	cfg     config.AdminConfig
+	store   *SessionStore
+	logger  *slog.Logger
+	limiter *AuthLimiter
 }
 
 // isSafePath returns true when next is a relative path that starts with a
@@ -53,6 +55,18 @@ func (a *authHandlers) loginPageHandler(w http.ResponseWriter, r *http.Request) 
 // session cookie and redirects. On failure it re-renders the login form with a
 // generic error; the submitted token is never echoed in the response.
 func (a *authHandlers) loginPostHandler(w http.ResponseWriter, r *http.Request) {
+	ip := ClientIP(r.RemoteAddr)
+
+	if !a.limiter.Allowed(ip) {
+		a.limiter.RecordRateLimited()
+		retryAfter := a.limiter.RetryAfter(ip)
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("rate limited\n"))
+		return
+	}
+
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -65,6 +79,8 @@ func (a *authHandlers) loginPostHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if !checkBearer(token, a.cfg.Token) {
+		a.limiter.RegisterFailure(ip)
+		a.limiter.RecordInvalidToken()
 		next := r.FormValue("next")
 		if !isSafePath(next) {
 			next = ""
@@ -91,6 +107,7 @@ func (a *authHandlers) loginPostHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	//nolint:gosec // Secure is operator-configurable via admin.session_secure; see slice-4 S-AUTH-02
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    sess.ID,
@@ -106,7 +123,7 @@ func (a *authHandlers) loginPostHandler(w http.ResponseWriter, r *http.Request) 
 	if !isSafePath(next) {
 		next = "/"
 	}
-	http.Redirect(w, r, next, http.StatusSeeOther)
+	http.Redirect(w, r, next, http.StatusSeeOther) //nolint:gosec // next is constrained to same-origin paths by isSafePath
 }
 
 // logoutHandler revokes the current session cookie and redirects to the login
@@ -117,6 +134,7 @@ func (a *authHandlers) logoutHandler(w http.ResponseWriter, r *http.Request) {
 		a.store.Revoke(cookie.Value)
 	}
 
+	//nolint:gosec // Secure is operator-configurable via admin.session_secure; see slice-4 S-AUTH-02
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",

@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -526,8 +528,7 @@ func TestSQLiteSink_OutboundEventNullResponse(t *testing.T) {
 
 	var respStatus sql.NullInt64
 	var respHeaders sql.NullString
-	err := r.QueryRow(`SELECT response_status, response_headers FROM events WHERE id=?`, evt.ID,
-	).Scan(&respStatus, &respHeaders)
+	err := r.QueryRow(`SELECT response_status, response_headers FROM events WHERE id=?`, evt.ID).Scan(&respStatus, &respHeaders)
 	if err != nil {
 		t.Fatalf("SELECT: %v", err)
 	}
@@ -688,6 +689,155 @@ func TestSQLiteSink_RejectsEmptyPath(t *testing.T) {
 		t.Fatal("expected error for empty path")
 	}
 }
+
+func TestSQLiteSink_FileMode(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode test not applicable on windows")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "filemode.db")
+	s, err := NewSQLiteSink(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteSink: %v", err)
+	}
+	defer s.Close()
+
+	// Write one record so that SQLite materialises the WAL and SHM sidecars.
+	if err := s.Write(context.Background(), sampleRecord("fm1")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Errorf("stat %s: %v", p, err)
+			continue
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode: got %04o want 0600", p, perm)
+		}
+	}
+}
+
+func TestSQLiteSink_NewSink_RejectsSymlinkAtTarget(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("not portable on Windows")
+	}
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "db.sqlite")
+	elsewhere := filepath.Join(dir, "elsewhere.sqlite")
+
+	if err := os.Symlink(elsewhere, target); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := NewSQLiteSink(target)
+	if err == nil {
+		t.Fatal("expected error when sqlite_path is a symlink, got nil")
+	}
+}
+
+func TestSQLiteSink_NewSink_RejectsSymlinkToExistingTarget(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("not portable on Windows")
+	}
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "db.sqlite")
+	elsewhere := filepath.Join(dir, "elsewhere.sqlite")
+
+	if err := os.WriteFile(elsewhere, []byte{}, 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(elsewhere, target); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := NewSQLiteSink(target)
+	if err == nil {
+		t.Fatal("expected error when sqlite_path is a symlink to an existing file, got nil")
+	}
+}
+
+func TestSQLiteSink_NewSink_WarnsOnWorldWritableParent(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("not portable on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	// Capture slog output via a custom handler.
+	type logRecord struct {
+		msg string
+	}
+	var captured []logRecord
+	var mu sync.Mutex
+
+	origDefault := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(origDefault) })
+
+	handler := &captureHandler{fn: func(msg string) {
+		mu.Lock()
+		captured = append(captured, logRecord{msg: msg})
+		mu.Unlock()
+	}}
+	slog.SetDefault(slog.New(handler))
+
+	path := filepath.Join(dir, "db.sqlite")
+	s, err := NewSQLiteSink(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteSink: %v", err)
+	}
+	defer s.Close()
+
+	mu.Lock()
+	msgs := make([]string, len(captured))
+	for i, r := range captured {
+		msgs[i] = r.msg
+	}
+	mu.Unlock()
+
+	found := false
+	for _, m := range msgs {
+		if strings.Contains(m, "world-writable") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a 'world-writable' warning in slog output, got: %v", msgs)
+	}
+}
+
+// captureHandler is a minimal slog.Handler that calls fn for every log message.
+type captureHandler struct {
+	fn func(msg string)
+}
+
+func (h *captureHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.fn(r.Message)
+	return nil
+}
+func (h *captureHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(_ string) slog.Handler      { return h }
 
 func TestSQLiteSink_OrderingByTimestamp(t *testing.T) {
 	t.Parallel()

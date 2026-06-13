@@ -28,11 +28,16 @@ func storeWithSession(t *testing.T) (*admin.SessionStore, admin.Session) {
 	return store, sess
 }
 
+// noopLimiter returns a limiter that never rate-limits (full buckets, no failures).
+func noopLimiter() *admin.AuthLimiter {
+	return admin.NewAuthLimiter()
+}
+
 func TestMiddleware_NoAuth_Returns401(t *testing.T) {
 	t.Parallel()
 
 	store := admin.NewSessionStore(time.Now)
-	mw := admin.Middleware(testAdminToken, store)
+	mw := admin.Middleware(testAdminToken, store, noopLimiter())
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
@@ -52,7 +57,7 @@ func TestMiddleware_ValidBearer_Returns200(t *testing.T) {
 	t.Parallel()
 
 	store := admin.NewSessionStore(time.Now)
-	mw := admin.Middleware(testAdminToken, store)
+	mw := admin.Middleware(testAdminToken, store, noopLimiter())
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
@@ -69,7 +74,7 @@ func TestMiddleware_InvalidBearer_Returns401(t *testing.T) {
 	t.Parallel()
 
 	store := admin.NewSessionStore(time.Now)
-	mw := admin.Middleware(testAdminToken, store)
+	mw := admin.Middleware(testAdminToken, store, noopLimiter())
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
@@ -86,7 +91,7 @@ func TestMiddleware_ValidCookie_Returns200(t *testing.T) {
 	t.Parallel()
 
 	store, sess := storeWithSession(t)
-	mw := admin.Middleware(testAdminToken, store)
+	mw := admin.Middleware(testAdminToken, store, noopLimiter())
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
@@ -103,7 +108,7 @@ func TestMiddleware_InvalidCookie_Returns401(t *testing.T) {
 	t.Parallel()
 
 	store := admin.NewSessionStore(time.Now)
-	mw := admin.Middleware(testAdminToken, store)
+	mw := admin.Middleware(testAdminToken, store, noopLimiter())
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
@@ -120,7 +125,7 @@ func TestMiddleware_ValidBearerAndValidCookie_Returns200(t *testing.T) {
 	t.Parallel()
 
 	store, sess := storeWithSession(t)
-	mw := admin.Middleware(testAdminToken, store)
+	mw := admin.Middleware(testAdminToken, store, noopLimiter())
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
@@ -138,7 +143,7 @@ func TestMiddleware_NoCookieAuth_CookieOnly_Returns401(t *testing.T) {
 	t.Parallel()
 
 	store, sess := storeWithSession(t)
-	mw := admin.Middleware(testAdminToken, store, admin.WithCookieAuth(false))
+	mw := admin.Middleware(testAdminToken, store, noopLimiter(), admin.WithCookieAuth(false))
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
@@ -155,7 +160,7 @@ func TestMiddleware_NoCookieAuth_ValidBearer_Returns200(t *testing.T) {
 	t.Parallel()
 
 	store := admin.NewSessionStore(time.Now)
-	mw := admin.Middleware(testAdminToken, store, admin.WithCookieAuth(false))
+	mw := admin.Middleware(testAdminToken, store, noopLimiter(), admin.WithCookieAuth(false))
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
@@ -172,7 +177,7 @@ func TestMiddleware_HTMLClient_Failure_Redirects303(t *testing.T) {
 	t.Parallel()
 
 	store := admin.NewSessionStore(time.Now)
-	mw := admin.Middleware(testAdminToken, store)
+	mw := admin.Middleware(testAdminToken, store, noopLimiter())
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping?foo=bar", nil)
@@ -193,7 +198,7 @@ func TestMiddleware_StarStar_NotTreatedAsHTML(t *testing.T) {
 	t.Parallel()
 
 	store := admin.NewSessionStore(time.Now)
-	mw := admin.Middleware(testAdminToken, store)
+	mw := admin.Middleware(testAdminToken, store, noopLimiter())
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)
@@ -211,7 +216,7 @@ func TestMiddleware_EmptyToken_AlwaysDenies(t *testing.T) {
 	t.Parallel()
 
 	store := admin.NewSessionStore(time.Now)
-	mw := admin.Middleware("", store)
+	mw := admin.Middleware("", store, noopLimiter())
 	h := mw(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ping", nil)

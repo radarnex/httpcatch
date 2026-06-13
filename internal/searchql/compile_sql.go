@@ -71,19 +71,29 @@ func compileTermSQL(t Term) (string, []any) {
 	return pred, argList
 }
 
-// scannedTextLike returns the "LOWER(CAST(col AS TEXT)) LIKE ?" fragment for a
-// scanned (non-indexed) text/blob column. The connection-wide
+// scannedTextLike returns the "LOWER(CAST(col AS TEXT)) LIKE ? ESCAPE '\'"
+// fragment for a scanned (non-indexed) text/blob column. The connection-wide
 // case_sensitive_like(1) pragma is set so indexed columns can use their indexes
 // for prefix LIKE; scanned columns wrap the value in LOWER() to restore the
-// case-insensitive default operators expect from a free-text search.
+// case-insensitive default operators expect from a free-text search. The ESCAPE
+// clause pairs with escapeLike so that '%', '_', and '\' in search values are
+// treated as literals rather than LIKE metacharacters.
 func scannedTextLike(col string) string {
-	return "LOWER(CAST(" + col + " AS TEXT)) LIKE ?"
+	return "LOWER(CAST(" + col + " AS TEXT)) LIKE ? ESCAPE '\\'"
+}
+
+// escapeLike escapes the three LIKE metacharacters so they are treated as
+// literals when bound as a LIKE pattern with ESCAPE '\'.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 // likeNeedle returns the "%value%" bound argument for any LOWER(...)-LIKE arm.
-// The value is lowercased once here so callers do not re-lower per row.
+// The value is lowercased and LIKE-escaped so callers do not re-lower per row
+// and '%'/'_'/'\' in the search term are treated as literals.
 func likeNeedle(t Term) string {
-	return "%" + strings.ToLower(t.Value) + "%"
+	return "%" + escapeLike(strings.ToLower(t.Value)) + "%"
 }
 
 func scannedTextPredicate(col string, t Term) (string, []any) {
@@ -157,12 +167,12 @@ func headerNamedPredicate(t Term) (string, []any) {
 	needle := likeNeedle(t)
 	path := jsonHeaderPath(t.HeaderName)
 	pred := "(" +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(cr.headers, ?)) WHERE LOWER(value) LIKE ?) OR " +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(cr.headers, ?)) WHERE LOWER(value) LIKE ? ESCAPE '\\') OR " +
 		"EXISTS (SELECT 1 FROM events e_h " +
 		"WHERE e_h.correlation_id = cr.correlation_id " +
 		"AND (" +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.request_headers, ?)) WHERE LOWER(value) LIKE ?) OR " +
-		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.response_headers, ?)) WHERE LOWER(value) LIKE ?)" +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.request_headers, ?)) WHERE LOWER(value) LIKE ? ESCAPE '\\') OR " +
+		"EXISTS (SELECT 1 FROM json_each(json_extract(e_h.response_headers, ?)) WHERE LOWER(value) LIKE ? ESCAPE '\\')" +
 		"))" +
 		")"
 	return pred, []any{path, needle, path, needle, path, needle}
@@ -183,12 +193,14 @@ func jsonHeaderPath(name string) string {
 // dimension term. WildcardNone is exact match; WildcardPrefix is `LIKE 'foo%'`;
 // WildcardSubstring is `LIKE '%foo%'`. Quoted values arrive with WildcardNone
 // so the literal (including any `*` inside) round-trips to an exact match.
+// Prefix and substring arms escape LIKE metacharacters so '%', '_', and '\'
+// in the search value are treated as literals.
 func indexedPredicate(col string, t Term) (string, any) {
 	switch t.Wildcard {
 	case WildcardPrefix:
-		return col + " LIKE ?", t.Value + "%"
+		return col + " LIKE ? ESCAPE '\\'", escapeLike(t.Value) + "%"
 	case WildcardSubstring:
-		return col + " LIKE ?", "%" + t.Value + "%"
+		return col + " LIKE ? ESCAPE '\\'", "%" + escapeLike(t.Value) + "%"
 	default:
 		return col + " = ?", t.Value
 	}
@@ -256,8 +268,8 @@ func CompileSQLOrphans(q Query) (where string, args []any) {
 			needle := likeNeedle(t)
 			path := jsonHeaderPath(t.HeaderName)
 			pred := "(" +
-				"EXISTS (SELECT 1 FROM json_each(json_extract(e.request_headers, ?)) WHERE LOWER(value) LIKE ?) OR " +
-				"EXISTS (SELECT 1 FROM json_each(json_extract(e.response_headers, ?)) WHERE LOWER(value) LIKE ?)" +
+				"EXISTS (SELECT 1 FROM json_each(json_extract(e.request_headers, ?)) WHERE LOWER(value) LIKE ? ESCAPE '\\') OR " +
+				"EXISTS (SELECT 1 FROM json_each(json_extract(e.response_headers, ?)) WHERE LOWER(value) LIKE ? ESCAPE '\\')" +
 				")"
 			if t.Negated {
 				pred = "NOT (" + pred + ")"

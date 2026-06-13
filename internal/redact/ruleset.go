@@ -59,7 +59,9 @@ func NewRuleset(cfg config.RedactionConfig) (*Ruleset, error) {
 		headers[i] = strings.ToLower(h)
 	}
 	queryParams := make([]string, len(cfg.QueryParams))
-	copy(queryParams, cfg.QueryParams)
+	for i, q := range cfg.QueryParams {
+		queryParams[i] = strings.ToLower(q)
+	}
 
 	jsonPaths := make([]string, 0, len(cfg.JSONPaths))
 	for _, p := range cfg.JSONPaths {
@@ -139,10 +141,11 @@ func (r *Ruleset) IsUnredacted() bool {
 }
 
 // Redact applies all rule buckets to whichever fields the variant carries.
-// Header rules apply to every headers map the variant holds; JSON-path rules
-// apply to every body the variant holds, content-type-gated per half. Cookie
-// and query rules only apply to CapturedRequest, which is the only variant
-// that carries those fields. Rule application order is fixed:
+// Header rules apply to every headers map the variant holds. Regex rules apply
+// to every non-empty body regardless of Content-Type; JSON-path rules apply to
+// every body that parses as valid JSON regardless of declared type. Cookie and
+// query rules only apply to CapturedRequest, which is the only variant that
+// carries those fields. Rule application order is fixed:
 // cookie → header → query → JSON-path → regex.
 func (r *Ruleset) Redact(rec capture.Record) capture.Record {
 	if r.IsUnredacted() {
@@ -172,9 +175,10 @@ func (r *Ruleset) redactCapturedRequest(rec *capture.CapturedRequest) *capture.C
 
 func (r *Ruleset) redactResponseEvent(rec *capture.ResponseEvent) *capture.ResponseEvent {
 	out := shallowCopyResponseEvent(rec)
+	applyCookieRulesToHeaders(out.Headers, r.cookies)
 	applyHeaderRulesMap(out.Headers, r.headers)
 	applyJSONPathRulesBody(&out.Body, out.ContentType, r.jsonPaths, &r.redactionErrors)
-	applyRegexRulesBody(&out.Body, out.ContentType, r.regex)
+	applyRegexRulesBody(&out.Body, r.regex)
 	applyRegexRulesHeaderMap(out.Headers, r.regex)
 	return out
 }
@@ -182,15 +186,17 @@ func (r *Ruleset) redactResponseEvent(rec *capture.ResponseEvent) *capture.Respo
 func (r *Ruleset) redactOutboundEvent(rec *capture.OutboundEvent) *capture.OutboundEvent {
 	out := shallowCopyOutboundEvent(rec)
 	// Request half
+	applyCookieRulesToHeaders(out.Request.Headers, r.cookies)
 	applyHeaderRulesMap(out.Request.Headers, r.headers)
 	applyJSONPathRulesBody(&out.Request.Body, out.Request.ContentType, r.jsonPaths, &r.redactionErrors)
-	applyRegexRulesBody(&out.Request.Body, out.Request.ContentType, r.regex)
+	applyRegexRulesBody(&out.Request.Body, r.regex)
 	applyRegexRulesHeaderMap(out.Request.Headers, r.regex)
 	// Response half (only when present)
 	if out.Response != nil {
+		applyCookieRulesToHeaders(out.Response.Headers, r.cookies)
 		applyHeaderRulesMap(out.Response.Headers, r.headers)
 		applyJSONPathRulesBody(&out.Response.Body, out.Response.ContentType, r.jsonPaths, &r.redactionErrors)
-		applyRegexRulesBody(&out.Response.Body, out.Response.ContentType, r.regex)
+		applyRegexRulesBody(&out.Response.Body, r.regex)
 		applyRegexRulesHeaderMap(out.Response.Headers, r.regex)
 	}
 	return out
@@ -209,7 +215,7 @@ func applyRegexRulesCaptured(out *capture.CapturedRequest, rules []regexRule) {
 	if len(rules) == 0 {
 		return
 	}
-	bodyEligible := len(out.Body) > 0 && isTextLikeContentType(out.ContentType)
+	bodyEligible := len(out.Body) > 0
 	for _, rule := range rules {
 		if bodyEligible {
 			out.Body = rule.pattern.ReplaceAll(out.Body, redactedBytes)
@@ -223,8 +229,8 @@ func applyRegexRulesCaptured(out *capture.CapturedRequest, rules []regexRule) {
 	}
 }
 
-func applyRegexRulesBody(body *[]byte, contentType string, rules []regexRule) {
-	if len(rules) == 0 || len(*body) == 0 || !isTextLikeContentType(contentType) {
+func applyRegexRulesBody(body *[]byte, rules []regexRule) {
+	if len(rules) == 0 || len(*body) == 0 {
 		return
 	}
 	for _, rule := range rules {
@@ -246,11 +252,9 @@ func applyRegexRulesHeaderMap(headers map[string][]string, rules []regexRule) {
 	}
 }
 
-// isTextLikeContentType is the body-application gate for regex rules. It
-// accepts JSON, XML, urlencoded form bodies, any text/* type, and any
-// +json / +xml structured-syntax suffix. Binary media types (octet-stream,
-// image/*, pdf, etc.) are rejected so the regex engine never scans bytes
-// that cannot semantically contain a textual secret.
+// isTextLikeContentType reports whether the declared media type is text-like:
+// JSON, XML, urlencoded form bodies, any text/* type, or any +json / +xml
+// structured-syntax suffix.
 func isTextLikeContentType(ct string) bool {
 	media := parseMediaType(ct)
 	if media == "" {
@@ -289,20 +293,21 @@ func parseMediaType(ct string) string {
 	return media
 }
 
-// applyJSONPathRulesBody redacts JSON-path values in a body slice when the
-// content-type is JSON. Failures are best-effort.
+// applyJSONPathRulesBody redacts JSON-path values in any body that parses as
+// valid JSON, regardless of the declared Content-Type. When the body fails
+// validation and the declared type is JSON, the error counter is incremented
+// (a declared-JSON body that is not parseable is a misconfiguration worth
+// surfacing). A non-JSON-declared body that is not valid JSON is silently
+// skipped — there are no JSON paths to apply. Failures during path rewrite
+// are also best-effort.
 func applyJSONPathRulesBody(body *[]byte, contentType string, rules []string, errs *atomic.Uint64) {
-	if len(rules) == 0 {
-		return
-	}
-	if !isJSONContentType(contentType) {
-		return
-	}
-	if len(*body) == 0 {
+	if len(rules) == 0 || len(*body) == 0 {
 		return
 	}
 	if !gjson.ValidBytes(*body) {
-		errs.Add(1)
+		if isJSONContentType(contentType) {
+			errs.Add(1)
+		}
 		return
 	}
 	b := *body
@@ -336,7 +341,7 @@ func isJSONContentType(ct string) bool {
 
 func applyQueryRules(out *capture.CapturedRequest, rules []string) {
 	for key, vals := range out.Query {
-		if slices.Contains(rules, key) {
+		if slices.Contains(rules, strings.ToLower(key)) {
 			for i := range vals {
 				vals[i] = Redacted
 			}
@@ -359,27 +364,29 @@ var (
 	setCookieHeaderKey = textproto.CanonicalMIMEHeaderKey("set-cookie")
 )
 
-func applyCookieRules(out *capture.CapturedRequest, rules []cookieRule) {
-	if len(rules) == 0 || out.Headers == nil {
+// applyCookieRulesToHeaders applies cookie rules to the Cookie and Set-Cookie
+// entries in the given headers map. It mutates the map in place.
+func applyCookieRulesToHeaders(headers map[string][]string, rules []cookieRule) {
+	if len(rules) == 0 || headers == nil {
 		return
 	}
 
-	cookieKey := findHeaderKey(out.Headers, cookieHeaderKey)
-	setCookieKey := findHeaderKey(out.Headers, setCookieHeaderKey)
+	cookieKey := findHeaderKey(headers, cookieHeaderKey)
+	setCookieKey := findHeaderKey(headers, setCookieHeaderKey)
 
 	for _, rule := range rules {
 		if cookieKey != "" {
-			vals := out.Headers[cookieKey]
+			vals := headers[cookieKey]
 			for i, v := range vals {
 				vals[i] = applyRuleToCookieHeader(v, rule)
 			}
 			if allEmpty(vals) {
-				delete(out.Headers, cookieKey)
+				delete(headers, cookieKey)
 				cookieKey = ""
 			}
 		}
 		if setCookieKey != "" {
-			vals := out.Headers[setCookieKey]
+			vals := headers[setCookieKey]
 			kept := vals[:0]
 			for _, v := range vals {
 				redacted, drop := applyRuleToSetCookieHeader(v, rule)
@@ -389,14 +396,20 @@ func applyCookieRules(out *capture.CapturedRequest, rules []cookieRule) {
 				kept = append(kept, redacted)
 			}
 			if len(kept) == 0 {
-				delete(out.Headers, setCookieKey)
+				delete(headers, setCookieKey)
 				setCookieKey = ""
 			} else {
-				out.Headers[setCookieKey] = kept
+				headers[setCookieKey] = kept
 			}
 		}
 	}
+}
 
+func applyCookieRules(out *capture.CapturedRequest, rules []cookieRule) {
+	if len(rules) == 0 || out.Headers == nil {
+		return
+	}
+	applyCookieRulesToHeaders(out.Headers, rules)
 	if len(out.Cookies) > 0 {
 		out.Cookies = redactCookieSlice(out.Cookies, rules)
 	}
