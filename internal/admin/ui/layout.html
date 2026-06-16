@@ -1,0 +1,110 @@
+{{define "layout"}}<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>httpcatch</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <script src="/static/theme-init.js"></script>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app" data-density="regular" data-mstyle="filled" data-rail="shown">
+
+    <header class="topbar">
+      <a href="/ui/requests" class="brand">
+        <span class="brand-mark">/h</span>
+        httpcatch
+      </a>
+      <span class="topbar-divider"></span>
+
+      <span class="health-strip">
+        <a id="chip-unredacted" href="/ui/configuration#redaction" class="health-pill danger" hidden title="Unredacted mode — no redaction rules are configured. Captured payloads are stored as-is.">
+          unredacted
+        </a>
+        <span id="chip-dropped" class="health-pill warn" hidden title="Records dropped — capture queue is overflowing.">
+          <span class="pill-lbl">dropped</span> <b data-count>0</b>
+        </span>
+        <a id="chip-redaction-errors" href="/ui/configuration#redaction" class="health-pill warn" hidden title="Redaction errors — check logs for unparseable JSON bodies.">
+          <span class="pill-lbl">redact err</span> <b data-count>0</b>
+        </a>
+        <span id="chip-service" class="health-pill warn" hidden title="Captured requests where the service fallback chain bottomed out to 'unknown'.">
+          <span class="pill-lbl">service</span> <b data-count>0</b>
+        </span>
+        <span id="chip-correlation" class="health-pill warn" hidden title="Captured requests with a synthesized correlation id (no traceparent or X-Request-ID).">
+          <span class="pill-lbl">correlation</span> <b data-count>0</b>
+        </span>
+      </span>
+
+      <span class="topbar-divider"></span>
+      <div class="admin-menu-host">
+        <button type="button" class="icon-btn" id="admin-menu-trigger" aria-label="Settings" aria-expanded="false" title="Settings">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+        </button>
+        <div class="admin-menu-mask" id="admin-menu-mask" hidden></div>
+        <div class="admin-menu" id="admin-menu" hidden role="menu">
+          <div class="admin-menu-h">Theme</div>
+          <div class="theme-seg" role="radiogroup" aria-label="Theme">
+            <button type="button" id="theme-light" role="radio" aria-checked="true">Light</button>
+            <button type="button" id="theme-dark" role="radio" aria-checked="false">Dark</button>
+          </div>
+          <div class="admin-menu-sep"></div>
+          <div class="admin-menu-h">Timezone</div>
+          <div class="theme-seg" role="radiogroup" aria-label="Timezone">
+            <button type="button" id="tz-utc" role="radio" aria-checked="true">UTC</button>
+            <button type="button" id="tz-local" role="radio" aria-checked="false">Local</button>
+          </div>
+          <div class="admin-menu-sep"></div>
+          <form action="/auth/logout" method="POST">
+            <button type="submit" class="admin-menu-item danger">Log out</button>
+          </form>
+        </div>
+      </div>
+    </header>
+
+    <nav class="rail" aria-label="Primary">
+      <div class="rail-section">Capture</div>
+      <a href="/ui/requests" class="rail-item{{if or (eq .Page "explorer") (eq .Page "detail")}} active{{end}}">
+        <svg class="rail-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        Explorer
+      </a>
+      <a href="/ui/services" class="rail-item{{if eq .Page "services"}} active{{end}}">
+        <svg class="rail-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18Z"/></svg>
+        Services
+      </a>
+
+      <div class="rail-section">System</div>
+      <a href="/ui/configuration" class="rail-item{{if eq .Page "configuration"}} active{{end}}">
+        <svg class="rail-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="6" r="2" fill="var(--bg-rail)"/><circle cx="15" cy="12" r="2" fill="var(--bg-rail)"/><circle cx="8" cy="18" r="2" fill="var(--bg-rail)"/></svg>
+        Configuration
+      </a>
+    </nav>
+
+    <main class="main">
+      {{block "body" .}}{{end}}
+    </main>
+
+  </div>
+
+  <aside id="detail-panel" class="drawer" hidden aria-label="Request detail">
+    <div class="drawer-head">
+      <button type="button" class="icon-btn" id="detail-panel-close" aria-label="Close" title="Close (Esc)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+      <span class="path" id="detail-panel-path"></span>
+      <span class="grow"></span>
+      <a href="#" class="icon-btn" id="detail-panel-expand" title="Open full page">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14v6h6M20 10V4h-6M14 4l6 6M10 20l-6-6"/></svg>
+      </a>
+    </div>
+    <div class="drawer-body" id="detail-panel-body">
+      <div class="drawer-loading">Loading…</div>
+    </div>
+  </aside>
+  <div id="detail-panel-scrim" class="drawer-mask" hidden></div>
+
+  <script src="/static/searchql.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>{{end}}
+

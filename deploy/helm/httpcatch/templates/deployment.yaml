@@ -1,0 +1,24 @@
+{{- if not .Values.persistence.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "httpcatch.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "httpcatch.labels" . | nindent 4 }}
+  {{- include "httpcatch.annotations" (dict "ctx" .) | nindent 2 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    {{- toYaml .Values.deployment.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "httpcatch.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- include "httpcatch.podTemplateMetadata" . | nindent 6 }}
+    spec:
+      {{- include "httpcatch.podSpec" . | nindent 6 }}
+{{- end }}

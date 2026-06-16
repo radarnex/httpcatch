@@ -1,0 +1,58 @@
+httpcatch {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Capture port:  {{ include "httpcatch.fullname" . }}-capture.{{ .Release.Namespace }}.svc:{{ .Values.service.capture.port }}
+Admin port:    {{ include "httpcatch.fullname" . }}-admin.{{ .Release.Namespace }}.svc:{{ .Values.service.admin.port }}
+
+Point your proxy's mirror at the capture Service. Any HTTP request that reaches it will be captured.
+
+Admin token (treat as a secret — do not commit to source control):
+
+  kubectl --namespace {{ .Release.Namespace }} get secret {{ include "httpcatch.adminTokenSecretName" . }} \
+    -o jsonpath='{.data.{{ include "httpcatch.adminTokenSecretKey" . }}}' | base64 -d ; echo
+
+Local access to the admin UI:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "httpcatch.fullname" . }}-admin {{ .Values.service.admin.port }}:{{ .Values.service.admin.port }}
+
+Then open http://127.0.0.1:{{ .Values.service.admin.port }}/ and authenticate with the token above.
+
+{{- if .Values.ingress.enabled }}
+
+Ingress: http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}{{ .Values.ingress.path }}
+{{- end }}
+
+Security notes:
+
+* The admin port exposes /healthz and /metrics WITHOUT authentication. Anyone
+  who can reach the admin Service (or the Ingress, if enabled) can scrape
+  metrics and probe health. Restrict at the ingress layer (IP allowlists,
+  auth middleware) if the admin host is reachable beyond your operators.
+
+{{- $r := .Values.redaction }}
+{{- if not (or $r.headers $r.queryParams $r.jsonPaths $r.regex $r.cookies) }}
+
+* No redaction rules configured. Captured payloads are stored as-is. This is
+  the supported "unredacted mode" — but production deployments should configure
+  redaction rules in values.yaml under `redaction:`.
+{{- end }}
+
+{{- if .Values.persistence.enabled }}
+
+Persistence enabled:
+
+* StatefulSet, replicas=1 (pinned by SQLite single-writer constraint).
+* PVC retention: whenDeleted={{ .Values.persistence.retentionPolicy.whenDeleted }}, whenScaled={{ .Values.persistence.retentionPolicy.whenScaled }}.
+* Rolling updates have a brief downtime window because the old pod must
+  release the PVC before the new pod can attach. POST traffic mirrored
+  during that window may be lost (proxies do not retry POSTs).
+{{- else }}
+
+Persistence disabled:
+
+* Deployment, replicas={{ .Values.replicaCount }}.
+{{- if gt (int .Values.replicaCount) 1 }}
+* WARNING: each replica owns an independent memory ring buffer. The admin UI
+  served by the Service shows only the slice of captures held by whichever
+  pod the request landed on. For a consistent view, set replicaCount=1.
+{{- end }}
+{{- end }}

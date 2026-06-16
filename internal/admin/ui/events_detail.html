@@ -1,0 +1,158 @@
+{{define "body"}}
+{{if .NotFound}}
+<div class="page-head">
+  <a href="/ui/requests" class="back-link">← Back to requests</a>
+  <h1>Record not found</h1>
+</div>
+<div class="inline-error" role="alert">Record not found: {{.ID}}</div>
+{{else}}
+
+<div class="page-head">
+  <a href="/ui/requests" class="back-link">← Back</a>
+  {{if .Root.IsResponseEvent}}
+    <span class="badge badge-neutral">Response event</span>
+    <span class="mono detail-subtitle">{{if .HasRequestSibling}}correlated response{{else}}orphan response event{{end}}</span>
+  {{else if .Root.IsOutboundEvent}}
+    <span class="badge badge-neutral">Outbound event</span>
+    <span class="mono detail-subtitle">{{if .HasRequestSibling}}correlated outbound{{else}}orphan outbound event{{end}}</span>
+  {{end}}
+</div>
+
+<div class="drawer-body drawer-body-expand">
+  <dl class="meta-grid">
+    <dt>Timestamp</dt>
+    <dd>{{.Root.Timestamp.Format "2006-01-02T15:04:05.000Z07:00"}}</dd>
+    <dt>Service</dt>
+    <dd>{{.Root.Service}}<span class="field-source">{{.Root.ServiceSource}}</span></dd>
+    <dt>Correlation ID</dt>
+    <dd>{{.Root.CorrelationID}}<span class="field-source">{{.Root.CorrelationSource}}</span></dd>
+    <dt>Duration</dt>
+    <dd>{{.Root.DurationMS}}ms</dd>
+  </dl>
+
+  {{if .Root.IsResponseEvent}}
+  <div class="section-h">Response <span class="event-status status-{{.Root.StatusClass}}">{{.Root.Status}}</span></div>
+  <table class="kv-table">
+    <tbody>
+      {{range $name, $values := .Root.Headers}}
+      {{range $values}}
+      <tr><td class="k">{{$name}}</td><td class="v">{{.}}</td></tr>
+      {{end}}
+      {{end}}
+    </tbody>
+  </table>
+  {{if .Root.Body}}
+  <div class="section-h">Body
+    {{if .Root.BodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.BodyOriginalSizeLabel}} bytes</span>{{end}}
+  </div>
+  <pre class="body-block{{if .Root.IsJSON}} body-json{{end}}">{{.Root.BodyText}}</pre>
+  {{end}}
+  {{end}}
+
+  {{if .Root.IsOutboundEvent}}
+  <div class="outbound-half">
+    <div class="half-label">Request</div>
+    <div class="half-method-path">
+      <span class="m-badge m-{{.Root.OutboundMethod}}">{{.Root.OutboundMethod}}</span>
+      <span class="mono">{{.Root.OutboundPath}}</span>
+    </div>
+    <table class="kv-table">
+      <tbody>
+        {{range $name, $values := .Root.OutboundRequestHeaders}}
+        {{range $values}}
+        <tr><td class="k">{{$name}}</td><td class="v">{{.}}</td></tr>
+        {{end}}
+        {{end}}
+      </tbody>
+    </table>
+    {{if .Root.OutboundRequestBody}}
+    <div class="body-label">Body
+      {{if .Root.OutboundRequestBodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.OutboundRequestBodyOriginalSizeLabel}} bytes</span>{{end}}
+    </div>
+    <pre class="body-block{{if .Root.OutboundRequestIsJSON}} body-json{{end}}">{{.Root.OutboundRequestBodyText}}</pre>
+    {{end}}
+  </div>
+
+  <div class="outbound-half">
+    <div class="half-label">Response</div>
+    {{if .Root.HasOutboundResponse}}
+    <div class="event-status status-{{.Root.OutboundStatusClass}}">{{.Root.OutboundStatus}}</div>
+    <table class="kv-table">
+      <tbody>
+        {{range $name, $values := .Root.OutboundResponseHeaders}}
+        {{range $values}}
+        <tr><td class="k">{{$name}}</td><td class="v">{{.}}</td></tr>
+        {{end}}
+        {{end}}
+      </tbody>
+    </table>
+    {{if .Root.OutboundResponseBody}}
+    <div class="body-label">Body
+      {{if .Root.OutboundResponseBodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.OutboundResponseBodyOriginalSizeLabel}} bytes</span>{{end}}
+    </div>
+    <pre class="body-block{{if .Root.OutboundResponseIsJSON}} body-json{{end}}">{{.Root.OutboundResponseBodyText}}</pre>
+    {{end}}
+    {{else}}
+    <div class="no-response-indicator">no response — call did not complete</div>
+    {{end}}
+  </div>
+  {{end}}
+
+  <div class="section-h">Correlated events <span class="count">{{len .Events}}</span></div>
+  {{if .Events}}
+  {{range .Events}}
+    {{if eq .Kind "response_event"}}
+    <div class="timeline-event">
+      <div class="event-header">
+        <span class="event-kind-label">Response</span>
+        <span class="event-status status-{{.StatusClass}}">{{.Status}}</span>
+        <span class="event-duration">{{.DurationMS}}ms</span>
+        <span class="event-ts">{{.Timestamp.Format "15:04:05.000"}}</span>
+      </div>
+      <table class="kv-table">
+        <tbody>
+          {{range $name, $values := .Headers}}
+          {{range $values}}
+          <tr><td class="k">{{$name}}</td><td class="v">{{.}}</td></tr>
+          {{end}}
+          {{end}}
+        </tbody>
+      </table>
+      {{if .Body}}
+      <div class="body-label">Body
+        {{if .BodyTruncated}}<span class="truncation-badge">truncated — original {{.BodyOriginalSizeLabel}} bytes</span>{{end}}
+      </div>
+      <pre class="body-block{{if .IsJSON}} body-json{{end}}">{{.BodyText}}</pre>
+      {{end}}
+    </div>
+
+    {{else if eq .Kind "outbound_event"}}
+    <div class="timeline-event">
+      <div class="event-header">
+        <span class="event-kind-label">Outbound</span>
+        <span class="event-duration">{{.DurationMS}}ms</span>
+        <span class="event-ts">{{.Timestamp.Format "15:04:05.000"}}</span>
+      </div>
+      <div class="outbound-half">
+        <div class="half-label">Request</div>
+        <div class="half-method-path">
+          <span class="m-badge m-{{.OutboundMethod}}">{{.OutboundMethod}}</span>
+          <span class="mono">{{.OutboundPath}}</span>
+        </div>
+      </div>
+      {{if .HasOutboundResponse}}
+      <div class="outbound-half">
+        <div class="half-label">Response</div>
+        <div class="event-status status-{{.OutboundStatusClass}}">{{.OutboundStatus}}</div>
+      </div>
+      {{end}}
+    </div>
+    {{end}}
+  {{end}}
+  {{else}}
+  <p class="no-correlated-records">No other correlated records.</p>
+  {{end}}
+</div>
+
+{{end}}
+{{end}}

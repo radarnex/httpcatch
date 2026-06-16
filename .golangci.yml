@@ -1,0 +1,80 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+
+  settings:
+    errcheck:
+      # Cleanup-path Close calls and writes to conventionally-infallible
+      # writers are widely treated as fire-and-forget; flagging them produces
+      # only noise. Real Close errors that matter (e.g. on file writes that
+      # must be durable) are still surfaced because they aren't deferred.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Stmt).Close
+        - (*database/sql.DB).Close
+        - (*os.File).Close
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+
+    gosec:
+      excludes:
+        # G104: covered by errcheck.
+        - G104
+        # G101: pattern-matches any string containing words like "token"/"warning"
+        # against credential keywords; fires on operator-facing warning strings
+        # that name what was disabled.
+        - G101
+        # G115: integer overflow conversion; too noisy for size/limit math.
+        - G115
+        # G202: SQL string concatenation; the SQLite reader composes static
+        # query fragments and binds every user value via `?` — verified clean
+        # by the slice-7 audit (S-SINK-08, S-SINK-09).
+        - G202
+        # G203: template.HTML / template.URL; the only call sites are pre-
+        # escaped YAML (slice-8 S-CFG-09) and same-origin url.Values.Encode
+        # (slice-5 S-UI-07).
+        - G203
+        # G304: file inclusion via variable; sqlite_path and config path are
+        # operator-supplied by design.
+        - G304
+
+    gocritic:
+      disabled-checks:
+        # appendAssign fires on the deliberate "don't mutate the input slice"
+        # pattern (`allArgs := append(innerArgs, …)`).
+        - appendAssign
+        - ifElseChain
+        - singleCaseSwitch
+
+    staticcheck:
+      # Keep correctness (SA*) and simplifications (S*); drop the cosmetic
+      # quick-fix (QF*) suggestions and ST1000 (per-package doc comments,
+      # not required for internal-only packages).
+      checks:
+        - all
+        - "-QF*"
+        - "-ST1000"
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - errcheck
+          - errorlint
+          - gosec
+      - path: cmd/
+        linters:
+          - gosec

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "httpcatch.fullname" . }}-admin
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "httpcatch.componentLabels" (list . "admin") | nindent 4 }}
+  {{- include "httpcatch.annotations" (dict "ctx" . "extra" .Values.service.admin.annotations) | nindent 2 }}
+spec:
+  type: {{ .Values.service.admin.type }}
+  selector:
+    {{- include "httpcatch.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: admin
+      port: {{ .Values.service.admin.port }}
+      targetPort: admin
+      protocol: TCP

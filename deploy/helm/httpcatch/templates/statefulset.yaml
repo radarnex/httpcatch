@@ -1,0 +1,44 @@
+{{- if .Values.persistence.enabled }}
+{{- if .Values.autoscaling.enabled }}
+{{- fail "autoscaling.enabled is incompatible with persistence.enabled: the StatefulSet is pinned to a single replica because SQLite is single-writer. Disable one of them." }}
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "httpcatch.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "httpcatch.labels" . | nindent 4 }}
+  {{- include "httpcatch.annotations" (dict "ctx" .) | nindent 2 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "httpcatch.fullname" . }}-admin
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      {{- include "httpcatch.selectorLabels" . | nindent 6 }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: {{ .Values.persistence.retentionPolicy.whenDeleted }}
+    whenScaled: {{ .Values.persistence.retentionPolicy.whenScaled }}
+  template:
+    metadata:
+      {{- include "httpcatch.podTemplateMetadata" . | nindent 6 }}
+    spec:
+      {{- include "httpcatch.podSpec" . | nindent 6 }}
+  {{- if not .Values.persistence.existingClaim }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "httpcatch.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}
