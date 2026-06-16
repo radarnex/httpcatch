@@ -6,6 +6,10 @@ updates:
       interval: "monthly"
     cooldown:
       default-days: 7
+    groups:
+      gomod:
+        patterns:
+          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -13,6 +17,10 @@ updates:
       interval: "monthly"
     cooldown:
       default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/"
@@ -20,3 +28,12 @@ updates:
       interval: "monthly"
     cooldown:
       default-days: 7
+    ignore:
+      - dependency-name: "golang"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+    groups:
+      docker:
+        patterns:
+          - "*"
