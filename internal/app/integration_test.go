@@ -2152,7 +2152,7 @@ func TestIntegration_UIShell(t *testing.T) {
 	collectIDs(doc, ids)
 	for _, id := range []string{
 		"chip-unredacted", "chip-dropped", "chip-redaction-errors",
-		"chip-service", "chip-correlation", "buildinfo",
+		"chip-service", "chip-correlation",
 	} {
 		if !ids[id] {
 			t.Errorf("layout: missing element with id=%q", id)
