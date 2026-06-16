@@ -204,7 +204,6 @@ func TestValidate_FieldSpecificErrors(t *testing.T) {
 		{"negative memory capacity", func(c *Config) { c.Sinks.MemoryCapacity = -3 }, "sinks.memory_capacity"},
 		{"zero session ttl", func(c *Config) { c.Admin.SessionTTL = 0 }, "admin.session_ttl"},
 		{"negative session ttl", func(c *Config) { c.Admin.SessionTTL = -time.Second }, "admin.session_ttl"},
-		{"short admin token", func(c *Config) { c.Admin.Token = "short" }, "admin.token"},
 	}
 
 	for _, tt := range tests {

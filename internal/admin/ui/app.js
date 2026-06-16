@@ -1004,6 +1004,92 @@ function initCurlCopy(root) {
     return null;
   }
 
+  // ── Time-window persistence across navigation ────────────────────
+  // The explorer's time window lives in the URL (since/until params, or the
+  // live=1 hash). Plain nav links to the explorer carry no window, so leaving
+  // for Services/Configuration and returning would reset to the default. We
+  // remember the active window per session and re-apply it when the operator
+  // navigates back, matching how observability tools treat the time range as
+  // investigation context. Presets are stored by name and re-evaluated
+  // relative to now on restore; absolute ranges keep their exact bounds.
+  var TIME_WINDOW_KEY = "httpcatch:time-window";
+
+  function persistTimeWindow() {
+    if (!document.getElementById("filter-form")) return;
+    try {
+      var cb = document.getElementById("live-tail-checkbox");
+      if ((cb && cb.checked) || window.location.hash.indexOf("live=1") !== -1) {
+        sessionStorage.setItem(TIME_WINDOW_KEY, JSON.stringify({ type: "live" }));
+        return;
+      }
+      var since = document.getElementById("f-since");
+      var until = document.getElementById("f-until");
+      if (since && until && since.value && until.value) {
+        var s = new Date(since.value);
+        var u = new Date(until.value);
+        if (!isNaN(s.getTime()) && !isNaN(u.getTime())) {
+          var preset = matchPresetMs(u.getTime() - s.getTime());
+          var desc = preset
+            ? { type: "preset", preset: preset }
+            : { type: "absolute", since: since.value, until: until.value };
+          sessionStorage.setItem(TIME_WINDOW_KEY, JSON.stringify(desc));
+          return;
+        }
+      }
+      sessionStorage.removeItem(TIME_WINDOW_KEY);
+    } catch (e) { /* storage unavailable; fall back to default window */ }
+  }
+
+  function readStoredWindow() {
+    try {
+      var raw = sessionStorage.getItem(TIME_WINDOW_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  // Builds an explorer URL that reproduces the stored window, or null when
+  // there is nothing to restore (so the link's default href is used).
+  function explorerURLForWindow(desc) {
+    var base = "/ui/requests";
+    if (!desc) return null;
+    if (desc.type === "live") return base + "#live=1";
+    if (desc.type === "preset") {
+      var ms = parseShorthand(desc.preset);
+      if (ms <= 0) return null;
+      var until = new Date();
+      var since = new Date(until.getTime() - ms);
+      var p = new URLSearchParams();
+      p.set("since", rfc3339(since));
+      p.set("until", rfc3339(until));
+      return base + "?" + p.toString();
+    }
+    if (desc.type === "absolute" && desc.since && desc.until) {
+      var pa = new URLSearchParams();
+      pa.set("since", desc.since);
+      pa.set("until", desc.until);
+      return base + "?" + pa.toString();
+    }
+    return null;
+  }
+
+  function wireTimeWindowRestore() {
+    var links = document.querySelectorAll(
+      'a.brand[href="/ui/requests"], a.rail-item[href="/ui/requests"]'
+    );
+    if (!links.length) return;
+    links.forEach(function (link) {
+      link.addEventListener("click", function (e) {
+        // Capture the latest window if we're leaving the explorer itself
+        // (e.g. live tail was toggled on after the page loaded).
+        persistTimeWindow();
+        var url = explorerURLForWindow(readStoredWindow());
+        if (!url) return;
+        e.preventDefault();
+        window.location.assign(url);
+      });
+    });
+  }
+
   // ── Side-panel detail (drawer) ───────────────────────────────────
   function cssEscape(s) {
     if (window.CSS && CSS.escape) return CSS.escape(s);
@@ -2097,6 +2183,8 @@ function initCurlCopy(root) {
   // ── Bootstrapping ────────────────────────────────────────────────
   document.addEventListener("DOMContentLoaded", function () {
     refreshTriggerLabel();
+    persistTimeWindow();
+    wireTimeWindowRestore();
     wirePicker();
     wireSearch();
     wireSidePanel();

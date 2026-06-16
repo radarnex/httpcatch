@@ -26,7 +26,7 @@
 <div class="drawer-tabs" id="detail-tabs" role="tablist">
   <button type="button" class="drawer-tab on" role="tab" data-tab="overview" aria-selected="true">Overview</button>
   <button type="button" class="drawer-tab" role="tab" data-tab="request" aria-selected="false">Request <span class="tab-badge">{{len .Root.Headers}}</span></button>
-  <button type="button" class="drawer-tab" role="tab" data-tab="response" aria-selected="false">Response</button>
+  <button type="button" class="drawer-tab" role="tab" data-tab="response" aria-selected="false">Response{{with .FirstResponse}} <span class="tab-badge">{{len .Headers}}</span>{{end}}</button>
   <button type="button" class="drawer-tab" role="tab" data-tab="raw" aria-selected="false">Raw</button>
 </div>
 

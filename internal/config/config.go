@@ -27,10 +27,6 @@ const (
 	DefaultLogFormat         = "text"
 	LogFormatJSON            = "json"
 
-	// MinAdminTokenLength is the minimum number of characters required when an
-	// admin token is configured. An empty token disables bearer auth entirely.
-	MinAdminTokenLength = 32
-
 	DefaultReadHeaderTimeout = 10 * time.Second
 	DefaultReadTimeout       = 60 * time.Second
 	DefaultWriteTimeout      = 30 * time.Second
@@ -712,9 +708,6 @@ func (c Config) Validate() error {
 	}
 	if c.Admin.SessionTTL <= 0 {
 		errs = append(errs, fmt.Errorf("admin.session_ttl: must be > 0, got %s", c.Admin.SessionTTL))
-	}
-	if c.Admin.Token != "" && len(c.Admin.Token) < MinAdminTokenLength {
-		errs = append(errs, fmt.Errorf("admin.token: must be at least %d characters (got %d); generate with: openssl rand -base64 32", MinAdminTokenLength, len(c.Admin.Token)))
 	}
 	if c.Inspect.QueryTimeout < 0 {
 		errs = append(errs, fmt.Errorf("inspect.query_timeout: must be >= 0, got %s", c.Inspect.QueryTimeout))

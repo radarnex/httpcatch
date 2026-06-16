@@ -39,7 +39,7 @@ httpcatch draws four boundaries.
 
 **Network → capture port.** Untrusted ingress. Anything that can reach the **capture port** can submit captured traffic. The default bind is `0.0.0.0:8080`; deployers narrow it via `capture_bind`. The port enforces server-level read/write/header/idle timeouts and a per-request body cap before the payload is buffered or queued.
 
-**Network → admin port.** Authenticated ingress. The default bind is loopback. Binding off-loopback requires either a configured **admin token** (length ≥ 32 chars) or an explicit insecure-mode opt-in; the server refuses to start otherwise. Bearer comparison is constant-time and length-agnostic. Session cookies are issued by the form-login flow and bound to per-IP and global token-bucket rate limits. Cross-site POSTs to the auth endpoints are blocked by an Origin / `Sec-Fetch-Site` check before any token comparison runs.
+**Network → admin port.** Authenticated ingress. The default bind is loopback. Binding off-loopback requires either a configured **admin token** or an explicit insecure-mode opt-in; the server refuses to start otherwise. Bearer comparison is constant-time and length-agnostic. Session cookies are issued by the form-login flow and bound to per-IP and global token-bucket rate limits. Cross-site POSTs to the auth endpoints are blocked by an Origin / `Sec-Fetch-Site` check before any token comparison runs.
 
 **Capture port → pipeline.** Same process, but the boundary is interesting: the pipeline must not let an attacker-shaped payload corrupt internal state. Worker goroutines recover from redaction panics so a malformed rule on one record cannot shrink the worker pool. The bounded queue isolates per-request memory cost from total in-flight memory cost.
 
@@ -123,7 +123,7 @@ Caveat: body, header, and path rendering in `<pre>` blocks does not strip contro
 
 ### Admin authentication
 
-The bearer comparison in `checkBearer` is `subtle.ConstantTimeCompare` with no length short-circuit, so a length mismatch reveals no information beyond the constant-time path. The admin token has a minimum length of 32 characters enforced at config-load time. Form-login session cookies are issued with `HttpOnly`, `SameSite=Lax`, and `Secure` when the configured `session_secure: true`; the binary emits a startup warning when the bind is non-loopback and `session_secure: false` because the cookie can be sniffed on the wire in that combination. `session_ttl` is validated `> 0`.
+The bearer comparison in `checkBearer` is `subtle.ConstantTimeCompare` with no length short-circuit, so a length mismatch reveals no information beyond the constant-time path. Form-login session cookies are issued with `HttpOnly`, `SameSite=Lax`, and `Secure` when the configured `session_secure: true`; the binary emits a startup warning when the bind is non-loopback and `session_secure: false` because the cookie can be sniffed on the wire in that combination. `session_ttl` is validated `> 0`.
 
 A token-bucket rate limiter gates every auth attempt — per-IP capacity 5 refilled across 30 seconds, global capacity 20 refilled across 1 second. Bucket sweeps evict idle IPs after 10 minutes. Failures are counted by reason in `httpcatch_auth_failures_total{reason="invalid_token"|"rate_limited"|"csrf_blocked"}`.
 
