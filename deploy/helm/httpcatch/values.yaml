@@ -1,5 +1,5 @@
 image:
-  registry: docker.io
+  registry: ghcr.io
   repository: radarnex/httpcatch
   tag: ""
   digest: ""

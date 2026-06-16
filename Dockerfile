@@ -31,6 +31,10 @@ RUN mkdir -p /out/var/lib/httpcatch
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
+LABEL org.opencontainers.image.source="https://github.com/radarnex/httpcatch" \
+      org.opencontainers.image.description="HTTP traffic capture and inspection tool" \
+      org.opencontainers.image.licenses="MIT"
+
 COPY --from=build /out/httpcatch /usr/local/bin/httpcatch
 COPY --from=build --chown=nonroot:nonroot /out/var/lib/httpcatch /var/lib/httpcatch
 
