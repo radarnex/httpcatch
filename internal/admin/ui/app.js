@@ -212,7 +212,7 @@ function initCurlCopy(root) {
   });
 }
 
-// ── Status polling: health pills + buildinfo ───────────────────────
+// ── Status polling: health pills ───────────────────────
 (function () {
   var handle = null;
   var INTERVAL_MS = 5000;
@@ -236,14 +236,6 @@ function initCurlCopy(root) {
     var span = el.querySelector("[data-count]");
     if (span) span.textContent = String(n);
     lastApplied[key] = n;
-  }
-
-  function setText(selector, text) {
-    if (lastApplied[selector] === text) return;
-    var el = document.querySelector(selector);
-    if (!el) return;
-    el.textContent = text;
-    lastApplied[selector] = text;
   }
 
   function refresh() {
@@ -275,8 +267,6 @@ function initCurlCopy(root) {
         var corrCount = data.counters.captured_without_correlation_total;
         setHidden("chip-correlation", corrCount <= 0);
         setCount("chip-correlation", corrCount);
-
-        setText("#buildinfo", "httpcatch " + data.version + " · built " + data.build_time);
       })
       .catch(function (err) {
         console.error("httpcatch: /status fetch failed:", err);
@@ -383,7 +373,7 @@ function initCurlCopy(root) {
     var pathS = escapeHTML(row.path || "");
 
     return (
-      '<tr class="' + escapeHTML(rowClass) + ' live-tail-new" data-timestamp="' + escapeHTML(ts) + '" data-id="' + escapeHTML(id) + '">' +
+      '<tr class="' + escapeHTML(rowClass) + ' live-tail-new" data-timestamp="' + escapeHTML(ts) + '" data-id="' + escapeHTML(id) + '" tabindex="0" aria-label="Open detail for ' + escapeHTML((row.method || "") + " " + (row.path || "")) + '">' +
       '<td class="col-time"><a href="' + href + '" class="row-link mono">' + escapeHTML(displayTs) + "</a></td>" +
       '<td class="col-kind">' + badgeHTML + "</td>" +
       '<td class="col-svc"><span class="svc-chip"><span class="dot"></span>' + svc + "</span></td>" +
@@ -1053,8 +1043,18 @@ function initCurlCopy(root) {
     if (!panel || !tbody) return;
 
     var currentID = null;
+    var lastFocus = null;
+
+    function focusablesIn(el) {
+      return Array.prototype.slice.call(el.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter(function (n) { return n.offsetParent !== null || n === document.activeElement; });
+    }
 
     function openWith(id, url) {
+      if (panel.hasAttribute("hidden")) {
+        lastFocus = document.activeElement;
+      }
       currentID = id;
       panel.removeAttribute("hidden");
       scrim.removeAttribute("hidden");
@@ -1067,6 +1067,8 @@ function initCurlCopy(root) {
       });
       var row = tbody.querySelector('tr[data-id="' + cssEscape(id) + '"]');
       if (row) row.classList.add("row-active");
+
+      if (closeBtn) closeBtn.focus();
 
       fetch(url, { credentials: "same-origin", headers: { Accept: "text/html" } })
         .then(function (res) {
@@ -1087,12 +1089,21 @@ function initCurlCopy(root) {
     }
 
     function close() {
+      if (panel.hasAttribute("hidden")) return;
       panel.setAttribute("hidden", "");
       scrim.setAttribute("hidden", "");
+      var restoreTo = currentID
+        ? tbody.querySelector('tr[data-id="' + cssEscape(currentID) + '"]')
+        : null;
       currentID = null;
       tbody.querySelectorAll("tr.row-active").forEach(function (r) {
         r.classList.remove("row-active");
       });
+      var target = restoreTo || lastFocus;
+      lastFocus = null;
+      if (target && document.contains(target) && typeof target.focus === "function") {
+        target.focus();
+      }
     }
 
     closeBtn.addEventListener("click", close);
@@ -1100,10 +1111,30 @@ function initCurlCopy(root) {
     document.addEventListener("keydown", function (e) {
       if (e.key !== "Escape") return;
       if (panel.hasAttribute("hidden")) return;
-      var t = e.target;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       close();
     });
+
+    // Trap Tab within the open drawer (it is a modal aside).
+    panel.addEventListener("keydown", function (e) {
+      if (e.key !== "Tab") return;
+      var items = focusablesIn(panel);
+      if (!items.length) return;
+      var first = items[0];
+      var last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    });
+
+    window.__detailPanel = {
+      open: openWith,
+      close: close,
+      isOpen: function () { return !panel.hasAttribute("hidden"); },
+    };
 
     tbody.addEventListener("click", function (e) {
       if (e.button !== 0) return;
@@ -1135,6 +1166,16 @@ function initCurlCopy(root) {
         return;
       }
       openWith(id, url);
+    });
+
+    tbody.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+      var row = e.target.closest("tr[data-id]");
+      if (!row || row !== e.target) return;
+      var link = row.querySelector("a.row-link");
+      if (!link) return;
+      e.preventDefault();
+      openWith(row.getAttribute("data-id"), link.getAttribute("href"));
     });
   }
 
@@ -1170,7 +1211,11 @@ function initCurlCopy(root) {
   }
 
   function escapeHTMLLocal(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   // ── Histogram (stacked by status class) ──────────────────────────
@@ -2057,6 +2102,7 @@ function initCurlCopy(root) {
     wireSidePanel();
     wireSavedViews();
     wireExport();
+    wireKeyboard();
     reformatTimestamps(document);
     fetchAggregationAndRender();
 
@@ -2103,6 +2149,145 @@ function initCurlCopy(root) {
           }, 1200);
         });
       });
+    });
+  }
+
+  // ── Global keyboard shortcuts ────────────────────────────────────
+  var SHORTCUTS = [
+    { keys: ["/"], label: "Focus search" },
+    { keys: ["j", "k"], label: "Next / previous row" },
+    { keys: ["Enter"], label: "Open focused row" },
+    { keys: ["g", "e"], label: "Go to Explorer" },
+    { keys: ["g", "s"], label: "Go to Services" },
+    { keys: ["g", "c"], label: "Go to Configuration" },
+    { keys: ["?"], label: "Toggle this help" },
+    { keys: ["Esc"], label: "Close drawer / menu / help" },
+  ];
+
+  function isEditableTarget(t) {
+    if (!t) return false;
+    if (t.isContentEditable) return true;
+    var tag = t.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+
+  function buildShortcutsOverlay() {
+    var existing = document.getElementById("shortcuts-overlay");
+    if (existing) return existing;
+    var overlay = document.createElement("div");
+    overlay.id = "shortcuts-overlay";
+    overlay.className = "shortcuts-overlay";
+    overlay.setAttribute("hidden", "");
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "Keyboard shortcuts");
+
+    var card = document.createElement("div");
+    card.className = "shortcuts-card";
+    var rows = SHORTCUTS.map(function (s) {
+      var combo = s.keys.map(function (k) { return "<kbd>" + escapeHTMLLocal(k) + "</kbd>"; }).join("<span class=\"sc-then\">then</span>");
+      return '<div class="sc-row"><span class="sc-keys">' + combo + '</span><span class="sc-label">' + escapeHTMLLocal(s.label) + "</span></div>";
+    }).join("");
+    card.innerHTML = '<div class="sc-head">Keyboard shortcuts</div>' + rows;
+    overlay.appendChild(card);
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.setAttribute("hidden", "");
+    });
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function toggleShortcutsOverlay() {
+    var overlay = buildShortcutsOverlay();
+    if (overlay.hasAttribute("hidden")) {
+      overlay.removeAttribute("hidden");
+    } else {
+      overlay.setAttribute("hidden", "");
+    }
+  }
+
+  function moveRowFocus(dir) {
+    var tbody = document.getElementById("requests-tbody");
+    if (!tbody) return false;
+    var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr[data-id]"));
+    if (!rows.length) return false;
+    var active = document.activeElement;
+    var idx = rows.indexOf(active && active.closest ? active.closest("tr[data-id]") : null);
+    var next;
+    if (idx === -1) {
+      next = dir > 0 ? rows[0] : rows[rows.length - 1];
+    } else {
+      next = rows[idx + dir];
+    }
+    if (!next) return true;
+    next.focus();
+    if (next.scrollIntoView) next.scrollIntoView({ block: "nearest" });
+    return true;
+  }
+
+  function wireKeyboard() {
+    var gPending = false;
+    var gTimer = 0;
+
+    function clearG() {
+      gPending = false;
+      if (gTimer) { clearTimeout(gTimer); gTimer = 0; }
+    }
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        var overlay = document.getElementById("shortcuts-overlay");
+        if (overlay && !overlay.hasAttribute("hidden")) {
+          overlay.setAttribute("hidden", "");
+          return;
+        }
+      }
+
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (isEditableTarget(e.target)) return;
+
+      if (gPending) {
+        var dest = null;
+        if (e.key === "e") dest = "/ui/requests";
+        else if (e.key === "s") dest = "/ui/services";
+        else if (e.key === "c") dest = "/ui/configuration";
+        clearG();
+        if (dest) {
+          e.preventDefault();
+          window.location.href = dest;
+          return;
+        }
+      }
+
+      if (e.key === "/") {
+        var search = document.getElementById("search-input");
+        if (search) {
+          e.preventDefault();
+          search.focus();
+        }
+        return;
+      }
+
+      if (e.key === "?") {
+        e.preventDefault();
+        toggleShortcutsOverlay();
+        return;
+      }
+
+      if (e.key === "j") {
+        if (moveRowFocus(1)) e.preventDefault();
+        return;
+      }
+      if (e.key === "k") {
+        if (moveRowFocus(-1)) e.preventDefault();
+        return;
+      }
+
+      if (e.key === "g") {
+        gPending = true;
+        if (gTimer) clearTimeout(gTimer);
+        gTimer = setTimeout(clearG, 1200);
+      }
     });
   }
 })();

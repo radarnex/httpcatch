@@ -40,9 +40,9 @@ func CompilePredicate(q Query) Predicate {
 }
 
 func matchTerm(t *Term, bodyNeedle []byte, r *capture.CapturedRequest) bool {
-	if t.Field == FieldStatus {
-		// status depends on the events join the memory reader does not
-		// perform; the predicate accepts and lets the reader filter, whether
+	if t.Field == FieldStatus || t.Field == FieldHasEvents {
+		// status and has_events depend on the events join the memory reader does
+		// not perform; the predicate accepts and lets the reader filter, whether
 		// the term is positive or negated.
 		return true
 	}

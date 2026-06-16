@@ -36,6 +36,7 @@ const (
 	FieldStatus        Field = "status"
 	FieldSourceIP      Field = "source_ip"
 	FieldCorrelationID Field = "correlation_id"
+	FieldHasEvents     Field = "has_events"
 )
 
 // knownFields lists every key accepted by Parse. The `header.<name>:` form is
@@ -51,6 +52,7 @@ var knownFields = map[string]Field{
 	string(FieldStatus):        FieldStatus,
 	string(FieldSourceIP):      FieldSourceIP,
 	string(FieldCorrelationID): FieldCorrelationID,
+	string(FieldHasEvents):     FieldHasEvents,
 }
 
 // indexedFields are the fields whose default match is exact and whose leading
@@ -68,6 +70,7 @@ var structuredFields = map[Field]struct{}{
 	FieldStatus:        {},
 	FieldSourceIP:      {},
 	FieldCorrelationID: {},
+	FieldHasEvents:     {},
 }
 
 // Wildcard classifies the wildcard shape of a term's value. Parse assigns it
@@ -103,6 +106,10 @@ type Term struct {
 	// compilers can dispatch on the same parsed form (exact vs class) without
 	// re-parsing the value string.
 	StatusFilter *StatusFilter
+
+	// HasEvents is populated by Parse when Field == FieldHasEvents, carrying the
+	// parsed boolean so compilers do not re-parse the value string.
+	HasEvents *bool
 }
 
 // StatusFilter holds a parsed status filter — either an exact code or a class
@@ -332,6 +339,18 @@ func parseToken(raw string) (Term, error) {
 			return Term{}, &ParseError{Token: raw, Message: err.Error()}
 		}
 		term.StatusFilter = sf
+
+	case FieldHasEvents:
+		var b bool
+		switch strings.ToLower(value) {
+		case "true":
+			b = true
+		case "false":
+			b = false
+		default:
+			return Term{}, &ParseError{Token: raw, Message: fmt.Sprintf("has_events must be true or false, got %q", value)}
+		}
+		term.HasEvents = &b
 	}
 
 	return term, nil

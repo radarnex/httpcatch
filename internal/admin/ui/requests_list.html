@@ -161,7 +161,7 @@
     </thead>
     <tbody id="requests-tbody">
       {{range .Rows}}
-      <tr class="{{if ne .Kind "request"}}row-orphan{{end}}" data-timestamp="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}" data-id="{{.ID}}">
+      <tr class="{{if ne .Kind "request"}}row-orphan{{end}}" data-timestamp="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}" data-id="{{.ID}}" tabindex="0" aria-label="Open detail for {{.Method}} {{.Path}}">
         <td class="col-time">
           <a href="/ui/requests/{{.ID}}" class="row-link mono">{{.Timestamp.Format "2006-01-02 15:04:05"}}</a>
         </td>

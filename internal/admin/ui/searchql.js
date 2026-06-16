@@ -19,6 +19,7 @@
   var FIELD_STATUS = "status";
   var FIELD_SOURCE_IP = "source_ip";
   var FIELD_CORRELATION_ID = "correlation_id";
+  var FIELD_HAS_EVENTS = "has_events";
 
   var KNOWN_FIELDS = {
     host: FIELD_HOST,
@@ -30,11 +31,13 @@
     status: FIELD_STATUS,
     source_ip: FIELD_SOURCE_IP,
     correlation_id: FIELD_CORRELATION_ID,
+    has_events: FIELD_HAS_EVENTS,
   };
 
   var INDEXED_FIELDS = { host: true, path: true, service: true };
   var STRUCTURED_FIELDS = {
     method: true, status: true, source_ip: true, correlation_id: true,
+    has_events: true,
   };
   var CANONICAL_METHODS = {
     GET: true, HEAD: true, POST: true, PUT: true, DELETE: true,
@@ -222,6 +225,12 @@
       var sf = parseStatusValue(pv4.value);
       if (sf.error) return { error: { token: raw, message: sf.error } };
       term.statusFilter = sf;
+    } else if (field === FIELD_HAS_EVENTS) {
+      var lv = pv4.value.toLowerCase();
+      if (lv !== "true" && lv !== "false") {
+        return { error: { token: raw, message: "has_events must be true or false, got \"" + pv4.value + "\"" } };
+      }
+      term.value = lv;
     }
     return { term: term };
   }

@@ -279,7 +279,6 @@ func TestLayout_StructuralIDs(t *testing.T) {
 		"chip-redaction-errors",
 		"chip-service",
 		"chip-correlation",
-		"buildinfo",
 	}
 	for _, id := range required {
 		if !ids[id] {

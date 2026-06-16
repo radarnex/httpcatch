@@ -50,14 +50,14 @@ body {
 .login-submit {
   width: 100%;
   padding: 9px;
-  background: var(--accent);
-  color: #fff;
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
   border-radius: 6px;
   font-size: 14px;
   font-weight: 500;
   border: 0;
 }
-.login-submit:hover { background: var(--accent-2); }
+.login-submit:hover { background: var(--btn-primary-bg-hover); }
 .login-error {
   background: rgba(225,29,72,.06);
   border: 1px solid rgba(225,29,72,.30);

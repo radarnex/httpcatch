@@ -252,6 +252,72 @@ func TestSQLiteReader_ServicesSeen_SinceFilter(t *testing.T) {
 	}
 }
 
+func TestSQLiteReader_ServiceStats(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	mustWriteSQL(t, ctx, s, sqliteRequest("a1", base, "api", "GET", "/", "c1", "x"))
+	mustWriteSQL(t, ctx, s, sqliteRequest("a2", base.Add(time.Second), "api", "GET", "/x", "c2", "x"))
+	mustWriteSQL(t, ctx, s, &capture.ResponseEvent{ID: "ae1", Timestamp: base.Add(2 * time.Second), CorrelationID: "c1", Service: "api", Status: 200, Headers: map[string][]string{}, Body: []byte{}})
+	mustWriteSQL(t, ctx, s, &capture.ResponseEvent{ID: "ae2", Timestamp: base.Add(3 * time.Second), CorrelationID: "c2", Service: "api", Status: 404, Headers: map[string][]string{}, Body: []byte{}})
+	mustWriteSQL(t, ctx, s, sqliteRequest("w1", base.Add(4*time.Second), "web", "GET", "/", "c3", "x"))
+
+	stats, err := s.ServiceStats(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ServiceStats: %v", err)
+	}
+	if len(stats) != 2 {
+		t.Fatalf("ServiceStats: got %d want 2 (%+v)", len(stats), stats)
+	}
+	api, web := stats[0], stats[1]
+	if api.Name != "api" || web.Name != "web" {
+		t.Fatalf("ServiceStats order: got %q,%q want api,web", api.Name, web.Name)
+	}
+	if api.Requests != 2 {
+		t.Errorf("api.Requests: got %d want 2", api.Requests)
+	}
+	if api.S2xx != 1 || api.S4xx != 1 || api.S3xx != 0 || api.S5xx != 0 || api.Other != 0 {
+		t.Errorf("api status mix: got 2xx=%d 3xx=%d 4xx=%d 5xx=%d other=%d want 2xx=1 4xx=1",
+			api.S2xx, api.S3xx, api.S4xx, api.S5xx, api.Other)
+	}
+	if !api.LastSeen.Equal(base.Add(3 * time.Second)) {
+		t.Errorf("api.LastSeen: got %v want %v", api.LastSeen, base.Add(3*time.Second))
+	}
+	if web.Requests != 1 || web.S2xx+web.S3xx+web.S4xx+web.S5xx+web.Other != 0 {
+		t.Errorf("web stats: got requests=%d responses=%d want 1,0",
+			web.Requests, web.S2xx+web.S3xx+web.S4xx+web.S5xx+web.Other)
+	}
+}
+
+func TestSQLiteReader_ServiceStats_SinceFilter(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestSink(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	mustWriteSQL(t, ctx, s, sqliteRequest("old", base.Add(-time.Hour), "old-service", "GET", "/", "c1", "x"))
+	mustWriteSQL(t, ctx, s, sqliteRequest("new", base.Add(time.Minute), "new-service", "GET", "/", "c2", "x"))
+
+	stats, err := s.ServiceStats(ctx, base)
+	if err != nil {
+		t.Fatalf("ServiceStats: %v", err)
+	}
+	if len(stats) != 1 || stats[0].Name != "new-service" {
+		t.Fatalf("ServiceStats since filter: got %+v want [new-service]", stats)
+	}
+}
+
+func mustWriteSQL(t *testing.T, ctx context.Context, s *SQLiteSink, r capture.Record) {
+	t.Helper()
+	if err := s.Write(ctx, r); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+}
+
 func TestSQLiteReader_ReadDetail_NotFound(t *testing.T) {
 	t.Parallel()
 

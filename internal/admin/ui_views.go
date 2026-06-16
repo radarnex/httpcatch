@@ -740,12 +740,28 @@ func renderDetailNotFound(w http.ResponseWriter, id string) {
 type servicesPageData struct {
 	Page     string
 	Error    string
-	Services []string
+	Services []serviceCard
+}
+
+// serviceCard is the rendered view-model for one service on the Services page.
+type serviceCard struct {
+	Name      string
+	Requests  int
+	LastSeen  string // relative ("2m ago"); empty when never seen
+	Responses int    // total correlated responses across all classes
+	Segments  []statusSegment
+}
+
+// statusSegment is one class slice of a service's status-mix bar.
+type statusSegment struct {
+	Class string  // "2xx".."5xx" or "other"
+	Count int
+	Pct   float64 // width percentage, 0..100
 }
 
 // servicesUIHandler returns an http.HandlerFunc for GET /ui/services.
 // It lists the services seen by either reader over the last `servicesSince`
-// window, sorted alphabetically.
+// window with per-service request count, last-seen, and status mix.
 func servicesUIHandler(rs ReadSources) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := withInspectTimeout(r.Context(), rs.QueryTimeout)
@@ -757,12 +773,15 @@ func servicesUIHandler(rs ReadSources) http.HandlerFunc {
 			rd = rs.SQLite
 		}
 		if rd != nil {
-			since := time.Now().Add(-servicesSince)
-			svcs, err := rd.ServicesSeen(ctx, since)
+			now := time.Now()
+			stats, err := rd.ServiceStats(ctx, now.Add(-servicesSince))
 			if err != nil {
 				data.Error = fmt.Sprintf("read error: %v", err)
 			} else {
-				data.Services = svcs
+				data.Services = make([]serviceCard, 0, len(stats))
+				for _, st := range stats {
+					data.Services = append(data.Services, buildServiceCard(st, now))
+				}
 			}
 		}
 
@@ -770,6 +789,56 @@ func servicesUIHandler(rs ReadSources) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		_ = servicesTmpl.ExecuteTemplate(w, "layout", data)
+	}
+}
+
+// buildServiceCard derives the Services-page view-model from a ServiceStat,
+// computing the status-mix segments and a relative last-seen string.
+func buildServiceCard(st inspect.ServiceStat, now time.Time) serviceCard {
+	card := serviceCard{
+		Name:     st.Name,
+		Requests: st.Requests,
+		LastSeen: relativeTime(st.LastSeen, now),
+	}
+	classes := []struct {
+		name  string
+		count int
+	}{
+		{"2xx", st.S2xx}, {"3xx", st.S3xx}, {"4xx", st.S4xx},
+		{"5xx", st.S5xx}, {"other", st.Other},
+	}
+	card.Responses = st.S2xx + st.S3xx + st.S4xx + st.S5xx + st.Other
+	if card.Responses > 0 {
+		for _, c := range classes {
+			if c.count == 0 {
+				continue
+			}
+			card.Segments = append(card.Segments, statusSegment{
+				Class: c.name,
+				Count: c.count,
+				Pct:   float64(c.count) / float64(card.Responses) * 100,
+			})
+		}
+	}
+	return card
+}
+
+// relativeTime renders the gap between t and now as a coarse human string.
+// A zero t yields the empty string.
+func relativeTime(t, now time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := now.Sub(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 

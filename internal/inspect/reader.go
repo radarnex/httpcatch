@@ -90,6 +90,21 @@ type Aggregation struct {
 	Buckets []HistogramBucket `json:"buckets"`
 }
 
+// ServiceStat summarizes one service's activity over a time window. Requests
+// counts captured inbound requests; LastSeen is the most recent record of any
+// kind carrying the service. The S2xx..S5xx fields count correlated response
+// events by status class; Other counts responses with an out-of-range status.
+type ServiceStat struct {
+	Name     string    `json:"name"`
+	Requests int       `json:"requests"`
+	LastSeen time.Time `json:"last_seen"`
+	S2xx     int       `json:"s2xx"`
+	S3xx     int       `json:"s3xx"`
+	S4xx     int       `json:"s4xx"`
+	S5xx     int       `json:"s5xx"`
+	Other    int       `json:"other"`
+}
+
 // Reader is the read-side seam implemented by MemorySink and SQLiteSink.
 // StdoutSink does not implement Reader. App composition wires whichever
 // readers are enabled into the inspect handler.
@@ -105,6 +120,11 @@ type Reader interface {
 	// ServicesSeen returns the distinct list of services observed since the
 	// given time, ordered alphabetically. A zero since means "all time".
 	ServicesSeen(ctx context.Context, since time.Time) ([]string, error)
+
+	// ServiceStats returns per-service activity since the given time (zero
+	// means all time), ordered alphabetically by name. The set of services
+	// matches ServicesSeen over the same window.
+	ServiceStats(ctx context.Context, since time.Time) ([]ServiceStat, error)
 
 	// AggregateRoots computes the total matching row count and a per-bucket
 	// status-class breakdown over q's time range. bucketCount is the number

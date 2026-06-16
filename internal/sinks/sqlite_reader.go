@@ -571,17 +571,17 @@ func scanEventRow(scan func(...any) error) (capture.Record, error) {
 			origSize = int(respBodyOriginalSize.Int64)
 		}
 		return &capture.ResponseEvent{
-			ID:                id,
-			Timestamp:         ts,
-			CorrelationID:     corrID,
-			Service:           service,
-			ServiceSource:     serviceSource,
-			Status:            status,
-			Headers:           headers,
-			Body:              respBody,
-			BodyTruncated:     truncated,
-			BodyOriginalSize:  origSize,
-			DurationMS:        durationMS,
+			ID:               id,
+			Timestamp:        ts,
+			CorrelationID:    corrID,
+			Service:          service,
+			ServiceSource:    serviceSource,
+			Status:           status,
+			Headers:          headers,
+			Body:             respBody,
+			BodyTruncated:    truncated,
+			BodyOriginalSize: origSize,
+			DurationMS:       durationMS,
 		}, nil
 
 	case "outbound":
@@ -700,4 +700,97 @@ func (s *SQLiteSink) ServicesSeen(ctx context.Context, since time.Time) ([]strin
 		return nil, fmt.Errorf("sqlite ServicesSeen rows: %w", err)
 	}
 	return svcs, nil
+}
+
+// ServiceStats aggregates per-service activity. Request counts come from
+// captured_requests; the status-class mix comes from response events;
+// LastSeen is the latest timestamp across both tables. A service is reported
+// if it appears in either table within the window. Ordered alphabetically.
+func (s *SQLiteSink) ServiceStats(ctx context.Context, since time.Time) ([]inspect.ServiceStat, error) {
+	stats := make(map[string]*inspect.ServiceStat)
+	get := func(svc string) *inspect.ServiceStat {
+		st := stats[svc]
+		if st == nil {
+			st = &inspect.ServiceStat{Name: svc}
+			stats[svc] = st
+		}
+		return st
+	}
+
+	reqQuery := `SELECT service, COUNT(*), MAX(timestamp) FROM captured_requests`
+	evQuery := `
+SELECT service,
+    SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END),
+    SUM(CASE WHEN status >= 300 AND status < 400 THEN 1 ELSE 0 END),
+    SUM(CASE WHEN status >= 400 AND status < 500 THEN 1 ELSE 0 END),
+    SUM(CASE WHEN status >= 500 AND status < 600 THEN 1 ELSE 0 END),
+    SUM(CASE WHEN status IS NOT NULL AND (status < 200 OR status >= 600) THEN 1 ELSE 0 END),
+    MAX(timestamp)
+FROM events
+WHERE type = 'response'`
+
+	var reqArgs, evArgs []any
+	if !since.IsZero() {
+		reqQuery += ` WHERE timestamp >= ?`
+		reqArgs = []any{since.UnixNano()}
+		evQuery += ` AND timestamp >= ?`
+		evArgs = []any{since.UnixNano()}
+	}
+	reqQuery += ` GROUP BY service`
+	evQuery += ` GROUP BY service`
+
+	reqRows, err := s.db.QueryContext(ctx, reqQuery, reqArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite ServiceStats requests: %w", err)
+	}
+	defer reqRows.Close()
+	for reqRows.Next() {
+		var (
+			svc    string
+			count  int
+			lastTS int64
+		)
+		if err := reqRows.Scan(&svc, &count, &lastTS); err != nil {
+			return nil, fmt.Errorf("sqlite ServiceStats requests scan: %w", err)
+		}
+		st := get(svc)
+		st.Requests = count
+		if ts := time.Unix(0, lastTS); ts.After(st.LastSeen) {
+			st.LastSeen = ts
+		}
+	}
+	if err := reqRows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite ServiceStats requests rows: %w", err)
+	}
+
+	evRows, err := s.db.QueryContext(ctx, evQuery, evArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite ServiceStats events: %w", err)
+	}
+	defer evRows.Close()
+	for evRows.Next() {
+		var (
+			svc                   string
+			s2, s3, s4, s5, other int
+			lastTS                int64
+		)
+		if err := evRows.Scan(&svc, &s2, &s3, &s4, &s5, &other, &lastTS); err != nil {
+			return nil, fmt.Errorf("sqlite ServiceStats events scan: %w", err)
+		}
+		st := get(svc)
+		st.S2xx, st.S3xx, st.S4xx, st.S5xx, st.Other = s2, s3, s4, s5, other
+		if ts := time.Unix(0, lastTS); ts.After(st.LastSeen) {
+			st.LastSeen = ts
+		}
+	}
+	if err := evRows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite ServiceStats events rows: %w", err)
+	}
+
+	out := make([]inspect.ServiceStat, 0, len(stats))
+	for _, st := range stats {
+		out = append(out, *st)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }

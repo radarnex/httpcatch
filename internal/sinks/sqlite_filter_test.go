@@ -141,6 +141,45 @@ func TestSQLiteFilter_StatusClass5xx(t *testing.T) {
 	}
 }
 
+func TestSQLiteFilter_HasEventsTrue(t *testing.T) {
+	t.Parallel()
+
+	s, _ := sqliteFilterTestSetup(t)
+	ctx := context.Background()
+
+	q := inspect.InspectQuery{Query: mustParseQuery(t, "has_events:true")}
+	rows, _, err := s.ReadRoots(ctx, q, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots: %v", err)
+	}
+	ids := rowIDs(rows)
+	if len(ids) != 2 {
+		t.Fatalf("has_events=true: got %v want 2 rows", ids)
+	}
+	for _, id := range ids {
+		if id != "r1" && id != "r2" {
+			t.Errorf("unexpected id %q", id)
+		}
+	}
+}
+
+func TestSQLiteFilter_HasEventsFalse(t *testing.T) {
+	t.Parallel()
+
+	s, _ := sqliteFilterTestSetup(t)
+	ctx := context.Background()
+
+	q := inspect.InspectQuery{Query: mustParseQuery(t, "has_events:false")}
+	rows, _, err := s.ReadRoots(ctx, q, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots: %v", err)
+	}
+	ids := rowIDs(rows)
+	if len(ids) != 1 || ids[0] != "r3" {
+		t.Errorf("has_events=false: got %v want [r3]", ids)
+	}
+}
+
 func TestSQLiteFilter_StatusClass2xx(t *testing.T) {
 	t.Parallel()
 

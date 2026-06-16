@@ -204,6 +204,127 @@ func TestMemoryReader_ReadRoots_RowShape(t *testing.T) {
 	}
 }
 
+func TestMemoryReader_ReadRoots_EventCount_ZeroWithNoEvents(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(10)
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	mustWrite(t, s, makeRequest("req-1", ts, "svc", "GET", "/", "corr-1", "1.2.3.4"))
+
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	row := rows[0]
+	if row.EventCount == nil || *row.EventCount != 0 {
+		t.Errorf("EventCount: expected pointer to 0, got %v", row.EventCount)
+	}
+	if row.HasEvents == nil || *row.HasEvents {
+		t.Error("HasEvents: expected pointer to false")
+	}
+}
+
+func TestMemoryReader_ReadRoots_EventCount_MultipleCorrelatedEvents(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(20)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	mustWrite(t, s, makeRequest("req-1", base, "svc", "GET", "/", "corr-1", "1.2.3.4"))
+	mustWrite(t, s, &capture.ResponseEvent{
+		ID: "ev-resp", Timestamp: base.Add(time.Second),
+		CorrelationID: "corr-1", Service: "svc", ServiceSource: "x",
+		Status: 200, Headers: map[string][]string{}, Body: []byte{},
+	})
+	mustWrite(t, s, &capture.OutboundEvent{
+		ID: "ev-out", Timestamp: base.Add(2 * time.Second),
+		CorrelationID: "corr-1", Service: "svc", ServiceSource: "x",
+		DurationMS: 5,
+		Request:    capture.OutboundRequestHalf{Method: "GET", Path: "/upstream", Headers: map[string][]string{}},
+	})
+
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots: %v", err)
+	}
+
+	var reqRow *inspect.RootRow
+	for i := range rows {
+		if rows[i].ID == "req-1" {
+			reqRow = &rows[i]
+			break
+		}
+	}
+	if reqRow == nil {
+		t.Fatal("request row not found in ReadRoots result")
+	}
+	if reqRow.EventCount == nil || *reqRow.EventCount != 2 {
+		t.Errorf("EventCount: expected pointer to 2, got %v", reqRow.EventCount)
+	}
+	if reqRow.HasEvents == nil || !*reqRow.HasEvents {
+		t.Error("HasEvents: expected pointer to true")
+	}
+}
+
+func TestMemoryReader_ReadRoots_EventCount_NoCrossCounting(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(20)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// req-A has 2 correlated events; req-B has 1.
+	mustWrite(t, s, makeRequest("req-A", base, "svc", "GET", "/a", "corr-A", "1.1.1.1"))
+	mustWrite(t, s, makeRequest("req-B", base.Add(time.Second), "svc", "GET", "/b", "corr-B", "2.2.2.2"))
+	mustWrite(t, s, &capture.ResponseEvent{
+		ID: "ev-A1", Timestamp: base.Add(2 * time.Second),
+		CorrelationID: "corr-A", Service: "svc", ServiceSource: "x",
+		Status: 200, Headers: map[string][]string{}, Body: []byte{},
+	})
+	mustWrite(t, s, &capture.ResponseEvent{
+		ID: "ev-A2", Timestamp: base.Add(3 * time.Second),
+		CorrelationID: "corr-A", Service: "svc", ServiceSource: "x",
+		Status: 201, Headers: map[string][]string{}, Body: []byte{},
+	})
+	mustWrite(t, s, &capture.ResponseEvent{
+		ID: "ev-B1", Timestamp: base.Add(4 * time.Second),
+		CorrelationID: "corr-B", Service: "svc", ServiceSource: "x",
+		Status: 404, Headers: map[string][]string{}, Body: []byte{},
+	})
+
+	rows, _, err := s.ReadRoots(ctx, inspect.InspectQuery{}, 50, nil)
+	if err != nil {
+		t.Fatalf("ReadRoots: %v", err)
+	}
+
+	byID := make(map[string]inspect.RootRow)
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+
+	rowA, ok := byID["req-A"]
+	if !ok {
+		t.Fatal("req-A not found")
+	}
+	if rowA.EventCount == nil || *rowA.EventCount != 2 {
+		t.Errorf("req-A EventCount: expected 2, got %v", rowA.EventCount)
+	}
+
+	rowB, ok := byID["req-B"]
+	if !ok {
+		t.Fatal("req-B not found")
+	}
+	if rowB.EventCount == nil || *rowB.EventCount != 1 {
+		t.Errorf("req-B EventCount: expected 1, got %v", rowB.EventCount)
+	}
+}
+
 func TestMemoryReader_AggregateRoots_TotalIgnoresLimit(t *testing.T) {
 	t.Parallel()
 
@@ -316,6 +437,68 @@ func TestMemoryReader_ServicesSeen_SinceFilter(t *testing.T) {
 	}
 	if len(svcs) != 1 || svcs[0] != "new-service" {
 		t.Errorf("ServicesSeen since filter: got %v want [new-service]", svcs)
+	}
+}
+
+func TestMemoryReader_ServiceStats(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(50)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	// api: 2 requests + a 200 and a 500 response.
+	mustWrite(t, s, makeRequest("a1", base, "api", "GET", "/", "c1", "1.1.1.1"))
+	mustWrite(t, s, makeRequest("a2", base.Add(time.Second), "api", "GET", "/x", "c2", "1.1.1.1"))
+	mustWrite(t, s, &capture.ResponseEvent{ID: "ae1", Timestamp: base.Add(2 * time.Second), Service: "api", CorrelationID: "c1", Status: 200})
+	mustWrite(t, s, &capture.ResponseEvent{ID: "ae2", Timestamp: base.Add(3 * time.Second), Service: "api", CorrelationID: "c2", Status: 500})
+	// web: 1 request, no responses.
+	mustWrite(t, s, makeRequest("w1", base.Add(4*time.Second), "web", "GET", "/", "c3", "2.2.2.2"))
+
+	stats, err := s.ServiceStats(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ServiceStats: %v", err)
+	}
+	if len(stats) != 2 {
+		t.Fatalf("ServiceStats: got %d services, want 2 (%+v)", len(stats), stats)
+	}
+	// Alphabetical: api, web.
+	api, web := stats[0], stats[1]
+	if api.Name != "api" || web.Name != "web" {
+		t.Fatalf("ServiceStats order: got %q,%q want api,web", api.Name, web.Name)
+	}
+	if api.Requests != 2 {
+		t.Errorf("api.Requests: got %d want 2", api.Requests)
+	}
+	if api.S2xx != 1 || api.S5xx != 1 || api.S3xx != 0 || api.S4xx != 0 || api.Other != 0 {
+		t.Errorf("api status mix: got 2xx=%d 3xx=%d 4xx=%d 5xx=%d other=%d want 2xx=1 5xx=1",
+			api.S2xx, api.S3xx, api.S4xx, api.S5xx, api.Other)
+	}
+	if !api.LastSeen.Equal(base.Add(3 * time.Second)) {
+		t.Errorf("api.LastSeen: got %v want %v", api.LastSeen, base.Add(3*time.Second))
+	}
+	if web.Requests != 1 || web.S2xx+web.S3xx+web.S4xx+web.S5xx+web.Other != 0 {
+		t.Errorf("web stats: got requests=%d responses=%d want 1 request, 0 responses",
+			web.Requests, web.S2xx+web.S3xx+web.S4xx+web.S5xx+web.Other)
+	}
+}
+
+func TestMemoryReader_ServiceStats_SinceFilter(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemorySink(20)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	mustWrite(t, s, makeRequest("old", base.Add(-time.Hour), "old-service", "GET", "/", "c1", "1.1.1.1"))
+	mustWrite(t, s, makeRequest("new", base.Add(time.Minute), "new-service", "GET", "/", "c2", "1.1.1.1"))
+
+	stats, err := s.ServiceStats(ctx, base)
+	if err != nil {
+		t.Fatalf("ServiceStats: %v", err)
+	}
+	if len(stats) != 1 || stats[0].Name != "new-service" {
+		t.Fatalf("ServiceStats since filter: got %+v want [new-service]", stats)
 	}
 }
 

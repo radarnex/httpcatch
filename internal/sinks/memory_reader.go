@@ -27,11 +27,16 @@ func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit 
 	all := s.Recent(s.Len())
 
 	// Build the set of correlation_ids that have at least one CapturedRequest
-	// in the buffer. Used for orphan detection.
+	// in the buffer (used for orphan detection) and count correlated events
+	// (ResponseEvent and OutboundEvent) per correlation_id.
 	requestCorrs := make(map[string]struct{}, len(all))
+	eventCounts := make(map[string]int, len(all))
 	for _, r := range all {
-		if _, ok := r.(*capture.CapturedRequest); ok {
+		switch r.(type) {
+		case *capture.CapturedRequest:
 			requestCorrs[r.RecordCorrelationID()] = struct{}{}
+		case *capture.ResponseEvent, *capture.OutboundEvent:
+			eventCounts[r.RecordCorrelationID()]++
 		}
 	}
 
@@ -57,8 +62,8 @@ func (s *MemorySink) ReadRoots(_ context.Context, q inspect.InspectQuery, limit 
 			if !matchRequest(v) {
 				continue
 			}
-			ec := 0 // event_count is unknown in memory; filled by SQLite join
-			he := false
+			ec := eventCounts[v.CorrelationID]
+			he := ec > 0
 			candidates = append(candidates, inspect.RootRow{
 				ID:            v.ID,
 				Kind:          "request",
@@ -338,6 +343,67 @@ func (s *MemorySink) ServicesSeen(_ context.Context, since time.Time) ([]string,
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// ServiceStats aggregates per-service activity over the records held in the
+// ring buffer. Inbound captured requests drive the request count; correlated
+// response events drive the status-class mix; LastSeen tracks the latest
+// record of any kind. Results are ordered alphabetically by service name.
+func (s *MemorySink) ServiceStats(_ context.Context, since time.Time) ([]inspect.ServiceStat, error) {
+	all := s.Recent(s.Len())
+
+	stats := make(map[string]*inspect.ServiceStat)
+	get := func(svc string) *inspect.ServiceStat {
+		st := stats[svc]
+		if st == nil {
+			st = &inspect.ServiceStat{Name: svc}
+			stats[svc] = st
+		}
+		return st
+	}
+
+	for _, r := range all {
+		if !since.IsZero() && r.RecordTimestamp().Before(since) {
+			continue
+		}
+		svc := r.RecordService()
+		if svc == "" {
+			continue
+		}
+		st := get(svc)
+		if ts := r.RecordTimestamp(); ts.After(st.LastSeen) {
+			st.LastSeen = ts
+		}
+		switch rec := r.(type) {
+		case *capture.CapturedRequest:
+			st.Requests++
+		case *capture.ResponseEvent:
+			addStatusClass(st, rec.Status)
+		}
+	}
+
+	out := make([]inspect.ServiceStat, 0, len(stats))
+	for _, st := range stats {
+		out = append(out, *st)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// addStatusClass increments the status-class counter on st matching code.
+func addStatusClass(st *inspect.ServiceStat, code int) {
+	switch statusClass(&code) {
+	case 2:
+		st.S2xx++
+	case 3:
+		st.S3xx++
+	case 4:
+		st.S4xx++
+	case 5:
+		st.S5xx++
+	default:
+		st.Other++
+	}
 }
 
 // matchOrphanResponse evaluates the subset of q that applies to orphan

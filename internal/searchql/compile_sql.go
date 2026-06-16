@@ -59,7 +59,7 @@ func compileTermSQL(t Term) (string, []any) {
 	case FieldCorrelationID:
 		pred = "cr.correlation_id = ?"
 		argList = []any{t.Value}
-	case FieldStatus:
+	case FieldStatus, FieldHasEvents:
 		return "", nil
 	default:
 		return "", nil
@@ -206,31 +206,44 @@ func indexedPredicate(col string, t Term) (string, any) {
 	}
 }
 
-// CompileSQLHaving emits the HAVING-clause fragment and arguments for any
-// status term in q. status is the only field today whose predicate depends on
-// the events aggregation (`MAX(... e.status ...)`), so it lives in HAVING
-// rather than WHERE.
+// CompileSQLHaving emits the HAVING-clause fragment and arguments for terms
+// whose predicate depends on the events aggregation: status (`MAX(... e.status
+// ...)`) and has_events (`COUNT(e.id)`). These live in HAVING rather than WHERE.
+// Multiple such terms are AND'd together.
 func CompileSQLHaving(q Query) (having string, args []any) {
+	var clauses []string
 	for _, t := range q.Terms {
-		if t.Field != FieldStatus || t.StatusFilter == nil {
-			continue
-		}
 		var pred string
 		var vals []any
-		if t.StatusFilter.Exact != 0 {
-			pred = "MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) = ?"
-			vals = []any{t.StatusFilter.Exact}
-		} else {
-			lo, hi := t.StatusFilter.ClassRange()
-			pred = "MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) BETWEEN ? AND ?"
-			vals = []any{lo, hi}
+		switch {
+		case t.Field == FieldStatus && t.StatusFilter != nil:
+			if t.StatusFilter.Exact != 0 {
+				pred = "MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) = ?"
+				vals = []any{t.StatusFilter.Exact}
+			} else {
+				lo, hi := t.StatusFilter.ClassRange()
+				pred = "MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) BETWEEN ? AND ?"
+				vals = []any{lo, hi}
+			}
+		case t.Field == FieldHasEvents && t.HasEvents != nil:
+			if *t.HasEvents {
+				pred = "COUNT(e.id) > 0"
+			} else {
+				pred = "COUNT(e.id) = 0"
+			}
+		default:
+			continue
 		}
 		if t.Negated {
 			pred = "NOT (" + pred + ")"
 		}
-		return pred, vals
+		clauses = append(clauses, pred)
+		args = append(args, vals...)
 	}
-	return "", nil
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return strings.Join(clauses, " AND "), args
 }
 
 // CompileSQLOrphans emits the WHERE fragment and arguments for the
@@ -341,7 +354,7 @@ func freeformOrphanPredicate(t Term) (string, []any) {
 func (q Query) HasRequestOnlyTerm() bool {
 	for _, t := range q.Terms {
 		switch t.Field {
-		case FieldHost, FieldPath, FieldMethod, FieldSourceIP, FieldBody:
+		case FieldHost, FieldPath, FieldMethod, FieldSourceIP, FieldBody, FieldHasEvents:
 			return true
 		}
 	}

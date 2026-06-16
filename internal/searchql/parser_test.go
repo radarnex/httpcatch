@@ -258,6 +258,44 @@ func TestParse_Status_Class(t *testing.T) {
 	}
 }
 
+func TestParse_HasEvents(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		input string
+		want  bool
+	}{
+		{"has_events:true", true},
+		{"has_events:false", false},
+		{"has_events:TRUE", true},
+		{"has_events:False", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			t.Parallel()
+			q, err := Parse(tc.input)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if len(q.Terms) != 1 {
+				t.Fatalf("got %d terms want 1", len(q.Terms))
+			}
+			he := q.Terms[0].HasEvents
+			if he == nil || *he != tc.want {
+				t.Errorf("has_events: got %v want %v", he, tc.want)
+			}
+		})
+	}
+}
+
+func TestParse_HasEvents_Invalid(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{"has_events:yes", "has_events:1", "has_events:*true*"} {
+		if _, err := Parse(input); err == nil {
+			t.Errorf("Parse(%q): want error, got nil", input)
+		}
+	}
+}
+
 func TestParse_MultiTokenAND(t *testing.T) {
 	t.Parallel()
 
@@ -610,6 +648,8 @@ func TestQuery_HasRequestOnlyTerm(t *testing.T) {
 		{"host:example.com", true},
 		{"service:orders method:GET", true},
 		{"-method:GET", true},
+		{"has_events:true", true},
+		{"has_events:false", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {

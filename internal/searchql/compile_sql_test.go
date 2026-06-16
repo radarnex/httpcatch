@@ -426,6 +426,53 @@ func TestCompileSQLHaving_NoStatus(t *testing.T) {
 	}
 }
 
+func TestCompileSQL_HasEventsOnly_NoWhere(t *testing.T) {
+	t.Parallel()
+	q, _ := Parse("has_events:true")
+	sql, _ := CompileSQL(q)
+	if sql != "" {
+		t.Errorf("has_events-only: SQL %q want empty", sql)
+	}
+}
+
+func TestCompileSQLHaving_HasEvents(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"has_events:true", "COUNT(e.id) > 0"},
+		{"has_events:false", "COUNT(e.id) = 0"},
+		{"-has_events:true", "NOT (COUNT(e.id) > 0)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			t.Parallel()
+			q, _ := Parse(tc.input)
+			having, args := CompileSQLHaving(q)
+			if having != tc.want {
+				t.Errorf("HAVING: got %q want %q", having, tc.want)
+			}
+			if len(args) != 0 {
+				t.Errorf("Args: got %v want none", args)
+			}
+		})
+	}
+}
+
+func TestCompileSQLHaving_StatusAndHasEvents(t *testing.T) {
+	t.Parallel()
+	q, _ := Parse("status:200 has_events:true")
+	having, args := CompileSQLHaving(q)
+	want := "MAX(CASE WHEN e.type = 'response' THEN e.status ELSE NULL END) = ? AND COUNT(e.id) > 0"
+	if having != want {
+		t.Errorf("HAVING: got %q want %q", having, want)
+	}
+	if !reflect.DeepEqual(args, []any{200}) {
+		t.Errorf("Args: got %v", args)
+	}
+}
+
 func TestCompileSQLOrphans_PassesService_AndStatus(t *testing.T) {
 	t.Parallel()
 	q, _ := Parse("service:orders status:5xx")

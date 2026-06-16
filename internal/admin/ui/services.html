@@ -11,9 +11,25 @@
 {{if .Services}}
 <div class="services-grid">
   {{range .Services}}
-  <a class="service-card" href="/ui/requests?q=service:{{.}}">
-    <div class="svc-name"><span class="svc-chip"><span class="dot"></span>{{.}}</span></div>
-    <div class="svc-meta">view requests →</div>
+  <a class="service-card" href="/ui/requests?q=service:{{.Name}}">
+    <div class="svc-card-head">
+      <span class="svc-chip"><span class="dot"></span>{{.Name}}</span>
+      {{if .LastSeen}}<span class="svc-lastseen" title="Most recent activity">{{.LastSeen}}</span>{{end}}
+    </div>
+    <div class="svc-stats">
+      <span class="svc-stat"><b>{{.Requests}}</b> request{{if ne .Requests 1}}s{{end}}</span>
+      {{if .Responses}}<span class="svc-stat"><b>{{.Responses}}</b> response{{if ne .Responses 1}}s{{end}}</span>{{end}}
+    </div>
+    {{if .Segments}}
+    <div class="svc-bar" role="img" aria-label="Response status mix">
+      {{range .Segments}}<span class="svc-seg s-{{.Class}}" style="width:{{printf "%.2f" .Pct}}%" title="{{.Count}} {{.Class}}"></span>{{end}}
+    </div>
+    <div class="svc-legend">
+      {{range .Segments}}<span class="svc-leg"><span class="svc-leg-dot s-{{.Class}}"></span>{{.Class}} <b>{{.Count}}</b></span>{{end}}
+    </div>
+    {{else}}
+    <div class="svc-meta">No responses recorded yet</div>
+    {{end}}
   </a>
   {{end}}
 </div>

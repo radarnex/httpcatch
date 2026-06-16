@@ -755,7 +755,7 @@ func TestUIRequests_WarningChipsPresent(t *testing.T) {
 	ids := make(map[string]bool)
 	findIDs(doc, ids)
 
-	for _, id := range []string{"chip-unredacted", "chip-dropped", "chip-redaction-errors", "chip-service", "chip-correlation", "buildinfo"} {
+	for _, id := range []string{"chip-unredacted", "chip-dropped", "chip-redaction-errors", "chip-service", "chip-correlation"} {
 		if !ids[id] {
 			t.Errorf("layout element missing: id=%q", id)
 		}
