@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/admin"
+	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/sinks"
 )
 

@@ -262,4 +262,3 @@ func TestHasNonTemporalFilter(t *testing.T) {
 		}
 	}
 }
-

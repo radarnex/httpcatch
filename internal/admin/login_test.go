@@ -358,4 +358,3 @@ func TestLogout_BogusCookie_NocrashAnd303(t *testing.T) {
 		t.Errorf("status: got %d want 303", resp.StatusCode)
 	}
 }
-

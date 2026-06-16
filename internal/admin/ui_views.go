@@ -756,7 +756,7 @@ type serviceCard struct {
 
 // statusSegment is one class slice of a service's status-mix bar.
 type statusSegment struct {
-	Class string  // "2xx".."5xx" or "other"
+	Class string // "2xx".."5xx" or "other"
 	Count int
 	Pct   float64 // width percentage, 0..100
 }

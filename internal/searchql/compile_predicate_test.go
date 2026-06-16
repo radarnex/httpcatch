@@ -209,10 +209,10 @@ func TestPredicate_BodyIsSubstring(t *testing.T) {
 func headersFixture() *capture.CapturedRequest {
 	r := fixture()
 	r.Headers = map[string][]string{
-		"Host":              {"billing-api.svc.local"},
-		"User-Agent":        {"client/0.3 (probe)"},
-		"X-Forwarded-For":   {"10.0.0.1", "10.0.0.2"},
-		"Content-Type":      {"application/json"},
+		"Host":            {"billing-api.svc.local"},
+		"User-Agent":      {"client/0.3 (probe)"},
+		"X-Forwarded-For": {"10.0.0.1", "10.0.0.2"},
+		"Content-Type":    {"application/json"},
 	}
 	return r
 }
@@ -225,9 +225,9 @@ func TestPredicate_HeadersKeyword_MatchesNameOrValue(t *testing.T) {
 		input string
 		want  bool
 	}{
-		{"headers:User-Agent", true},      // matches a header name
-		{"headers:client/0.3", true},      // matches a single-value header value
-		{"headers:10.0.0.2", true},        // matches the 2nd value of a multi-value header
+		{"headers:User-Agent", true}, // matches a header name
+		{"headers:client/0.3", true}, // matches a single-value header value
+		{"headers:10.0.0.2", true},   // matches the 2nd value of a multi-value header
 		{"headers:application/json", true},
 		{"headers:absent", false},
 		{"headers:*client*", true}, // scanned dim: wildcards collapse
@@ -339,9 +339,9 @@ func TestPredicate_Freeform_Wildcards(t *testing.T) {
 		input string
 		want  bool
 	}{
-		{"billing-api*", true},  // prefix on host
-		{"order*", true},        // prefix on service
-		{"*orders*", true},      // substring on service and path
+		{"billing-api*", true}, // prefix on host
+		{"order*", true},       // prefix on service
+		{"*orders*", true},     // substring on service and path
 		{"*nope*", false},
 		{`"login failed"`, true},
 	}

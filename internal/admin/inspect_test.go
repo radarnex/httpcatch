@@ -485,10 +485,10 @@ func TestRequests_ScanHeader(t *testing.T) {
 	narrowing := "since=2026-01-01T00:00:00Z&until=2026-12-31T23:59:59Z"
 
 	cases := []struct {
-		name    string
-		q       string
-		extra   string // additional query params
-		expect  bool
+		name   string
+		q      string
+		extra  string // additional query params
+		expect bool
 	}{
 		{"freeform_substring", "*foo*", narrowing, true},
 		{"freeform_leading_only", "*foo", narrowing, true},
@@ -502,7 +502,7 @@ func TestRequests_ScanHeader(t *testing.T) {
 		{"headers_keyword_no_header", "headers:foo", "", false},
 		{"per_header_no_header", "header.user-agent:foo", "", false},
 		{"negated_substring_still_scans", "-host:*foo*", narrowing, true},
-		{"multi_term_with_scan", "service:foo host:*api*", "", true},   // exact service: satisfies guard
+		{"multi_term_with_scan", "service:foo host:*api*", "", true}, // exact service: satisfies guard
 		{"multi_term_no_scan", "service:foo host:api*", "", false},
 		{"empty_query_no_header", "", "", false},
 	}

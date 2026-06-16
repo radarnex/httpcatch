@@ -12,83 +12,83 @@ func TestGuard(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name           string
-		bind           string
+		name            string
+		bind            string
 		tokenConfigured bool
-		insecureListen bool
-		wantReason     admin.Reason
-		wantErr        bool
-		wantErrSubstr  string
+		insecureListen  bool
+		wantReason      admin.Reason
+		wantErr         bool
+		wantErrSubstr   string
 	}{
 		// PRD 4-row table
 		{
-			name:           "loopback-ipv4-no-token",
-			bind:           "127.0.0.1:8081",
+			name:            "loopback-ipv4-no-token",
+			bind:            "127.0.0.1:8081",
 			tokenConfigured: false,
-			insecureListen: false,
-			wantReason:     admin.ReasonLoopbackDefault,
+			insecureListen:  false,
+			wantReason:      admin.ReasonLoopbackDefault,
 		},
 		{
-			name:           "loopback-ipv4-with-token",
-			bind:           "127.0.0.1:8081",
+			name:            "loopback-ipv4-with-token",
+			bind:            "127.0.0.1:8081",
 			tokenConfigured: true,
-			insecureListen: false,
-			wantReason:     admin.ReasonLoopbackDefault,
+			insecureListen:  false,
+			wantReason:      admin.ReasonLoopbackDefault,
 		},
 		{
-			name:           "non-loopback-with-token",
-			bind:           "0.0.0.0:8081",
+			name:            "non-loopback-with-token",
+			bind:            "0.0.0.0:8081",
 			tokenConfigured: true,
-			insecureListen: false,
-			wantReason:     admin.ReasonTokenConfigured,
+			insecureListen:  false,
+			wantReason:      admin.ReasonTokenConfigured,
 		},
 		{
-			name:           "non-loopback-no-token-insecure",
-			bind:           "0.0.0.0:8081",
+			name:            "non-loopback-no-token-insecure",
+			bind:            "0.0.0.0:8081",
 			tokenConfigured: false,
-			insecureListen: true,
-			wantReason:     admin.ReasonInsecureMode,
+			insecureListen:  true,
+			wantReason:      admin.ReasonInsecureMode,
 		},
 		{
-			name:           "non-loopback-no-token-no-insecure-refused",
-			bind:           "0.0.0.0:8081",
+			name:            "non-loopback-no-token-no-insecure-refused",
+			bind:            "0.0.0.0:8081",
 			tokenConfigured: false,
-			insecureListen: false,
-			wantErr:        true,
-			wantErrSubstr:  `admin: refuses to bind "0.0.0.0:8081"`,
+			insecureListen:  false,
+			wantErr:         true,
+			wantErrSubstr:   `admin: refuses to bind "0.0.0.0:8081"`,
 		},
 		// localhost treated as loopback
 		{
-			name:           "localhost-no-token",
-			bind:           "localhost:8081",
+			name:            "localhost-no-token",
+			bind:            "localhost:8081",
 			tokenConfigured: false,
-			insecureListen: false,
-			wantReason:     admin.ReasonLoopbackDefault,
+			insecureListen:  false,
+			wantReason:      admin.ReasonLoopbackDefault,
 		},
 		// IPv6 loopback
 		{
-			name:           "ipv6-loopback",
-			bind:           "[::1]:8081",
+			name:            "ipv6-loopback",
+			bind:            "[::1]:8081",
 			tokenConfigured: false,
-			insecureListen: false,
-			wantReason:     admin.ReasonLoopbackDefault,
+			insecureListen:  false,
+			wantReason:      admin.ReasonLoopbackDefault,
 		},
 		// refusal error names both remediations
 		{
-			name:           "refusal-mentions-both-remediations",
-			bind:           "192.168.1.1:8081",
+			name:            "refusal-mentions-both-remediations",
+			bind:            "192.168.1.1:8081",
 			tokenConfigured: false,
-			insecureListen: false,
-			wantErr:        true,
-			wantErrSubstr:  "admin.token",
+			insecureListen:  false,
+			wantErr:         true,
+			wantErrSubstr:   "admin.token",
 		},
 		{
-			name:           "refusal-mentions-insecure-listen",
-			bind:           "10.0.0.1:8081",
+			name:            "refusal-mentions-insecure-listen",
+			bind:            "10.0.0.1:8081",
 			tokenConfigured: false,
-			insecureListen: false,
-			wantErr:        true,
-			wantErrSubstr:  "admin.insecure_listen=true",
+			insecureListen:  false,
+			wantErr:         true,
+			wantErrSubstr:   "admin.insecure_listen=true",
 		},
 		// invalid bind address
 		{
