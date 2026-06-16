@@ -216,11 +216,8 @@ func requestListHandler(rs ReadSources) http.HandlerFunc {
 			Methods: httpMethods,
 		}
 
-		// Populate the service dropdown from whichever reader is available.
-		rd := rs.Memory
-		if rd == nil {
-			rd = rs.SQLite
-		}
+		// Populate the service dropdown from the durable store when available.
+		rd := rs.serviceAggregateReader()
 		if rd != nil {
 			since := time.Now().Add(-servicesSince)
 			if svcs, err := rd.ServicesSeen(ctx, since); err == nil {
@@ -741,6 +738,11 @@ type servicesPageData struct {
 	Page     string
 	Error    string
 	Services []serviceCard
+	// Since and Until are the RFC3339Nano bounds of the lookback window the
+	// cards summarize. Service links carry them so the explorer opens on the
+	// same window the counts were computed over (read back as the "1d" preset).
+	Since string
+	Until string
 }
 
 // serviceCard is the rendered view-model for one service on the Services page.
@@ -768,13 +770,14 @@ func servicesUIHandler(rs ReadSources) http.HandlerFunc {
 		defer cancel()
 		data := servicesPageData{Page: "services"}
 
-		rd := rs.Memory
-		if rd == nil {
-			rd = rs.SQLite
-		}
+		now := time.Now().UTC()
+		since := now.Add(-servicesSince)
+		data.Since = since.Format(time.RFC3339Nano)
+		data.Until = now.Format(time.RFC3339Nano)
+
+		rd := rs.serviceAggregateReader()
 		if rd != nil {
-			now := time.Now()
-			stats, err := rd.ServiceStats(ctx, now.Add(-servicesSince))
+			stats, err := rd.ServiceStats(ctx, since)
 			if err != nil {
 				data.Error = fmt.Sprintf("read error: %v", err)
 			} else {

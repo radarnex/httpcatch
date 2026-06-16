@@ -11,7 +11,7 @@
 {{if .Services}}
 <div class="services-grid">
   {{range .Services}}
-  <a class="service-card" href="/ui/requests?q=service:{{.Name}}">
+  <a class="service-card" href="/ui/requests?q=service:{{.Name}}&amp;since={{$.Since}}&amp;until={{$.Until}}">
     <div class="svc-card-head">
       <span class="svc-chip"><span class="dot"></span>{{.Name}}</span>
       {{if .LastSeen}}<span class="svc-lastseen" title="Most recent activity">{{.LastSeen}}</span>{{end}}

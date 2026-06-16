@@ -41,6 +41,18 @@ type ReadSources struct {
 	QueryTimeout time.Duration
 }
 
+// serviceAggregateReader returns the reader used for service-level aggregates
+// over a time window (ServiceStats, ServicesSeen). SQLite is preferred because
+// it is the durable store: the in-memory ring is empty after a restart and is
+// bounded by capacity, so it cannot answer a "last 24h" question reliably.
+// Memory is used only when SQLite is disabled. Returns nil when neither exists.
+func (rs ReadSources) serviceAggregateReader() inspect.Reader {
+	if rs.SQLite != nil {
+		return rs.SQLite
+	}
+	return rs.Memory
+}
+
 // EventsSources wires the queue and configuration the Events API handler needs.
 // Queue may be nil; the events handler returns 503 when no queue is configured.
 type EventsSources struct {
