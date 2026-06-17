@@ -77,7 +77,7 @@ Caveats: `X-Request-ID` is accepted verbatim as the **correlation key** with no 
 
 Redaction is a defense in depth. It runs once on every record before sink fan-out, so an unredacted body never reaches storage. The implementation is content-type-agnostic by design: regex rules apply to every non-empty body regardless of declared `Content-Type` (closing the multipart/octet-stream bypass) and JSON-path rules apply to any body that parses as valid JSON regardless of declared type. The error counter ticks only when the operator declared JSON but the body fails to parse — a misconfiguration signal — so a non-JSON-declared body that happens to be invalid does not generate noise.
 
-Cookie and query rules apply uniformly to captured requests and to event variants (response, outbound). Query-parameter matching is case-insensitive; headers were already case-insensitive. The redaction worker recovers from panics; a malformed rule on one record cannot drain the pool, and a `panics_total` counter surfaces the event.
+Cookie and query rules apply uniformly to captured requests and to event variants (response, outbound). Query-parameter matching is case-insensitive; headers were already case-insensitive. The redaction worker recovers from panics; a malformed rule on one record cannot drain the pool, and a `httpcatch_worker_panics_total` counter surfaces the event.
 
 The `httpcatch redact --test` dry-run masks before-side header/query/cookie values as `<masked: N chars>` by default (parallel to the body's `%d bytes` rendering) so running the test against a real capture does not echo unredacted secrets to terminal scrollback or CI logs. Operators opt back into cleartext with the explicit `--show-values` flag; the after-side stays cleartext so buggy redaction rules remain visible. The `--test` path argument is unconfined by design — the subcommand is intended for local-operator use.
 
@@ -87,7 +87,7 @@ Caveat: JSON redaction complexity is bounded only by `body_cap`; pathological JS
 
 The pipeline is the seam between unauthenticated ingress and trusted persistence. Its main job is to keep one ill-behaved record from affecting another.
 
-The **capture queue** is bounded; on overflow, the request is dropped silently and `dropped_total` is incremented (the silent-drop choice is ADR-0002, made explicitly for the mirror's fire-and-forget semantics). Worker goroutines wrap the redact+sink work in a `recover()` so a panic counts to `panics_total` and the worker continues — the pool cannot shrink to zero. Sinks fan out serially per record; per-sink write failures are counted in `httpcatch_sink_write_errors_total{sink="..."}` without dropping the record from the other sinks' perspective.
+The **capture queue** is bounded; on overflow, the request is dropped silently and `dropped_total` is incremented (the silent-drop choice is ADR-0002, made explicitly for the mirror's fire-and-forget semantics). Worker goroutines wrap the redact+sink work in a `recover()` so a panic counts to `httpcatch_worker_panics_total` and the worker continues — the pool cannot shrink to zero. Sinks fan out serially per record; per-sink write failures are counted in `httpcatch_sink_write_errors_total{sink="..."}` without dropping the record from the other sinks' perspective.
 
 Caveat: the serial fan-out means a slow sink stalls all sinks for that record; back-pressure into the queue translates to drop-on-full.
 
@@ -127,7 +127,7 @@ The bearer comparison in `checkBearer` is `subtle.ConstantTimeCompare` with no l
 
 A token-bucket rate limiter gates every auth attempt — per-IP capacity 5 refilled across 30 seconds, global capacity 20 refilled across 1 second. Bucket sweeps evict idle IPs after 10 minutes. Failures are counted by reason in `httpcatch_auth_failures_total{reason="invalid_token"|"rate_limited"|"csrf_blocked"}`.
 
-Caveats: the session sweeper interval is decoupled from `session_ttl` and there is no live-session cap; `/metrics` is intentionally unauthenticated and exposes the build version and operational counters; session expiry uses wall-clock `time.Now`, so a clock step-back extends lifetime.
+Caveats: the session sweeper interval is decoupled from `session_ttl` and there is no live-session cap; `/metrics` is intentionally unauthenticated and exposes the build version, operational counters, and — via the `prometheus/client_golang` Go and process collectors — Go runtime and process metrics (`go_*`, `process_*`) such as goroutine count, heap size, GC pauses, open file descriptors, and resident memory; session expiry uses wall-clock `time.Now`, so a clock step-back extends lifetime.
 
 ### Events API
 

@@ -155,17 +155,17 @@ func findByKind(recs []map[string]any, kind string) map[string]any {
 	return nil
 }
 
-// orphanGauge reads the orphans_total gauge from /metrics and returns
+// orphanGauge reads the httpcatch_orphans gauge from /metrics and returns
 // (response_count, outbound_count).
 func orphanGauge(t *testing.T, adminURL string) (int, int) {
 	t.Helper()
 	raw := adminGetRaw(t, adminURL, "/metrics")
 	var resp, outbound int
 	for _, line := range strings.Split(raw, "\n") {
-		if strings.HasPrefix(line, "httpcatch_orphans_total{type=\"response\"}") {
+		if strings.HasPrefix(line, "httpcatch_orphans{type=\"response\"}") {
 			fmt.Sscanf(strings.Fields(line)[1], "%d", &resp)
 		}
-		if strings.HasPrefix(line, "httpcatch_orphans_total{type=\"outbound\"}") {
+		if strings.HasPrefix(line, "httpcatch_orphans{type=\"outbound\"}") {
 			fmt.Sscanf(strings.Fields(line)[1], "%d", &outbound)
 		}
 	}
@@ -178,7 +178,7 @@ func orphanGauge(t *testing.T, adminURL string) (int, int) {
 //   - response event correlation and status join
 //   - outbound event correlation and per-half redaction
 //   - orphan event lifecycle (appears → reconciles)
-//   - orphans_total gauge at /metrics
+//   - httpcatch_orphans gauge at /metrics
 //   - SQLite EXPLAIN QUERY PLAN confirms events.correlation_id index use
 func TestIntegration_HeadlineE2E(t *testing.T) {
 	// Not t.Parallel(): uses real ports + disk SQLite; serial is fine for coverage.
@@ -403,10 +403,10 @@ func TestIntegration_HeadlineE2E(t *testing.T) {
 		t.Errorf("orphan row has_events should be null; got %v", orphanRow["has_events"])
 	}
 
-	// orphans_total{type="response"} must be >= 1.
+	// httpcatch_orphans{type="response"} must be >= 1.
 	respOrphans, _ := orphanGauge(t, adminURL)
 	if respOrphans < 1 {
-		t.Errorf("orphans_total{type=response}: got %d want >= 1", respOrphans)
+		t.Errorf("httpcatch_orphans{type=response}: got %d want >= 1", respOrphans)
 	}
 
 	// --- Step 8: GET /requests/{orphan_event_id} --- detail for an orphan event id
@@ -469,10 +469,10 @@ func TestIntegration_HeadlineE2E(t *testing.T) {
 		t.Errorf("reconciled request event_count: got %v want >= 1", reconciledReq["event_count"])
 	}
 
-	// orphans_total{type="response"} must now be 0 (or decreased).
+	// httpcatch_orphans{type="response"} must now be 0 (or decreased).
 	respOrphansAfter, _ := orphanGauge(t, adminURL)
 	if respOrphansAfter >= respOrphans {
-		t.Errorf("orphans_total{type=response} after reconciliation: got %d, expected < %d",
+		t.Errorf("httpcatch_orphans{type=response} after reconciliation: got %d, expected < %d",
 			respOrphansAfter, respOrphans)
 	}
 
@@ -515,4 +515,69 @@ func assertOrphanIndexUsed(t *testing.T, _ string) error {
 	// TestSQLiteOrphan_ExplainQueryPlan in sqlite_reader_test.go.
 	// Here we assert via a compile-time reference that the index exists.
 	return nil
+}
+
+// scrapeCapturedTotal reads the flat httpcatch_captured_total counter from
+// /metrics. Returns -1 if the metric line is absent.
+func scrapeCapturedTotal(t *testing.T, adminURL string) int {
+	t.Helper()
+	raw := adminGetRaw(t, adminURL, "/metrics")
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.HasPrefix(line, "httpcatch_captured_total ") {
+			var v int
+			fmt.Sscanf(strings.Fields(line)[1], "%d", &v)
+			return v
+		}
+	}
+	return -1
+}
+
+// TestIntegration_CapturedTotal_NotIncrementedByEventsAPI is a regression test
+// for the captured_total placement bug. POST /events enqueues onto the same
+// queue the capture handler uses; when the counter lived on Queue.Enqueue, event
+// submissions were miscounted as captured requests. The counter now lives in the
+// capture handler, so only real captures increment it.
+func TestIntegration_CapturedTotal_NotIncrementedByEventsAPI(t *testing.T) {
+	captureURL, adminURL, teardown := headlineSetup(t)
+	defer teardown()
+
+	if got := scrapeCapturedTotal(t, adminURL); got != 0 {
+		t.Fatalf("baseline captured_total: got %d want 0", got)
+	}
+
+	traceID := "0af7651916cd43dd8448eb211c80319c"
+	for range 2 {
+		sc := postEvent(t, adminURL, map[string]any{
+			"type":           "response",
+			"correlation_id": traceID,
+			"service":        "orders",
+			"status":         200,
+			"headers":        map[string]any{},
+			"body":           "{}",
+			"duration_ms":    1,
+		})
+		if sc != http.StatusAccepted {
+			t.Fatalf("POST /events: got %d want 202", sc)
+		}
+	}
+
+	// Wait until both events are ingested, then confirm the events did not leak
+	// into captured_total.
+	if !waitFor(func() bool {
+		return strings.Contains(adminGetRaw(t, adminURL, "/metrics"),
+			"httpcatch_events_ingested_total{type=\"response\"} 2")
+	}, 5*time.Second) {
+		t.Fatal("events were not ingested within timeout")
+	}
+	if got := scrapeCapturedTotal(t, adminURL); got != 0 {
+		t.Fatalf("captured_total after 2 POST /events: got %d want 0 (events must not count as captures)", got)
+	}
+
+	// A real capture request must increment captured_total.
+	if resp := fire(t, captureURL+"/api/order", "POST", []byte(`{"amount":1}`), nil); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("capture: got %d want 202", resp.StatusCode)
+	}
+	if !waitFor(func() bool { return scrapeCapturedTotal(t, adminURL) == 1 }, 5*time.Second) {
+		t.Fatalf("captured_total did not reach 1 after a real capture; got %d", scrapeCapturedTotal(t, adminURL))
+	}
 }

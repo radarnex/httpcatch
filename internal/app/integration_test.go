@@ -1892,8 +1892,11 @@ func TestIntegration_Metrics(t *testing.T) {
 		t.Errorf("status: got %d want 200", resp.StatusCode)
 	}
 	ct := resp.Header.Get("Content-Type")
-	if ct != "text/plain; version=0.0.4; charset=utf-8" {
-		t.Errorf("Content-Type: got %q want text/plain; version=0.0.4; charset=utf-8", ct)
+	// promhttp negotiates the Prometheus text format and appends an escaping
+	// parameter (e.g. "; escaping=underscores") to the content type. Assert the
+	// stable prefix rather than the exact string.
+	if !strings.HasPrefix(ct, "text/plain; version=0.0.4") {
+		t.Errorf("Content-Type: got %q want prefix text/plain; version=0.0.4", ct)
 	}
 
 	metricNames := []string{

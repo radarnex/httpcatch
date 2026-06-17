@@ -5,11 +5,19 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/redact"
 	"github.com/radarnex/httpcatch/internal/sinks"
 )
+
+// DurationObserver records a single duration sample in seconds. It is satisfied
+// by prometheus.Histogram; the pipeline depends only on this minimal surface so
+// it stays free of the metrics package.
+type DurationObserver interface {
+	Observe(float64)
+}
 
 type WorkerPool struct {
 	size          int
@@ -20,6 +28,7 @@ type WorkerPool struct {
 	wg            sync.WaitGroup
 	panics        atomic.Uint64
 	errorCounters *SinkErrorCounters
+	processing    DurationObserver
 }
 
 func NewWorkerPool(size int, q *capture.Queue, r redact.Redactor, ss []sinks.Sink, logger *slog.Logger, errorCounters *SinkErrorCounters) *WorkerPool {
@@ -38,6 +47,10 @@ func NewWorkerPool(size int, q *capture.Queue, r redact.Redactor, ss []sinks.Sin
 		errorCounters: errorCounters,
 	}
 }
+
+// SetProcessingObserver wires the histogram that records per-record processing
+// duration. It must be called before Start; a nil observer disables timing.
+func (p *WorkerPool) SetProcessingObserver(o DurationObserver) { p.processing = o }
 
 // Start launches workers. Workers drain the queue until it is closed; ctx is
 // only passed to Sink.Write so slow sinks can observe cancellation. To stop
@@ -60,6 +73,12 @@ func (p *WorkerPool) run(ctx context.Context) {
 }
 
 func (p *WorkerPool) process(ctx context.Context, rec capture.Record) {
+	start := time.Now()
+	defer func() {
+		if p.processing != nil {
+			p.processing.Observe(time.Since(start).Seconds())
+		}
+	}()
 	defer func() {
 		if v := recover(); v != nil {
 			p.panics.Add(1)

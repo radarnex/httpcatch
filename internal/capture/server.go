@@ -34,16 +34,30 @@ func captureHandler(opts HandlerOptions) http.HandlerFunc {
 		defer r.Body.Close()
 		body, originalSize, truncated, err := CapBody(r.Body, opts.BodyCap)
 		if err != nil {
+			opts.Counters.incBodyReadError()
 			opts.Logger.Warn("body read failed; record dropped", "path", r.URL.Path, "err", err)
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		opts.Queue.Enqueue(buildRecord(r, body, originalSize, truncated, opts.Counters, opts.ServiceHeader))
+		rec := buildRecord(r, body, originalSize, truncated, opts.ServiceHeader)
+		if opts.Queue.Enqueue(rec) {
+			// The captured-family counters share one population: a request that
+			// drops on a full queue is not captured, so its service/correlation
+			// classification must not advance either, or dashboards comparing
+			// captured_without_* against captured_total see impossible ratios.
+			opts.Counters.incCaptured()
+			if rec.ServiceSource == ServiceSourceUnknown {
+				opts.Counters.incWithoutService()
+			}
+			if rec.CorrelationSource == CorrelationSourceSynthesized {
+				opts.Counters.incWithoutCorrelation()
+			}
+		}
 		w.WriteHeader(http.StatusAccepted)
 	}
 }
 
-func buildRecord(r *http.Request, body []byte, originalSize int, truncated bool, counters *Counters, serviceHeader string) *CapturedRequest {
+func buildRecord(r *http.Request, body []byte, originalSize int, truncated bool, serviceHeader string) *CapturedRequest {
 	reqCookies := r.Cookies()
 	cookies := make([]Cookie, 0, len(reqCookies))
 	for _, c := range reqCookies {
@@ -64,14 +78,7 @@ func buildRecord(r *http.Request, body []byte, originalSize int, truncated bool,
 	}
 
 	service, serviceSource := IdentifyService(headers, serviceHeader)
-	if serviceSource == ServiceSourceUnknown {
-		counters.incWithoutService()
-	}
-
 	correlationID, correlationSource := IdentifyCorrelation(headers)
-	if correlationSource == CorrelationSourceSynthesized {
-		counters.incWithoutCorrelation()
-	}
 
 	return &CapturedRequest{
 		ID:                uuid.NewString(),

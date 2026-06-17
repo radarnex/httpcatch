@@ -114,10 +114,13 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 	}
 
 	adminSrv, err := admin.New(cfg.Admin, logger, admin.MetricSources{
+		CapturedTotal:                   counters.CapturedTotal,
 		DroppedTotal:                    q.DroppedTotal,
+		CaptureErrorsTotal:              counters.CaptureErrorsTotal,
 		CapturedWithoutCorrelationTotal: counters.CapturedWithoutCorrelationTotal,
 		CapturedWithoutServiceTotal:     counters.CapturedWithoutServiceTotal,
 		RedactionErrorsTotal:            ruleset.RedactionErrorsTotal,
+		WorkerPanicsTotal:               workers.PanicsCount,
 		Unredacted:                      ruleset.IsUnredacted,
 
 		EventsIngestedResponseTotal:             eventsCounters.EventsIngestedResponseTotal,
@@ -152,6 +155,10 @@ func Build(cfg config.Config, logger *slog.Logger, stdoutWriter io.Writer, extra
 	if err != nil {
 		return nil, fmt.Errorf("admin server: %w", err)
 	}
+
+	// The processing-duration histogram lives in the admin server's metrics
+	// registry; the worker pool observes that same instance.
+	workers.SetProcessingObserver(adminSrv.ProcessingObserver())
 
 	return &App{
 		Cfg:      cfg,

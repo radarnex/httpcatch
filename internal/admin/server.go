@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/config"
 	"github.com/radarnex/httpcatch/internal/inspect"
+	"github.com/radarnex/httpcatch/internal/metrics"
 )
 
 // shutdownDrainTimeout is the maximum time given to in-flight requests when
@@ -29,6 +31,7 @@ type Server struct {
 	router   chi.Router
 	store    *SessionStore
 	limiter  *AuthLimiter
+	prom     *metrics.Prom
 }
 
 // ReadSources holds the optional Reader implementations wired at app
@@ -95,8 +98,8 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 	store := NewSessionStore(time.Now)
 	limiter := NewAuthLimiter()
 
-	// Wire auth failure counters into metric sources before registering the
-	// metrics handler.
+	// Wire auth failure counters into metric sources before building the
+	// metrics registry.
 	sources.AuthFailuresInvalidTokenTotal = limiter.InvalidTokenTotal
 	sources.AuthFailuresRateLimitedTotal = limiter.RateLimitedTotal
 	sources.AuthFailuresCSRFBlockedTotal = limiter.CSRFBlockedTotal
@@ -113,10 +116,11 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 	es := serverOpts.Events
 
 	sources.normalize()
+	prom := metrics.New(sources.promSources())
 
 	r := chi.NewRouter()
 	r.With(jsonSecurityHeaders()).Get("/healthz", healthzHandler)
-	r.With(jsonSecurityHeaders()).Get("/metrics", metricsHandler(sources))
+	r.With(jsonSecurityHeaders()).Method(http.MethodGet, "/metrics", prom.Handler())
 	r.With(htmlSecurityHeaders()).Get("/login", auth.loginPageHandler)
 	r.With(htmlSecurityHeaders(), csrfOriginCheck(limiter)).Post("/auth/login", auth.loginPostHandler)
 	r.With(htmlSecurityHeaders(), csrfOriginCheck(limiter)).Post("/auth/logout", auth.logoutHandler)
@@ -148,6 +152,7 @@ func New(cfg config.AdminConfig, logger *slog.Logger, sources MetricSources, opt
 		router:   r,
 		store:    store,
 		limiter:  limiter,
+		prom:     prom,
 	}, nil
 }
 
@@ -159,6 +164,12 @@ func (s *Server) Router() chi.Router {
 // AuthLimiter returns the rate limiter used by this server's auth handlers.
 func (s *Server) AuthLimiter() *AuthLimiter {
 	return s.limiter
+}
+
+// ProcessingObserver returns the histogram the pipeline worker pool records
+// per-record processing duration into, exposed on this server's /metrics.
+func (s *Server) ProcessingObserver() prometheus.Observer {
+	return s.prom.ProcessingObserver()
 }
 
 // Serve binds the admin port and runs until ctx is cancelled or the server
