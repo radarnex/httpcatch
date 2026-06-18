@@ -323,15 +323,11 @@ func (v rootView) BodyBase64() string {
 	return base64.StdEncoding.EncodeToString(v.Body)
 }
 
-// BodyText returns the body as a human-readable string, pretty-printed when the
-// content-type indicates JSON.
+// BodyText returns the body as a string. Beautification of structured formats
+// is performed client-side so the raw bytes remain available for the
+// Raw/Beautified toggle.
 func (v rootView) BodyText() string {
-	return formatBody(v.Body, v.ContentType)
-}
-
-// IsJSON reports whether the request body is JSON.
-func (v rootView) IsJSON() bool {
-	return isJSONContentType(v.ContentType)
+	return formatBody(v.Body)
 }
 
 // BodyOriginalSizeLabel returns the body size for display. When BodyTruncated
@@ -408,16 +404,18 @@ func (ev eventView) Body() []byte {
 
 func (ev eventView) BodyText() string {
 	if r, ok := ev.record.(*capture.ResponseEvent); ok {
-		return formatBody(r.Body, r.ContentType)
+		return formatBody(r.Body)
 	}
 	return ""
 }
 
-func (ev eventView) IsJSON() bool {
+// ContentType returns the response event's content-type, used as the
+// client-side beautify hint.
+func (ev eventView) ContentType() string {
 	if r, ok := ev.record.(*capture.ResponseEvent); ok {
-		return isJSONContentType(r.ContentType)
+		return r.ContentType
 	}
-	return false
+	return ""
 }
 
 func (ev eventView) BodyTruncated() bool {
@@ -482,16 +480,18 @@ func (ev eventView) OutboundRequestBody() []byte {
 
 func (ev eventView) OutboundRequestBodyText() string {
 	if r, ok := ev.record.(*capture.OutboundEvent); ok {
-		return formatBody(r.Request.Body, r.Request.ContentType)
+		return formatBody(r.Request.Body)
 	}
 	return ""
 }
 
-func (ev eventView) OutboundRequestIsJSON() bool {
+// OutboundRequestContentType returns the outbound request's content-type, used
+// as the client-side beautify hint.
+func (ev eventView) OutboundRequestContentType() string {
 	if r, ok := ev.record.(*capture.OutboundEvent); ok {
-		return isJSONContentType(r.Request.ContentType)
+		return r.Request.ContentType
 	}
-	return false
+	return ""
 }
 
 func (ev eventView) OutboundRequestBodyTruncated() bool {
@@ -545,16 +545,18 @@ func (ev eventView) OutboundResponseBody() []byte {
 
 func (ev eventView) OutboundResponseBodyText() string {
 	if r, ok := ev.record.(*capture.OutboundEvent); ok && r.Response != nil {
-		return formatBody(r.Response.Body, r.Response.ContentType)
+		return formatBody(r.Response.Body)
 	}
 	return ""
 }
 
-func (ev eventView) OutboundResponseIsJSON() bool {
+// OutboundResponseContentType returns the outbound response's content-type, used
+// as the client-side beautify hint.
+func (ev eventView) OutboundResponseContentType() string {
 	if r, ok := ev.record.(*capture.OutboundEvent); ok && r.Response != nil {
-		return isJSONContentType(r.Response.ContentType)
+		return r.Response.ContentType
 	}
-	return false
+	return ""
 }
 
 func (ev eventView) OutboundResponseBodyTruncated() bool {
@@ -861,23 +863,10 @@ func httpStatusClass(code int) string {
 	}
 }
 
-// isJSONContentType reports whether the content-type header value indicates JSON.
-func isJSONContentType(ct string) bool {
-	return strings.Contains(strings.ToLower(ct), "application/json")
-}
-
-// formatBody formats body bytes for display. JSON bodies are pretty-printed;
-// all others are returned as plain strings.
-func formatBody(body []byte, contentType string) string {
-	if len(body) == 0 {
-		return ""
-	}
-	if isJSONContentType(contentType) {
-		var buf bytes.Buffer
-		if err := json.Indent(&buf, body, "", "  "); err == nil {
-			return buf.String()
-		}
-	}
+// formatBody returns body bytes as a string for display. Structured formats
+// (JSON, XML, form-urlencoded, HTML) are beautified client-side via the
+// Raw/Beautified toggle, so the raw bytes are emitted here unchanged.
+func formatBody(body []byte) string {
 	return string(body)
 }
 

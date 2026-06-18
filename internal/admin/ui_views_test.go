@@ -1151,7 +1151,7 @@ func TestUIRequestDetail_CopyAsCURLButton_HiddenAttribute(t *testing.T) {
 	}
 }
 
-func TestUIRequestDetail_JSONBodyPrettyPrinted(t *testing.T) {
+func TestUIRequestDetail_JSONBodyHasBeautifyHint(t *testing.T) {
 	t.Parallel()
 
 	mem := sinks.NewMemorySink(10)
@@ -1181,20 +1181,22 @@ func TestUIRequestDetail_JSONBodyPrettyPrinted(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
 
-	// Pretty-printed JSON renders with indented lines; the HTML-escaped quote is &#34;.
-	// We verify the body-json class is applied (confirms JSON detection) and
-	// that the key appears somewhere in the rendered output.
-	if !strings.Contains(s, "body-json") {
-		t.Error("detail: body-json class not found for JSON body")
+	// The body is emitted raw (beautification happens client-side via the
+	// Raw/Beautified toggle). The body block carries the hint attributes the
+	// JS toggle reads: the beautify marker, the content-type, and whether the
+	// body was truncated.
+	if !strings.Contains(s, "data-beautify") {
+		t.Error("detail: data-beautify marker not found on JSON body block")
 	}
-	// The key "key" must appear in the HTML (possibly HTML-escaped).
+	if !strings.Contains(s, `data-content-type="application/json"`) {
+		t.Error("detail: data-content-type hint not found for JSON body")
+	}
+	if !strings.Contains(s, `data-truncated="false"`) {
+		t.Error("detail: data-truncated hint not found for JSON body")
+	}
+	// The raw key must appear in the HTML (quotes HTML-escaped to &#34;).
 	if !strings.Contains(s, "key") {
 		t.Error("detail: JSON body key not found in rendered HTML")
-	}
-	// Indentation: pretty-printed JSON produces lines starting with spaces.
-	// html/template preserves whitespace in pre elements.
-	if !strings.Contains(s, "\n  ") {
-		t.Error("detail: JSON body does not appear to be indented (no newline+spaces)")
 	}
 }
 

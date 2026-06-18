@@ -55,6 +55,15 @@
             <button type="button" id="tz-local" role="radio" aria-checked="false">Local</button>
           </div>
           <div class="admin-menu-sep"></div>
+          <div class="admin-menu-h">Beautify bodies</div>
+          <label class="admin-menu-field" for="beautify-limit">
+            <span>Auto up to</span>
+            <span class="admin-menu-field-input">
+              <input type="number" id="beautify-limit" min="0" max="1024" step="32" value="256" inputmode="numeric">
+              <span class="admin-menu-field-unit">KB</span>
+            </span>
+          </label>
+          <div class="admin-menu-sep"></div>
           <form action="/auth/logout" method="POST">
             <button type="submit" class="admin-menu-item danger">Log out</button>
           </form>
@@ -104,6 +113,7 @@
   <div id="detail-panel-scrim" class="drawer-mask" hidden></div>
 
   <script src="/static/searchql.js" defer></script>
+  <script src="/static/bodyformat.js" defer></script>
   <script src="/static/app.js" defer></script>
 </body>
 </html>{{end}}

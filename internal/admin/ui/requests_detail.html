@@ -61,7 +61,7 @@
     <div class="section-h">Body
       {{if .Root.BodyTruncated}}<span class="truncation-badge">truncated — original {{.Root.BodyOriginalSizeLabel}} bytes</span>{{end}}
     </div>
-    <pre class="body-block{{if .Root.IsJSON}} body-json{{end}}">{{.Root.BodyText}}</pre>
+    <pre class="body-block" data-beautify data-content-type="{{.Root.ContentType}}" data-truncated="{{.Root.BodyTruncated}}">{{.Root.BodyText}}</pre>
     {{else}}
     <div class="section-h">Body</div>
     <div class="no-correlated-records">No request body.</div>
@@ -89,7 +89,7 @@
     <div class="section-h">Body
       {{if .BodyTruncated}}<span class="truncation-badge">truncated — original {{.BodyOriginalSizeLabel}} bytes</span>{{end}}
     </div>
-    <pre class="body-block{{if .IsJSON}} body-json{{end}}">{{.BodyText}}</pre>
+    <pre class="body-block" data-beautify data-content-type="{{.ContentType}}" data-truncated="{{.BodyTruncated}}">{{.BodyText}}</pre>
     {{end}}
     {{else}}
     <div class="no-correlated-records">No correlated response event yet. The app middleware may not have posted a <code>type: response</code> event for this request.</div>
@@ -132,7 +132,7 @@
     <div class="body-label">Body
       {{if .BodyTruncated}}<span class="truncation-badge">truncated — original {{.BodyOriginalSizeLabel}} bytes</span>{{end}}
     </div>
-    <pre class="body-block{{if .IsJSON}} body-json{{end}}">{{.BodyText}}</pre>
+    <pre class="body-block" data-beautify data-content-type="{{.ContentType}}" data-truncated="{{.BodyTruncated}}">{{.BodyText}}</pre>
     {{end}}
   </div>
 
@@ -163,7 +163,7 @@
       <div class="body-label">Body
         {{if .OutboundRequestBodyTruncated}}<span class="truncation-badge">truncated — original {{.OutboundRequestBodyOriginalSizeLabel}} bytes</span>{{end}}
       </div>
-      <pre class="body-block{{if .OutboundRequestIsJSON}} body-json{{end}}">{{.OutboundRequestBodyText}}</pre>
+      <pre class="body-block" data-beautify data-content-type="{{.OutboundRequestContentType}}" data-truncated="{{.OutboundRequestBodyTruncated}}">{{.OutboundRequestBodyText}}</pre>
       {{end}}
     </div>
 
@@ -184,7 +184,7 @@
       <div class="body-label">Body
         {{if .OutboundResponseBodyTruncated}}<span class="truncation-badge">truncated — original {{.OutboundResponseBodyOriginalSizeLabel}} bytes</span>{{end}}
       </div>
-      <pre class="body-block{{if .OutboundResponseIsJSON}} body-json{{end}}">{{.OutboundResponseBodyText}}</pre>
+      <pre class="body-block" data-beautify data-content-type="{{.OutboundResponseContentType}}" data-truncated="{{.OutboundResponseBodyTruncated}}">{{.OutboundResponseBodyText}}</pre>
       {{end}}
       {{else}}
       <div class="no-response-indicator">no response — call did not complete</div>

@@ -142,6 +142,61 @@ window.__tz = (function () {
   };
 })();
 
+// ── Beautify size preference ───────────────────────────────────────
+// Structured bodies (JSON, XML, form, HTML) are auto-beautified in the detail
+// viewer up to this size; larger bodies show the toggle but stay raw until the
+// operator opts in, so a near-cap body is never reflowed eagerly. The limit is
+// expressed in kilobytes and editable from the admin menu; 0 disables auto.
+window.__beautify = (function () {
+  var KEY = "httpcatch.beautify.limit";
+  var DEFAULT_KB = 256;
+  var MIN_KB = 0;
+  var MAX_KB = 1024;
+
+  function clamp(kb) {
+    if (isNaN(kb)) return DEFAULT_KB;
+    if (kb < MIN_KB) return MIN_KB;
+    if (kb > MAX_KB) return MAX_KB;
+    return kb;
+  }
+
+  function read() {
+    try { return clamp(parseInt(localStorage.getItem(KEY), 10)); }
+    catch (e) { return DEFAULT_KB; }
+  }
+
+  var currentKB = read();
+  var listeners = [];
+
+  function limitKB() { return currentKB; }
+  function limitBytes() { return currentKB * 1024; }
+
+  function setKB(kb) {
+    currentKB = clamp(parseInt(kb, 10));
+    try { localStorage.setItem(KEY, String(currentKB)); } catch (e) {}
+    syncInput();
+    for (var i = 0; i < listeners.length; i++) {
+      try { listeners[i](currentKB); } catch (_) {}
+    }
+  }
+
+  function onChange(fn) { listeners.push(fn); }
+
+  function syncInput() {
+    var input = document.getElementById("beautify-limit");
+    if (input && input.value !== String(currentKB)) input.value = String(currentKB);
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    var input = document.getElementById("beautify-limit");
+    if (!input) return;
+    input.value = String(currentKB);
+    input.addEventListener("change", function () { setKB(input.value); });
+  });
+
+  return { limitKB: limitKB, limitBytes: limitBytes, setKB: setKB, onChange: onChange };
+})();
+
 // ── Admin menu open/close ──────────────────────────────────────────
 (function () {
   document.addEventListener("DOMContentLoaded", function () {
@@ -1167,6 +1222,7 @@ function initCurlCopy(root) {
           renderDrawerFromDoc(doc, body, pathLabel);
           initCurlCopy(body);
           wireDrawerTabs(body);
+          if (window.__bodybeautify) window.__bodybeautify.init(body);
         })
         .catch(function (err) {
           if (currentID !== id) return;
@@ -2378,4 +2434,154 @@ function initCurlCopy(root) {
       }
     });
   }
+})();
+
+// ── Body beautify toggle ───────────────────────────────────────────
+// Wires a per-block [Raw | Beautified] segmented control onto every
+// `pre[data-beautify]` in the detail viewer. Detection and formatting live in
+// bodyformat.js; this module owns the DOM and the auto/size-guard policy:
+// structured bodies under the configured limit are beautified on render, while
+// larger or unparseable bodies stay raw (the toggle is only offered when a
+// body can actually be beautified, or kept opt-in past the size limit).
+window.__bodybeautify = (function () {
+  var utf8Encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
+
+  // UTF-8 byte length: bodies are captured and size-capped as bytes, so the
+  // size guard compares against bytes rather than UTF-16 char count.
+  function byteLength(s) {
+    if (utf8Encoder) return utf8Encoder.encode(s).length;
+    var bytes = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c < 0x80) bytes += 1;
+      else if (c < 0x800) bytes += 2;
+      else if (c >= 0xd800 && c <= 0xdbff) { bytes += 4; i++; }
+      else bytes += 3;
+    }
+    return bytes;
+  }
+
+  function init(root) {
+    root = root || document;
+    var fmt = window.__bodyformat;
+    if (!fmt) return;
+    var blocks = root.querySelectorAll("pre[data-beautify]:not([data-beautify-ready])");
+    for (var i = 0; i < blocks.length; i++) setupBlock(blocks[i], fmt);
+  }
+
+  function setupBlock(pre, fmt) {
+    pre.setAttribute("data-beautify-ready", "");
+    var raw = pre.textContent;
+    var contentType = pre.getAttribute("data-content-type") || "";
+    var truncated = pre.getAttribute("data-truncated") === "true";
+    var format = fmt.detect(contentType, raw);
+
+    // Nothing to offer for unknown formats or truncated bodies (a body cut at
+    // the cap will not parse, and re-indenting a fragment is misleading).
+    if (!format || truncated) return;
+
+    var state = {
+      pre: pre, raw: raw, format: format,
+      bytes: byteLength(raw),
+      beautified: undefined,   // lazily computed; null once known unparseable
+      mode: "raw",
+      userToggled: false,
+    };
+
+    var small = state.bytes < window.__beautify.limitBytes();
+    if (small) {
+      // Beautify eagerly; if it does not parse, keep raw and offer no toggle.
+      state.beautified = fmt.beautify(raw, format);
+      if (state.beautified == null) return;
+    }
+
+    if (!buildToggle(pre, state)) return;   // no label row to host the control
+    pre.__beautifyState = state;
+    setMode(state, small ? "beautified" : "raw", false);
+  }
+
+  function buildToggle(pre, state) {
+    var host = pre.previousElementSibling;
+    if (!host || (!host.classList.contains("section-h") && !host.classList.contains("body-label"))) {
+      return false;
+    }
+    var seg = document.createElement("div");
+    seg.className = "body-toggle";
+    seg.setAttribute("role", "radiogroup");
+    seg.setAttribute("aria-label", "Body display");
+
+    state.rawBtn = makeBtn("Raw");
+    state.beauBtn = makeBtn("Beautified");
+    seg.appendChild(state.rawBtn);
+    seg.appendChild(state.beauBtn);
+
+    state.rawBtn.addEventListener("click", function () { setMode(state, "raw", true); });
+    state.beauBtn.addEventListener("click", function () { setMode(state, "beautified", true); });
+
+    host.appendChild(seg);
+    return true;
+  }
+
+  function makeBtn(label) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", "false");
+    b.textContent = label;
+    return b;
+  }
+
+  function setMode(state, mode, byUser) {
+    if (byUser) state.userToggled = true;
+    if (mode === "beautified") {
+      if (state.beautified === undefined) {
+        state.beautified = window.__bodyformat.beautify(state.raw, state.format);
+      }
+      if (state.beautified == null) {
+        // A large body that turns out not to parse: lock the control to raw.
+        if (state.beauBtn) {
+          state.beauBtn.disabled = true;
+          state.beauBtn.title = "Could not beautify this body";
+        }
+        mode = "raw";
+      }
+    }
+    state.mode = mode;
+    var beautified = mode === "beautified";
+    state.pre.textContent = beautified ? state.beautified : state.raw;
+    state.pre.classList.toggle("is-beautified", beautified);
+    syncButtons(state);
+  }
+
+  function syncButtons(state) {
+    if (state.rawBtn) {
+      var rawOn = state.mode === "raw";
+      state.rawBtn.classList.toggle("on", rawOn);
+      state.rawBtn.setAttribute("aria-checked", rawOn ? "true" : "false");
+    }
+    if (state.beauBtn) {
+      var beauOn = state.mode === "beautified";
+      state.beauBtn.classList.toggle("on", beauOn);
+      state.beauBtn.setAttribute("aria-checked", beauOn ? "true" : "false");
+    }
+  }
+
+  // When the operator changes the auto-beautify size limit, re-evaluate the
+  // default for blocks they have not manually toggled.
+  function reapplyLimit() {
+    var limit = window.__beautify.limitBytes();
+    var blocks = document.querySelectorAll("pre[data-beautify-ready]");
+    for (var i = 0; i < blocks.length; i++) {
+      var state = blocks[i].__beautifyState;
+      if (!state || state.userToggled) continue;
+      setMode(state, state.bytes < limit ? "beautified" : "raw", false);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    init(document);
+    if (window.__beautify) window.__beautify.onChange(reapplyLimit);
+  });
+
+  return { init: init };
 })();
