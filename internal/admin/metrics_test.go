@@ -164,10 +164,11 @@ func TestMetrics_UnauthenticatedSuccess(t *testing.T) {
 	ctx := t.Context()
 	go func() { _ = srv.Serve(ctx) }()
 
+	c := testClient(t)
 	deadline := time.Now().Add(3 * time.Second)
 	var resp *http.Response
 	for time.Now().Before(deadline) {
-		resp, err = http.Get("http://" + addr + "/healthz")
+		resp, err = c.Get("http://" + addr + "/healthz")
 		if err == nil {
 			resp.Body.Close()
 			break
@@ -179,7 +180,7 @@ func TestMetrics_UnauthenticatedSuccess(t *testing.T) {
 	}
 
 	// No auth header — must succeed.
-	resp1, err := http.Get("http://" + addr + "/metrics")
+	resp1, err := c.Get("http://" + addr + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics no auth: %v", err)
 	}
@@ -192,7 +193,7 @@ func TestMetrics_UnauthenticatedSuccess(t *testing.T) {
 	// Invalid bearer header — must still succeed.
 	req2, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/metrics", nil)
 	req2.Header.Set("Authorization", "Bearer invalid-token-xyz")
-	resp2, err := http.DefaultClient.Do(req2)
+	resp2, err := c.Do(req2)
 	if err != nil {
 		t.Fatalf("GET /metrics invalid bearer: %v", err)
 	}

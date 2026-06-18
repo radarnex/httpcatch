@@ -16,7 +16,8 @@ func TestSecurityHeaders_HTMLRoute_SetsAllFourHeaders(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	resp, err := http.Get(ts.URL + "/login")
+	c := testClient(t)
+	resp, err := c.Get(ts.URL + "/login")
 	if err != nil {
 		t.Fatalf("GET /login: %v", err)
 	}
@@ -44,7 +45,8 @@ func TestSecurityHeaders_JSONRoute_SetsNosniffNoCSP(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	resp, err := http.Get(ts.URL + "/healthz")
+	c := testClient(t)
+	resp, err := c.Get(ts.URL + "/healthz")
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
@@ -71,7 +73,8 @@ func TestSecurityHeaders_StaticRoute_SetsNosniff(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	resp, err := http.Get(ts.URL + "/static/app.css")
+	c := testClient(t)
+	resp, err := c.Get(ts.URL + "/static/app.css")
 	if err != nil {
 		t.Fatalf("GET /static/app.css: %v", err)
 	}
@@ -93,9 +96,10 @@ func TestSecurityHeaders_StatusEndpoint_JSONCharset(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
+	c := testClient(t)
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/status", nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("GET /status: %v", err)
 	}
@@ -117,10 +121,11 @@ func TestSecurityHeaders_AuthedUIRoute_SetsCSP(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
+	c := testClient(t)
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests", nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "text/html")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("GET /ui/requests: %v", err)
 	}

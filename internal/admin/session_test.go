@@ -1,7 +1,9 @@
 package admin_test
 
 import (
+	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,21 +157,39 @@ func TestSessionStore_ConcurrentOps(t *testing.T) {
 	}
 }
 
-func TestSessionStore_StartSweeper_StopsOnCancel(t *testing.T) {
+// TestSessionStore_StartSweeper_Ticks asserts that StartSweeper launches a
+// goroutine that calls Sweep on schedule. It deliberately does NOT assert the
+// goroutine exits on cancel — proving exit deterministically needs a
+// production-side signal (see the plan's Deferred section). cancel() here is a
+// smoke check that cancellation does not panic, not a leak assertion.
+func TestSessionStore_StartSweeper_Ticks(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	ticks := 0
+	// ticks counts sweeper iterations: the sweeper calls now() once per Sweep,
+	// and no other call path touches now() in this test. It is written by the
+	// sweeper goroutine and read by the test, so it must be atomic.
+	var ticks atomic.Int64
 	store := admin.NewSessionStore(func() time.Time {
-		ticks++
+		ticks.Add(1)
 		return now
 	})
 
-	ctx := t.Context()
-	store.StartSweeper(ctx, 10*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
+	store.StartSweeper(ctx, time.Millisecond)
 
-	// Give the sweeper a few ticks.
-	time.Sleep(60 * time.Millisecond)
+	// Assert the sweeper actually runs: poll (bounded) until the first tick lands
+	// instead of sleeping a fixed duration and hoping. Fails fast if the sweeper
+	// goroutine never ticks.
+	deadline := time.Now().Add(2 * time.Second)
+	for ticks.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("sweeper did not tick within 2s; StartSweeper goroutine never ran")
+		}
+		time.Sleep(time.Millisecond)
+	}
 
-	// Context cancels automatically when the test ends; just confirm no panic.
+	// Smoke check: cancelling must not panic. This does not prove the goroutine
+	// returns (see Deferred); it only exercises the cancel call.
+	cancel()
 }

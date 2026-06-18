@@ -225,7 +225,7 @@ func TestLiveTail_SinceFilter_ReturnsNewRecordsOnly(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "application/json")
 
-	httpResp, err := http.DefaultClient.Do(req)
+	httpResp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests?since=: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestLiveTail_LimitFifty_ReturnsAtMost50(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "application/json")
 
-	httpResp, err := http.DefaultClient.Do(req)
+	httpResp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests?limit=50: %v", err)
 	}

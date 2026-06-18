@@ -536,7 +536,7 @@ func TestRequests_SQLiteOnly_NonTemporalFilter_ReadSource(t *testing.T) {
 	// Non-temporal filter → must be SQLite-only.
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/requests?"+qParam("service:orders"), nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests: %v", err)
 	}
@@ -569,7 +569,7 @@ func TestRequests_TemporalOnly_Memory_ReadSource(t *testing.T) {
 	sinceStr := base.Add(-time.Hour).Format(time.RFC3339)
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/requests?since="+sinceStr, nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests: %v", err)
 	}

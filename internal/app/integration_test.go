@@ -107,7 +107,7 @@ func fire(t *testing.T, url, method string, body []byte, hdr http.Header) *http.
 			req.Header.Add(k, v)
 		}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -1608,8 +1608,10 @@ func TestIntegration_AdminPort_HealthzAndCapturePort(t *testing.T) {
 	waitPort(t, adminAddr, 3*time.Second)
 	waitPort(t, captureAddr, 3*time.Second)
 
+	c := testClient(t)
+
 	// Hit /healthz on the admin port.
-	resp, err := http.Get("http://" + adminAddr + "/healthz")
+	resp, err := c.Get("http://" + adminAddr + "/healthz")
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
@@ -1623,7 +1625,7 @@ func TestIntegration_AdminPort_HealthzAndCapturePort(t *testing.T) {
 	}
 
 	// Fire a captured request at the capture port and assert it lands.
-	captureResp, err := http.Post("http://"+captureAddr+"/test", "text/plain", strings.NewReader("payload"))
+	captureResp, err := c.Post("http://"+captureAddr+"/test", "text/plain", strings.NewReader("payload"))
 	if err != nil {
 		t.Fatalf("capture POST: %v", err)
 	}
@@ -1687,7 +1689,7 @@ func TestIntegration_AdminPort_HealthzIgnoresBogusAuth(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodGet, "http://"+adminAddr+"/healthz", nil)
 	req.Header.Set("Authorization", "Bearer totally-invalid-token")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /healthz with auth header: %v", err)
 	}
@@ -1737,9 +1739,10 @@ func TestIntegration_ShutdownDrainsQueueToCtxAwareSink(t *testing.T) {
 
 	waitPort(t, captureAddr, 3*time.Second)
 
+	c := testClient(t)
 	for i := range records {
 		body := fmt.Sprintf("payload-%d", i)
-		resp, err := http.Post("http://"+captureAddr+"/drain-test", "text/plain", strings.NewReader(body))
+		resp, err := c.Post("http://"+captureAddr+"/drain-test", "text/plain", strings.NewReader(body))
 		if err != nil {
 			t.Fatalf("capture POST %d: %v", i, err)
 		}
@@ -1880,8 +1883,10 @@ func TestIntegration_Metrics(t *testing.T) {
 	captureURL, adminURL, teardown := startFullApp(t, cfg)
 	defer teardown()
 
+	mc := testClient(t)
+
 	// Initial GET /metrics — assert 200 and documented shape.
-	resp, err := http.Get(adminURL + "/metrics")
+	resp, err := mc.Get(adminURL + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
@@ -1937,7 +1942,7 @@ func TestIntegration_Metrics(t *testing.T) {
 
 	// Wait for the worker to process the record so the counter increments.
 	if !waitFor(func() bool {
-		resp2, err2 := http.Get(adminURL + "/metrics")
+		resp2, err2 := mc.Get(adminURL + "/metrics")
 		if err2 != nil {
 			return false
 		}
@@ -1984,9 +1989,10 @@ func TestIntegration_Status(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+token)
 		return req
 	}
+	sc := testClient(t)
 	getStatus := func() map[string]any {
 		req, _ := http.NewRequest(http.MethodGet, adminSrv.URL+"/status", nil)
-		resp, err := http.DefaultClient.Do(bearer(req))
+		resp, err := sc.Do(bearer(req))
 		if err != nil {
 			t.Fatalf("GET /status: %v", err)
 		}
@@ -2073,11 +2079,7 @@ func TestIntegration_UIShell(t *testing.T) {
 	_, adminURL, teardown := startFullApp(t, cfg)
 	defer teardown()
 
-	noFollow := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	noFollow := noFollowClient(t)
 
 	// Log in to obtain a session cookie.
 	form := url.Values{"token": {token}}
@@ -2163,7 +2165,7 @@ func TestIntegration_UIShell(t *testing.T) {
 	}
 
 	// GET /static/app.css (no auth) → 200 + correct content type.
-	cssResp, err := http.Get(adminURL + "/static/app.css")
+	cssResp, err := noFollow.Get(adminURL + "/static/app.css")
 	if err != nil {
 		t.Fatalf("GET /static/app.css: %v", err)
 	}
@@ -2177,7 +2179,7 @@ func TestIntegration_UIShell(t *testing.T) {
 	}
 
 	// GET /static/app.js (no auth) → 200 + correct content type.
-	jsResp, err := http.Get(adminURL + "/static/app.js")
+	jsResp, err := noFollow.Get(adminURL + "/static/app.js")
 	if err != nil {
 		t.Fatalf("GET /static/app.js: %v", err)
 	}
@@ -2391,6 +2393,7 @@ func TestIntegration_GetRequests_MemoryAndSQLite(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+token)
 		return req
 	}
+	pc := testClient(t)
 
 	// Fire numRequests captured requests, each with a distinct X-Request-Id for
 	// correlation.
@@ -2398,7 +2401,7 @@ func TestIntegration_GetRequests_MemoryAndSQLite(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, captureURL+"/api/items", nil)
 		req.Header.Set("X-Request-Id", fmt.Sprintf("req-%03d", i))
 		req.Header.Set("X-Httpcatch-Service", "items")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := pc.Do(req)
 		if err != nil {
 			t.Fatalf("fire %d: %v", i, err)
 		}
@@ -2411,7 +2414,7 @@ func TestIntegration_GetRequests_MemoryAndSQLite(t *testing.T) {
 	// Wait for all records to be processed.
 	if !waitFor(func() bool {
 		req, _ := http.NewRequest(http.MethodGet, adminURL+"/requests?limit=100", nil)
-		resp, err := http.DefaultClient.Do(bearer(req))
+		resp, err := pc.Do(bearer(req))
 		if err != nil {
 			return false
 		}
@@ -2429,7 +2432,7 @@ func TestIntegration_GetRequests_MemoryAndSQLite(t *testing.T) {
 
 	// GET /requests with no params → 200, correct source header.
 	req1, _ := http.NewRequest(http.MethodGet, adminURL+"/requests?limit=100", nil)
-	resp1, err := http.DefaultClient.Do(bearer(req1))
+	resp1, err := pc.Do(bearer(req1))
 	if err != nil {
 		t.Fatalf("GET /requests: %v", err)
 	}
@@ -2452,8 +2455,16 @@ func TestIntegration_GetRequests_MemoryAndSQLite(t *testing.T) {
 	for i := 1; i < len(body1.Records); i++ {
 		tsStr := body1.Records[i]["timestamp"].(string)
 		prevStr := body1.Records[i-1]["timestamp"].(string)
-		if tsStr > prevStr {
-			t.Errorf("sort order violation at [%d]: %q > %q", i, tsStr, prevStr)
+		ts, err := time.Parse(time.RFC3339Nano, tsStr)
+		if err != nil {
+			t.Fatalf("parse timestamp at [%d] %q: %v", i, tsStr, err)
+		}
+		prev, err := time.Parse(time.RFC3339Nano, prevStr)
+		if err != nil {
+			t.Fatalf("parse timestamp at [%d] %q: %v", i-1, prevStr, err)
+		}
+		if ts.After(prev) {
+			t.Errorf("sort order violation at [%d]: %s after %s", i, tsStr, prevStr)
 		}
 	}
 
@@ -2479,7 +2490,7 @@ func TestIntegration_GetRequests_MemoryAndSQLite(t *testing.T) {
 			url += "&cursor=" + cursorParam
 		}
 		req, _ := http.NewRequest(http.MethodGet, url, nil)
-		resp, err := http.DefaultClient.Do(bearer(req))
+		resp, err := pc.Do(bearer(req))
 		if err != nil {
 			t.Fatalf("paginate GET /requests: %v", err)
 		}
@@ -2528,9 +2539,11 @@ func TestIntegration_GetRequests_Auth(t *testing.T) {
 	_, adminURL, teardown := startFullApp(t, cfg)
 	defer teardown()
 
+	ac := testClient(t)
+
 	// Unauthenticated → 401.
 	req, _ := http.NewRequest(http.MethodGet, adminURL+"/requests", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := ac.Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests unauthenticated: %v", err)
 	}
@@ -2542,7 +2555,7 @@ func TestIntegration_GetRequests_Auth(t *testing.T) {
 	// Valid bearer → 200 with json.
 	req2, _ := http.NewRequest(http.MethodGet, adminURL+"/requests", nil)
 	req2.Header.Set("Authorization", "Bearer "+token)
-	resp2, err := http.DefaultClient.Do(req2)
+	resp2, err := ac.Do(req2)
 	if err != nil {
 		t.Fatalf("GET /requests bearer: %v", err)
 	}
@@ -2765,9 +2778,10 @@ func adminAddr(t *testing.T, token string) (string, *app.App) {
 
 	// Wait for the admin server to become reachable.
 	base := "http://" + addr
+	wc := testClient(t)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err2 := http.Get(base + "/healthz")
+		resp, err2 := wc.Get(base + "/healthz")
 		if err2 == nil {
 			resp.Body.Close()
 			break
@@ -2785,11 +2799,7 @@ func TestIntegration_AuthLimiter_LoopbackRateLimited(t *testing.T) {
 	const token = "a-very-long-admin-token-for-integration-testing-32c"
 	base, _ := adminAddr(t, token)
 
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := noFollowClient(t)
 
 	for i := range 6 {
 		form := url.Values{"token": {"wrong-token-" + fmt.Sprint(i)}}
@@ -2817,10 +2827,12 @@ func TestIntegration_AuthLimiter_BearerFailureCounted(t *testing.T) {
 	const token = "a-very-long-admin-token-for-integration-testing-32d"
 	base, _ := adminAddr(t, token)
 
+	bc := testClient(t)
+
 	// Send a request with a wrong bearer token to a protected route.
 	req, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
 	req.Header.Set("Authorization", "Bearer wrong-token")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := bc.Do(req)
 	if err != nil {
 		t.Fatalf("GET /status: %v", err)
 	}
@@ -2831,7 +2843,7 @@ func TestIntegration_AuthLimiter_BearerFailureCounted(t *testing.T) {
 	}
 
 	// Read /metrics and verify invalid_token counter is non-zero.
-	mResp, err := http.Get(base + "/metrics")
+	mResp, err := bc.Get(base + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
@@ -2901,7 +2913,7 @@ func TestIntegration_CaptureBind_HonoredAtListen(t *testing.T) {
 		t.Fatalf("timed out waiting for capture port address in logs:\n%s", logBuf.String())
 	}
 
-	resp, err := http.Post("http://"+captureAddr+"/bind-test", "text/plain", strings.NewReader("hello"))
+	resp, err := testClient(t).Post("http://"+captureAddr+"/bind-test", "text/plain", strings.NewReader("hello"))
 	if err != nil {
 		t.Fatalf("POST to capture: %v", err)
 	}
@@ -2924,7 +2936,7 @@ func TestIntegration_AuthLimiter_MetricsExposed(t *testing.T) {
 	const token = "a-very-long-admin-token-for-integration-testing-32e"
 	base, _ := adminAddr(t, token)
 
-	resp, err := http.Get(base + "/metrics")
+	resp, err := testClient(t).Get(base + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
@@ -2955,11 +2967,7 @@ func TestIntegration_CSRF_LogoutCrossSite_Blocked_SessionSurvives(t *testing.T) 
 	const token = "a-very-long-admin-token-for-integration-testing-csrf1"
 	base, _ := adminAddr(t, token)
 
-	noFollow := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	noFollow := noFollowClient(t)
 
 	// Obtain a session by logging in with the correct token.
 	form := url.Values{"token": {token}}
@@ -3012,7 +3020,7 @@ func TestIntegration_CSRF_LogoutCrossSite_Blocked_SessionSurvives(t *testing.T) 
 	}
 
 	// The csrf_blocked counter must be visible in /metrics.
-	mResp, err := http.Get(base + "/metrics")
+	mResp, err := noFollow.Get(base + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}

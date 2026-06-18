@@ -14,26 +14,13 @@ import (
 
 	"github.com/radarnex/httpcatch/internal/admin"
 	"github.com/radarnex/httpcatch/internal/capture"
-	"github.com/radarnex/httpcatch/internal/config"
 	"github.com/radarnex/httpcatch/internal/sinks"
 )
 
 // newInspectServer builds a test httptest.Server with the given readers wired in.
 func newInspectServer(t *testing.T, readers admin.ReadSources) *httptest.Server {
 	t.Helper()
-	cfg := config.AdminConfig{
-		Bind:          "127.0.0.1:0",
-		Token:         testAdminToken,
-		SessionTTL:    time.Hour,
-		SessionSecure: false,
-	}
-	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{}, admin.ServerOptions{Readers: readers})
-	if err != nil {
-		t.Fatalf("admin.New: %v", err)
-	}
-	ts := httptest.NewServer(srv.Router())
-	t.Cleanup(ts.Close)
-	return ts
+	return newAdminTestServer(t, testAdminToken, readers)
 }
 
 // getRequests sends an authenticated GET /requests request and returns the
@@ -46,7 +33,7 @@ func getRequests(t *testing.T, ts *httptest.Server, query string) *http.Response
 	}
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests: %v", err)
 	}
@@ -73,7 +60,7 @@ func TestRequests_NoAuth_Returns401(t *testing.T) {
 
 	ts := newInspectServer(t, admin.ReadSources{})
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/requests", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests: %v", err)
 	}
@@ -563,7 +550,7 @@ func getRequestDetail(t *testing.T, ts *httptest.Server, id string) *http.Respon
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/requests/"+id, nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests/%s: %v", id, err)
 	}
@@ -590,7 +577,7 @@ func TestRequestDetail_NoAuth_Returns401(t *testing.T) {
 
 	ts := newInspectServer(t, admin.ReadSources{})
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/requests/some-id", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests/some-id: %v", err)
 	}
@@ -1024,7 +1011,7 @@ func TestRequestsAggregate_TotalAcrossPages(t *testing.T) {
 	}.Encode()
 	req, _ := http.NewRequest(http.MethodGet, u, nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET aggregate: %v", err)
 	}
@@ -1058,7 +1045,7 @@ func TestRequestsAggregate_InvalidBuckets(t *testing.T) {
 	u := ts.URL + "/requests/aggregate?buckets=0"
 	req, _ := http.NewRequest(http.MethodGet, u, nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET aggregate: %v", err)
 	}
@@ -1077,7 +1064,7 @@ func getAggregate(t *testing.T, ts *httptest.Server, query string) *http.Respons
 	}
 	req, _ := http.NewRequest(http.MethodGet, u, nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /requests/aggregate: %v", err)
 	}

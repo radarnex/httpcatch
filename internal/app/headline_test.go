@@ -83,7 +83,8 @@ func adminGet(t *testing.T, adminURL, path string) (int, map[string]any) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, adminURL+path, nil)
 	req.Header.Set("Authorization", "Bearer "+headlineToken)
-	resp, err := http.DefaultClient.Do(req)
+	c := testClient(t)
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}
@@ -100,7 +101,8 @@ func adminGetRaw(t *testing.T, adminURL, path string) string {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, adminURL+path, nil)
 	req.Header.Set("Authorization", "Bearer "+headlineToken)
-	resp, err := http.DefaultClient.Do(req)
+	c := testClient(t)
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}
@@ -116,7 +118,8 @@ func postEvent(t *testing.T, adminURL string, payload any) int {
 	req, _ := http.NewRequest(http.MethodPost, adminURL+"/events", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+headlineToken)
-	resp, err := http.DefaultClient.Do(req)
+	c := testClient(t)
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("POST /events: %v", err)
 	}

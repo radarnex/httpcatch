@@ -15,26 +15,15 @@ import (
 
 func newTestServer(t *testing.T, token string) *httptest.Server {
 	t.Helper()
-	cfg := config.AdminConfig{
-		Bind:          "127.0.0.1:0",
-		Token:         token,
-		SessionTTL:    time.Hour,
-		SessionSecure: false,
-	}
-	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{})
-	if err != nil {
-		t.Fatalf("admin.New: %v", err)
-	}
-	ts := httptest.NewServer(srv.Router())
-	t.Cleanup(ts.Close)
-	return ts
+	return newAdminTestServer(t, token, admin.ReadSources{})
 }
 
 func TestLoginPage_Returns200WithForm(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	resp, err := http.Get(ts.URL + "/login")
+	c := testClient(t)
+	resp, err := c.Get(ts.URL + "/login")
 	if err != nil {
 		t.Fatalf("GET /login: %v", err)
 	}
@@ -61,7 +50,8 @@ func TestLoginPage_NextParam_AppearsAsHiddenInput(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	resp, err := http.Get(ts.URL + "/login?next=/admin/ping")
+	c := testClient(t)
+	resp, err := c.Get(ts.URL + "/login?next=/admin/ping")
 	if err != nil {
 		t.Fatalf("GET /login?next=: %v", err)
 	}
@@ -78,7 +68,8 @@ func TestLoginPage_UnsafeNext_IsDropped(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	resp, err := http.Get(ts.URL + "/login?next=//evil.com")
+	c := testClient(t)
+	resp, err := c.Get(ts.URL + "/login?next=//evil.com")
 	if err != nil {
 		t.Fatalf("GET /login: %v", err)
 	}
@@ -97,7 +88,8 @@ func TestLoginPage_ErrParam_ShowsErrorMessage(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	resp, err := http.Get(ts.URL + "/login?err=1")
+	c := testClient(t)
+	resp, err := c.Get(ts.URL + "/login?err=1")
 	if err != nil {
 		t.Fatalf("GET /login?err=1: %v", err)
 	}
@@ -113,11 +105,7 @@ func TestLoginPost_CorrectToken_SetsCookieAndRedirects(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := noFollowClient(t)
 
 	form := url.Values{"token": {testAdminToken}}
 	resp, err := client.PostForm(ts.URL+"/auth/login", form)
@@ -161,11 +149,7 @@ func TestLoginPost_CorrectToken_WithNext_RedirectsToNext(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := noFollowClient(t)
 
 	form := url.Values{"token": {testAdminToken}, "next": {"/status"}}
 	resp, err := client.PostForm(ts.URL+"/auth/login", form)
@@ -184,9 +168,10 @@ func TestLoginPost_WrongToken_Returns401NoCookie(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
+	c := testClient(t)
 
 	form := url.Values{"token": {"wrong-token"}}
-	resp, err := http.PostForm(ts.URL+"/auth/login", form)
+	resp, err := c.PostForm(ts.URL+"/auth/login", form)
 	if err != nil {
 		t.Fatalf("POST /auth/login wrong token: %v", err)
 	}
@@ -195,8 +180,8 @@ func TestLoginPost_WrongToken_Returns401NoCookie(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status: got %d want 401", resp.StatusCode)
 	}
-	for _, c := range resp.Cookies() {
-		if c.Name == "httpcatch_session" {
+	for _, ck := range resp.Cookies() {
+		if ck.Name == "httpcatch_session" {
 			t.Error("Set-Cookie: httpcatch_session should not be set on wrong token")
 		}
 	}
@@ -210,9 +195,10 @@ func TestLoginPost_MissingToken_Returns400(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
+	c := testClient(t)
 
 	form := url.Values{}
-	resp, err := http.PostForm(ts.URL+"/auth/login", form)
+	resp, err := c.PostForm(ts.URL+"/auth/login", form)
 	if err != nil {
 		t.Fatalf("POST /auth/login no token: %v", err)
 	}
@@ -245,11 +231,7 @@ func TestLogout_ValidCookie_RevokesAndRedirects(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	// First log in through the test server to get a real session in its store.
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := noFollowClient(t)
 	form := url.Values{"token": {testAdminToken}}
 	loginResp, err := client.PostForm(ts.URL+"/auth/login", form)
 	if err != nil {
@@ -318,11 +300,7 @@ func TestLogout_NoCookie_NocrashAnd303(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := noFollowClient(t)
 
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/auth/logout", nil)
 	resp, err := client.Do(req)
@@ -340,11 +318,7 @@ func TestLogout_BogusCookie_NocrashAnd303(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestServer(t, testAdminToken)
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := noFollowClient(t)
 
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: "httpcatch_session", Value: "total-garbage"})

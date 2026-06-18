@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/radarnex/httpcatch/internal/capture"
 	"github.com/radarnex/httpcatch/internal/pipeline"
@@ -65,15 +64,6 @@ func TestWorkerPool_PanicInRedact_WorkerContinues(t *testing.T) {
 	// Enqueue a record that will panic the redactor, followed by a normal one.
 	q.Enqueue(makeRequest("panic-me"))
 	q.Enqueue(makeRequest("normal-1"))
-
-	// Wait for the normal record to arrive in the sink.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(sink.Records()) >= 1 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 
 	q.Close()
 	pool.Wait()

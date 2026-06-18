@@ -116,10 +116,11 @@ func TestHealthz_Returns200Ok(t *testing.T) {
 	<-ready
 
 	// Give the server a moment to bind.
+	c := testClient(t)
 	var resp *http.Response
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err = http.Get("http://" + addr + "/healthz")
+		resp, err = c.Get("http://" + addr + "/healthz")
 		if err == nil {
 			break
 		}
@@ -167,12 +168,13 @@ func TestHealthz_IgnoresBogusAuthHeader(t *testing.T) {
 	go func() { _ = srv.Serve(ctx) }()
 
 	// Wait for the server to bind.
+	c := testClient(t)
 	var resp *http.Response
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/healthz", nil)
 		req.Header.Set("Authorization", "Bearer bogus-token-xxx")
-		resp, err = http.DefaultClient.Do(req)
+		resp, err = c.Do(req)
 		if err == nil {
 			break
 		}

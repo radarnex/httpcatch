@@ -51,9 +51,10 @@ func startServerWithReaders(t *testing.T, token string, readers admin.ReadSource
 	go func() { _ = srv.Serve(ctx) }()
 
 	// Wait until the server is reachable.
+	c := testClient(t)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err2 := http.Get("http://" + addr + "/healthz")
+		resp, err2 := c.Get("http://" + addr + "/healthz")
 		if err2 == nil {
 			resp.Body.Close()
 			break
@@ -63,19 +64,11 @@ func startServerWithReaders(t *testing.T, token string, readers admin.ReadSource
 	return "http://" + addr
 }
 
-func noFollowClient() *http.Client {
-	return &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
 func TestE2E_CookieAuthFlow(t *testing.T) {
 	t.Parallel()
 
 	base := startServer(t, testAdminToken)
-	client := noFollowClient()
+	client := noFollowClient(t)
 
 	// Step 1: unauthenticated request with Accept: text/html → 303 to login.
 	req1, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
@@ -170,7 +163,7 @@ func TestE2E_BearerAuthFlow(t *testing.T) {
 	t.Parallel()
 
 	base := startServer(t, testAdminToken)
-	client := noFollowClient()
+	client := noFollowClient(t)
 
 	// Valid bearer → 200.
 	req1, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
@@ -243,7 +236,7 @@ func TestE2E_Requests_QParameter(t *testing.T) {
 	}
 
 	srvURL := startServerWithReaders(t, testAdminToken, admin.ReadSources{SQLite: sq})
-	client := &http.Client{}
+	client := testClient(t)
 
 	q := url.QueryEscape("service:orders method:POST")
 	req, _ := http.NewRequest(http.MethodGet, srvURL+"/requests?q="+q, nil)
@@ -319,7 +312,8 @@ func TestE2E_UI_MultiFeatureQuery_ChipsBannerRowsConsistent(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, srvURL+"/ui/requests?"+allTimeWindow+"&q="+url.QueryEscape(q), nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "text/html")
-	resp, err := http.DefaultClient.Do(req)
+	c := testClient(t)
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("GET /ui/requests: %v", err)
 	}
@@ -364,13 +358,14 @@ func TestE2E_UI_ScanBanner_RendersForLeadingWildcardQuery(t *testing.T) {
 	t.Parallel()
 
 	srvURL := startServer(t, testAdminToken)
+	c := testClient(t)
 
 	fetch := func(q string) string {
 		t.Helper()
 		req, _ := http.NewRequest(http.MethodGet, srvURL+"/ui/requests?q="+url.QueryEscape(q), nil)
 		req.Header.Set("Authorization", "Bearer "+testAdminToken)
 		req.Header.Set("Accept", "text/html")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := c.Do(req)
 		if err != nil {
 			t.Fatalf("GET /ui/requests?q=%s: %v", q, err)
 		}

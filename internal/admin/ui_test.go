@@ -19,11 +19,7 @@ import (
 func newUIServer(t *testing.T, token string) (string, *http.Client) {
 	t.Helper()
 	ts := newTestServer(t, token)
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := noFollowClient(t)
 	return ts.URL, client
 }
 

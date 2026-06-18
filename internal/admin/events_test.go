@@ -69,7 +69,7 @@ func postEvents(t *testing.T, ts *httptest.Server, body string, token string) *h
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("POST /events: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestEvents_CookieAuth_Returns401(t *testing.T) {
 
 	// Create a valid session by logging in. Use a no-redirect client so the
 	// Set-Cookie from the 303 response is captured before the redirect is followed.
-	client := noFollowClient()
+	client := noFollowClient(t)
 	form := "token=" + testAdminToken
 	loginReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/auth/login",
 		strings.NewReader(form))
@@ -166,7 +166,7 @@ func TestEvents_CookieAuth_Returns401(t *testing.T) {
 		strings.NewReader(`{"type":"response","service":"svc","status":200,"duration_ms":1}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(sessionCookie)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("POST /events with cookie: %v", err)
 	}
@@ -926,13 +926,14 @@ func TestMetrics_EventsCountersPresent(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/events",
 		strings.NewReader(`{"type":"response","service":"svc","status":200,"duration_ms":1}`))
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, _ := http.DefaultClient.Do(req)
+	c := testClient(t)
+	resp, _ := c.Do(req)
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	drainQueue(t, q, 1)
 
 	// Fetch /metrics.
-	mResp, _ := http.Get(ts.URL + "/metrics")
+	mResp, _ := c.Get(ts.URL + "/metrics")
 	body, _ := io.ReadAll(mResp.Body)
 	mResp.Body.Close()
 
@@ -1692,7 +1693,7 @@ func TestMetrics_EventsDroppedQueueFullAndBodyTooLarge(t *testing.T) {
 	ts := httptest.NewServer(srv.Router())
 	t.Cleanup(ts.Close)
 
-	mResp, _ := http.Get(ts.URL + "/metrics")
+	mResp, _ := testClient(t).Get(ts.URL + "/metrics")
 	body, _ := io.ReadAll(mResp.Body)
 	mResp.Body.Close()
 

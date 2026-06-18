@@ -15,26 +15,13 @@ import (
 
 	"github.com/radarnex/httpcatch/internal/admin"
 	"github.com/radarnex/httpcatch/internal/capture"
-	"github.com/radarnex/httpcatch/internal/config"
 	"github.com/radarnex/httpcatch/internal/sinks"
 )
 
 // newUIViewServer builds a test server with the given readers wired in.
 func newUIViewServer(t *testing.T, readers admin.ReadSources) *httptest.Server {
 	t.Helper()
-	cfg := config.AdminConfig{
-		Bind:          "127.0.0.1:0",
-		Token:         testAdminToken,
-		SessionTTL:    time.Hour,
-		SessionSecure: false,
-	}
-	srv, err := admin.New(cfg, discardLogger(), admin.MetricSources{}, admin.ServerOptions{Readers: readers})
-	if err != nil {
-		t.Fatalf("admin.New: %v", err)
-	}
-	ts := httptest.NewServer(srv.Router())
-	t.Cleanup(ts.Close)
-	return ts
+	return newAdminTestServer(t, testAdminToken, readers)
 }
 
 // allTimeWindow widens the explorer window past the requestListHandler's
@@ -48,20 +35,11 @@ func getUIPage(t *testing.T, ts *httptest.Server, path string) *http.Response {
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+path, nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "text/html")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}
 	return resp
-}
-
-// noFollowUIClient returns an http.Client that does not follow redirects.
-func noFollowUIClient() *http.Client {
-	return &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 }
 
 // parseHTML parses the response body as HTML and returns the root node.
@@ -142,7 +120,7 @@ func TestUIRequests_NoAuth_Redirects303(t *testing.T) {
 	t.Parallel()
 
 	ts := newUIViewServer(t, admin.ReadSources{})
-	client := noFollowUIClient()
+	client := noFollowClient(t)
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests", nil)
 	req.Header.Set("Accept", "text/html")
@@ -210,7 +188,7 @@ func TestUIRequests_FilterRoundTrip(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests?q="+url.QueryEscape(q), nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "text/html")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -248,7 +226,7 @@ func TestUIRequests_ChipsForWildcardQuotedNegated(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests?q="+url.QueryEscape(q), nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "text/html")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -296,7 +274,7 @@ func TestUIRequests_HeaderChips_Rendering(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests?q="+url.QueryEscape(q), nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "text/html")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -355,7 +333,7 @@ func TestUIRequests_FreeformChips_Rendering(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests?q="+url.QueryEscape(q), nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
 	req.Header.Set("Accept", "text/html")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -865,7 +843,7 @@ func TestUIRequestDetail_NoAuth_Redirects303(t *testing.T) {
 	t.Parallel()
 
 	ts := newUIViewServer(t, admin.ReadSources{})
-	client := noFollowUIClient()
+	client := noFollowClient(t)
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/ui/requests/some-id", nil)
 	req.Header.Set("Accept", "text/html")

@@ -50,7 +50,7 @@ func decodeStatus(t *testing.T, ts *httptest.Server) map[string]any {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/status", nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /status: %v", err)
 	}
@@ -133,11 +133,7 @@ func TestStatus_CookieAuth_200(t *testing.T) {
 	t.Parallel()
 
 	ts := newStatusServer(t, fakeSourcesWith(0, 0, 0, 0, false))
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := noFollowClient(t)
 
 	// Log in to get a session cookie.
 	form := url.Values{"token": {testAdminToken}}
@@ -176,9 +172,10 @@ func TestStatus_NoAuth_APIClient_401(t *testing.T) {
 	t.Parallel()
 
 	ts := newStatusServer(t, fakeSourcesWith(0, 0, 0, 0, false))
+	c := testClient(t)
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/status", nil)
 	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("GET /status no auth: %v", err)
 	}
@@ -197,11 +194,7 @@ func TestStatus_NoAuth_HTMLClient_303(t *testing.T) {
 	t.Parallel()
 
 	ts := newStatusServer(t, fakeSourcesWith(0, 0, 0, 0, false))
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := noFollowClient(t)
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/status", nil)
 	req.Header.Set("Accept", "text/html")
 	resp, err := client.Do(req)
@@ -252,7 +245,7 @@ func TestStatus_AllFieldsPresentWhenZero(t *testing.T) {
 	// Decode into typed struct to confirm types.
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/status", nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("GET /status: %v", err)
 	}
@@ -281,9 +274,10 @@ func TestStatus_ContentTypeAndCacheControl(t *testing.T) {
 	t.Parallel()
 
 	ts := newStatusServer(t, fakeSourcesWith(0, 0, 0, 0, false))
+	c := testClient(t)
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/status", nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("GET /status: %v", err)
 	}
@@ -386,9 +380,10 @@ func TestAdminPing_Removed(t *testing.T) {
 	t.Parallel()
 
 	ts := newStatusServer(t, fakeSourcesWith(0, 0, 0, 0, false))
+	c := testClient(t)
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/admin/ping", nil)
 	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("GET /admin/ping: %v", err)
 	}
